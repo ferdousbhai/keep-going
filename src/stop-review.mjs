@@ -28,17 +28,18 @@ const RUNTIMES = {
 
 // Validate the reviewer's tiny provider-independent protocol before translating
 // it to the host-specific Stop-hook JSON.
-const REVIEW_VERDICTS = new Set(["CONTINUE", "CONSULT", "STOP"]);
+const REVIEW_VERDICTS = new Set(["CONTINUE", "JUDGE", "STOP"]);
 
 const REVIEW_PROMPT = `Classify last_assistant_message:
 
 CONTINUE — required work remains that the agent can perform now.
-CONSULT — an unresolved question can be answered by the advisor.
-STOP — work is complete, or progress requires the user or an external state change.
+JUDGE — it asks the user for input, but more reasoning or researching should unblock it.
+STOP — work is complete, or progress genuinely requires the user or an external state change.
 
+Prefer JUDGE over STOP when the request for input looks self-resolvable by the agent.
 Do not default to any outcome or invent unstated work.
 
-Reply with exactly one word: CONTINUE, CONSULT, or STOP.`;
+Reply with exactly one word: CONTINUE, JUDGE, or STOP.`;
 
 function redactSensitive(value) {
   return value
@@ -488,15 +489,18 @@ async function runReviewModel(options) {
 function parseReviewVerdict(text) {
   const verdict = String(text ?? "").trim();
   if (!REVIEW_VERDICTS.has(verdict)) {
-    throw new Error("Reviewer output must be exactly CONTINUE, CONSULT, or STOP");
+    throw new Error("Reviewer output must be exactly CONTINUE, JUDGE, or STOP");
   }
   return verdict;
 }
 
 function hookOutputForVerdict(verdict) {
   if (verdict === "CONTINUE") return { decision: "block", reason: "Please continue." };
-  if (verdict === "CONSULT") {
-    return { decision: "block", reason: "Follow the advisor recommendation." };
+  if (verdict === "JUDGE") {
+    return {
+      decision: "block",
+      reason: "Do not ask the user yet. Apply more reasoning or research to unblock yourself; only stop if genuinely blocked.",
+    };
   }
   return {};
 }

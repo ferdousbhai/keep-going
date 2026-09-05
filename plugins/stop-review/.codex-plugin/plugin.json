@@ -13,7 +13,7 @@
   "interface": {
     "displayName": "Stop Review",
     "shortDescription": "Continue incomplete Codex turns automatically.",
-    "longDescription": "Classifies the last assistant message as CONTINUE, CONSULT, or STOP, then emits the exact Codex Stop-hook response.",
+    "longDescription": "Classifies the last assistant message as CONTINUE, JUDGE, or STOP, then emits the exact Codex Stop-hook response.",
     "developerName": "Ferdous Bhai",
     "category": "Productivity",
     "capabilities": ["Lifecycle hooks"],

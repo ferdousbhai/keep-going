@@ -16,11 +16,11 @@ import * as bundled from "../plugins/stop-review/scripts/stop-review.mjs";
 
 const stopResponse = "STOP";
 const continueResponse = "CONTINUE";
-const consultResponse = "CONSULT";
+const judgeResponse = "JUDGE";
 
 test("review policy uses the minimal three-verdict protocol", () => {
   assert.match(REVIEW_PROMPT, /CONTINUE — required work remains/);
-  assert.match(REVIEW_PROMPT, /CONSULT — an unresolved question/);
+  assert.match(REVIEW_PROMPT, /JUDGE — it asks the user/);
   assert.match(REVIEW_PROMPT, /STOP — work is complete/);
   assert.match(REVIEW_PROMPT, /Reply with exactly one word/);
   assert.doesNotMatch(REVIEW_PROMPT, /JSON|GitHub|project|conversation|transcript/i);
@@ -391,14 +391,14 @@ test("CONTINUE maps to the fixed Stop-hook continuation", { concurrency: false }
   }
 });
 
-test("CONSULT maps to the fixed advisor continuation", { concurrency: false }, async () => {
+test("JUDGE maps to the fixed judgement continuation", { concurrency: false }, async () => {
   const context = await fixture();
   try {
-    process.env.MOCK_REVIEW_RESPONSE = consultResponse;
+    process.env.MOCK_REVIEW_RESPONSE = judgeResponse;
     const output = await handleStop(context.input);
     assert.deepEqual(output, {
       decision: "block",
-      reason: "Follow the advisor recommendation.",
+      reason: "Do not ask the user yet. Apply more reasoning or research to unblock yourself; only stop if genuinely blocked.",
     });
     assert.deepEqual((await context.calls()).map((item) => item.model), ["gpt-5.6-luna"]);
   } finally {
@@ -420,9 +420,9 @@ test("human-only blockers stop without another prompt", { concurrency: false }, 
 test("invalid reviewer verdict fails open", { concurrency: false }, async () => {
   const context = await fixture();
   try {
-    process.env.MOCK_REVIEW_RESPONSE = "CONSULT_ADVISOR";
+    process.env.MOCK_REVIEW_RESPONSE = "JUDGE_ADVISOR";
     const output = await handleStop(context.input);
-    assert.match(output.systemMessage, /exactly CONTINUE, CONSULT, or STOP/);
+    assert.match(output.systemMessage, /exactly CONTINUE, JUDGE, or STOP/);
   } finally {
     await context.cleanup();
   }
@@ -478,11 +478,11 @@ test("Claude uses Sonnet with its default effort for classification", { concurre
 test("Ghost delegates classification to its smol-model bridge", { concurrency: false }, async () => {
   const context = await ghostFixture();
   try {
-    process.env.MOCK_REVIEW_RESPONSE = consultResponse;
+    process.env.MOCK_REVIEW_RESPONSE = judgeResponse;
     const output = await handleStop(context.input, "ghost");
     assert.deepEqual(output, {
       decision: "block",
-      reason: "Follow the advisor recommendation.",
+      reason: "Do not ask the user yet. Apply more reasoning or research to unblock yourself; only stop if genuinely blocked.",
     });
     const [call] = await context.calls();
     assert.deepEqual(call.args, ["hook-smol-complete"]);
@@ -496,22 +496,22 @@ test("Ghost delegates classification to its smol-model bridge", { concurrency: f
 });
 
 test("verdict parsing accepts only the exact review enum", () => {
-  for (const verdict of ["CONTINUE", "CONSULT", "STOP"]) {
+  for (const verdict of ["CONTINUE", "JUDGE", "STOP"]) {
     assert.equal(parseReviewVerdict(` ${verdict}\n`), verdict);
   }
-  for (const invalid of ["continue", "CONSULT_ADVISOR", "STOP now", "{}", "", null, undefined]) {
-    assert.throws(() => parseReviewVerdict(invalid), /exactly CONTINUE, CONSULT, or STOP/);
+  for (const invalid of ["continue", "CONSULT", "JUDGE_ADVISOR", "STOP now", "{}", "", null, undefined]) {
+    assert.throws(() => parseReviewVerdict(invalid), /exactly CONTINUE, JUDGE, or STOP/);
   }
   assert.deepEqual(hookOutputForVerdict("CONTINUE"), { decision: "block", reason: "Please continue." });
-  assert.deepEqual(hookOutputForVerdict("CONSULT"), {
+  assert.deepEqual(hookOutputForVerdict("JUDGE"), {
     decision: "block",
-    reason: "Follow the advisor recommendation.",
+    reason: "Do not ask the user yet. Apply more reasoning or research to unblock yourself; only stop if genuinely blocked.",
   });
   assert.deepEqual(hookOutputForVerdict("STOP"), {});
 });
 
 test("bundled plugin preserves the validated verdict protocol", () => {
-  for (const verdict of ["CONTINUE", "CONSULT", "STOP"]) {
+  for (const verdict of ["CONTINUE", "JUDGE", "STOP"]) {
     assert.equal(bundled.parseReviewVerdict(verdict), verdict);
     assert.deepEqual(bundled.hookOutputForVerdict(verdict), hookOutputForVerdict(verdict));
   }
