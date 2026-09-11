@@ -5,9 +5,8 @@ remains.
 
 ## Prerequisites
 
-No advisor sub-agent is required. When the agent asks the user for input that
-more reasoning or research should unblock, Stop Review tells it to keep
-working instead of stopping.
+When the agent asks the user for input that more reasoning or research should
+unblock, Stop Review tells it to keep working instead of stopping.
 
 Stop Review permits at most 20 automatic continuations for one owner turn.
 After the cap is reached, it accepts the next stop without another review. A
