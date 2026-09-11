@@ -326,11 +326,17 @@ function runProcess(command, args, input, timeoutMs, env = process.env, cwd) {
       settled = true;
       clearTimeout(timer);
       child.kill("SIGKILL");
+      // SIGKILL reaches the direct child only and "close" waits for every
+      // inherited pipe, so a surviving grandchild would otherwise keep this
+      // process alive after it has already failed open.
+      child.stdout.destroy();
+      child.stderr.destroy();
+      child.stdin.destroy();
       reject(error);
     };
 
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
+      fail(new Error(`${command} timed out after ${timeoutMs} ms`));
     }, timeoutMs);
 
     child.on("error", (error) => {
