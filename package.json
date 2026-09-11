@@ -23,8 +23,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.mjs",
-    "check": "npm run build && npm test",
-    "prepare": "npm run build"
+    "check": "npm run build && npm test"
   },
   "devDependencies": {
     "esbuild": "0.25.9"
