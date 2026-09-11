@@ -552,7 +552,7 @@ async function handleStop(input, runner = "codex") {
     verdict = parseReviewVerdict(
       await runReviewModel({
         provider: runtime.provider,
-        model: process.env[runtime.modelEnv] || runtime.model,
+        model: runtime.modelEnv ? process.env[runtime.modelEnv] || runtime.model : runtime.model,
         prompt: `${REVIEW_PROMPT}\n\n${JSON.stringify({ last_assistant_message: lastAssistantMessage })}`,
         timeoutMs: CLASSIFIER_TIMEOUT_MS,
         ghostHome: runner === "ghost" ? input.ghost_home : undefined,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -464,6 +464,26 @@ test("bundled plugin preserves the validated verdict protocol", () => {
     assert.deepEqual(bundled.hookOutputForVerdict(verdict), hookOutputForVerdict(verdict));
   }
   assert.equal(bundled.REVIEW_PROMPT, REVIEW_PROMPT);
+});
+
+test("the shipped plugin bundles no runtime dependency", async () => {
+  // v0.1.1 dropped Zod to keep the hook cheap to install and start. Nothing
+  // else would notice a dependency reappearing: the CI drift check only proves
+  // the bundle matches src, not that src stayed dependency-free.
+  const manifest = JSON.parse(
+    await readFile(new URL("../package.json", import.meta.url), "utf8")
+  );
+  assert.deepEqual(manifest.dependencies ?? {}, {});
+
+  const bundlePath = new URL("../plugins/stop-review/scripts/stop-review.mjs", import.meta.url);
+  const bundle = await stat(bundlePath);
+  assert.ok(bundle.size < 16 * 1024, `expected bundle below 16 KiB, received ${bundle.size} bytes`);
+
+  const source = await readFile(bundlePath, "utf8");
+  const bareImports = [...source.matchAll(/^\s*import[^\n]*?from\s+"([^"]+)"/gm)]
+    .map((match) => match[1])
+    .filter((specifier) => !specifier.startsWith("node:") && !specifier.startsWith("."));
+  assert.deepEqual(bareImports, [], `bundle imports a package: ${bareImports.join(", ")}`);
 });
 
 test("Claude stops unconditionally once the continuation cap is reached", { concurrency: false }, async () => {
