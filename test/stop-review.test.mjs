@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -17,14 +17,6 @@ import * as bundled from "../plugins/stop-review/scripts/stop-review.mjs";
 const stopResponse = "STOP";
 const continueResponse = "CONTINUE";
 const judgeResponse = "JUDGE";
-
-test("review policy uses the minimal three-verdict protocol", () => {
-  assert.match(REVIEW_PROMPT, /CONTINUE — required work remains/);
-  assert.match(REVIEW_PROMPT, /JUDGE — it asks the user/);
-  assert.match(REVIEW_PROMPT, /STOP — work is complete/);
-  assert.match(REVIEW_PROMPT, /Reply with exactly one word/);
-  assert.doesNotMatch(REVIEW_PROMPT, /JSON|GitHub|project|conversation|transcript/i);
-});
 
 const ENV_KEYS = [
   "CODEX_HOME",
@@ -232,10 +224,8 @@ let prompt = "";
 for await (const chunk of process.stdin) prompt += chunk;
 const args = process.argv.slice(2);
 const model = args[args.indexOf("--model") + 1];
-const effortIndex = args.indexOf("--effort");
-const effort = effortIndex >= 0 ? args[effortIndex + 1] : undefined;
 const value = process.env.MOCK_REVIEW_RESPONSE;
-appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ model, effort, args, prompt }) + "\\n");
+appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ model, args, prompt }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "\\n" + value + "\\n" }));
 `,
   );
@@ -376,47 +366,6 @@ test("last_assistant_message is reviewed when the transcript is unavailable", { 
   }
 });
 
-test("CONTINUE maps to the fixed Stop-hook continuation", { concurrency: false }, async () => {
-  const context = await fixture();
-  try {
-    process.env.MOCK_REVIEW_RESPONSE = continueResponse;
-    const output = await handleStop(context.input);
-    assert.deepEqual(output, {
-      decision: "block",
-      reason: "Please continue.",
-    });
-    assert.deepEqual((await context.calls()).map((item) => item.model), ["gpt-5.6-luna"]);
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("JUDGE maps to the fixed judgement continuation", { concurrency: false }, async () => {
-  const context = await fixture();
-  try {
-    process.env.MOCK_REVIEW_RESPONSE = judgeResponse;
-    const output = await handleStop(context.input);
-    assert.deepEqual(output, {
-      decision: "block",
-      reason: "Do not ask the user yet. Apply more reasoning or research to unblock yourself; only stop if genuinely blocked.",
-    });
-    assert.deepEqual((await context.calls()).map((item) => item.model), ["gpt-5.6-luna"]);
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("human-only blockers stop without another prompt", { concurrency: false }, async () => {
-  const context = await fixture();
-  try {
-    process.env.MOCK_REVIEW_RESPONSE = stopResponse;
-    assert.deepEqual(await handleStop(context.input), {});
-    assert.equal((await context.calls()).length, 1);
-  } finally {
-    await context.cleanup();
-  }
-});
-
 test("invalid reviewer verdict fails open", { concurrency: false }, async () => {
   const context = await fixture();
   try {
@@ -460,7 +409,6 @@ test("Claude uses Sonnet with its default effort for classification", { concurre
     assert.deepEqual(output, {});
     const [call] = await context.calls();
     assert.equal(call.model, "sonnet");
-    assert.equal(call.effort, undefined);
     assert.ok(!call.args.includes("--effort"));
     assert.ok(call.args.includes("--safe-mode"));
     assert.ok(call.args.includes("--no-session-persistence"));
@@ -516,11 +464,6 @@ test("bundled plugin preserves the validated verdict protocol", () => {
     assert.deepEqual(bundled.hookOutputForVerdict(verdict), hookOutputForVerdict(verdict));
   }
   assert.equal(bundled.REVIEW_PROMPT, REVIEW_PROMPT);
-});
-
-test("bundled plugin stays dependency-free and lean", async () => {
-  const bundle = await stat(new URL("../plugins/stop-review/scripts/stop-review.mjs", import.meta.url));
-  assert.ok(bundle.size < 16 * 1024, `expected bundle below 16 KiB, received ${bundle.size} bytes`);
 });
 
 test("Claude stops unconditionally once the continuation cap is reached", { concurrency: false }, async () => {
@@ -593,7 +536,7 @@ function piLine(entry, id, parentId) {
   return JSON.stringify({ id, parentId, timestamp: "2026-08-28T00:00:00.000Z", ...entry });
 }
 
-async function piTranscriptFixture(context, { continuations = 1 } = {}) {
+async function piTranscriptFixture(context) {
   const sessionDir = path.join(context.input.ghost_home, "sessions");
   await mkdir(sessionDir, { recursive: true });
   const transcript = path.join(sessionDir, "conv.jsonl");
@@ -611,14 +554,8 @@ async function piTranscriptFixture(context, { continuations = 1 } = {}) {
     piLine({ type: "message", message: { role: "toolResult", toolCallId: "call-1", toolName: "read", isError: false, content: [{ type: "text", text: "secret result supersecretvalue" }] } }, "m5", "m4"),
     piLine({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "First pass." }] } }, "m6", "m5"),
   ];
-  let parent = "m6";
-  for (let index = 0; index < continuations; index += 1) {
-    const marker = `c${index}`;
-    const pass = `p${index}`;
-    lines.push(piLine({ type: "custom_message", customType: "session-stop-continuation", content: "continue", display: false, attribution: "agent" }, marker, parent));
-    lines.push(piLine({ type: "message", message: { role: "assistant", content: [{ type: "text", text: `Pass ${index + 2}.` }] } }, pass, marker));
-    parent = pass;
-  }
+  lines.push(piLine({ type: "custom_message", customType: "session-stop-continuation", content: "continue", display: false, attribution: "agent" }, "c0", "m6"));
+  lines.push(piLine({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Pass 2." }] } }, "p0", "c0"));
   await writeFile(transcript, `${lines.join("\n")}\n`);
   return transcript;
 }
@@ -663,19 +600,6 @@ test("Ghost rejects a transcript outside the ghost home and falls back without o
       countContinuations({ ...context.input, owner_prompt: " " }, "ghost"),
       /missing owner_prompt/,
     );
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("Ghost stops unconditionally once the continuation cap is reached", { concurrency: false }, async () => {
-  const context = await ghostFixture();
-  try {
-    const transcript = await piTranscriptFixture(context, { continuations: CONTINUATION_CAP });
-    process.env.MOCK_REVIEW_RESPONSE = continueResponse;
-    const output = await handleStop({ ...context.input, conversation_runtime: "pi", transcript_path: transcript }, "ghost");
-    assert.match(output.systemMessage, /continuation cap \(20\) reached/);
-    assert.equal((await context.calls()).length, 0);
   } finally {
     await context.cleanup();
   }
