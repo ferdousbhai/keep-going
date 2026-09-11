@@ -15,15 +15,9 @@ const CLASSIFIER_TIMEOUT_MS = 180_000;
 const CONTINUATION_CAP = 20;
 
 const RUNTIMES = {
-  codex: {
-    reviewer: { provider: "codex", model: "gpt-5.6-luna" },
-  },
-  claude: {
-    reviewer: { provider: "claude", model: "sonnet" },
-  },
-  ghost: {
-    reviewer: { provider: "ghost" },
-  },
+  codex: { provider: "codex", model: "gpt-5.6-luna", modelEnv: "STOP_REVIEW_CODEX_MODEL" },
+  claude: { provider: "claude", model: "sonnet", modelEnv: "STOP_REVIEW_CLAUDE_MODEL" },
+  ghost: { provider: "ghost" },
 };
 
 // Validate the reviewer's tiny provider-independent protocol before translating
@@ -87,7 +81,6 @@ function recordTurnId(record) {
   return (
     record?.payload?.turn_id ??
     record?.payload?.internal_chat_message_metadata_passthrough?.turn_id ??
-    record?.payload?.item?.turn_id ??
     null
   );
 }
@@ -141,7 +134,6 @@ async function allowedTranscriptPath(transcriptPath, runner = "codex", roots) {
         path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "sessions"),
         path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "archived_sessions"),
       ]);
-  if (!allowedRoots.length) throw new Error(`no transcript roots are known for the ${runner} runtime`);
 
   for (const root of allowedRoots) {
     if (typeof root !== "string" || !root) continue;
@@ -559,12 +551,8 @@ async function handleStop(input, runner = "codex") {
 
     verdict = parseReviewVerdict(
       await runReviewModel({
-        ...runtime.reviewer,
-        model: runner === "codex"
-          ? process.env.STOP_REVIEW_CODEX_MODEL || runtime.reviewer.model
-          : runner === "claude"
-            ? process.env.STOP_REVIEW_CLAUDE_MODEL || runtime.reviewer.model
-            : undefined,
+        provider: runtime.provider,
+        model: process.env[runtime.modelEnv] || runtime.model,
         prompt: `${REVIEW_PROMPT}\n\n${JSON.stringify({ last_assistant_message: lastAssistantMessage })}`,
         timeoutMs: CLASSIFIER_TIMEOUT_MS,
         ghostHome: runner === "ghost" ? input.ghost_home : undefined,
@@ -602,6 +590,4 @@ export {
   handleStop,
   hookOutputForVerdict,
   parseReviewVerdict,
-  runClaudeModel,
-  runCodexModel,
 };
