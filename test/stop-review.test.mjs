@@ -466,6 +466,19 @@ test("bundled plugin preserves the validated verdict protocol", () => {
   assert.equal(bundled.REVIEW_PROMPT, REVIEW_PROMPT);
 });
 
+test("the Codex plugin manifest declares the package version", async () => {
+  // v0.1.1 shipped a manifest still declaring 0.1.0, so the marketplace
+  // reported the wrong version for the whole release. Nothing referenced both
+  // files, so the drift was invisible until someone read them side by side.
+  const read = async (relative) =>
+    JSON.parse(await readFile(new URL(relative, import.meta.url), "utf8"));
+  const [pkg, plugin] = await Promise.all([
+    read("../package.json"),
+    read("../plugins/stop-review/.codex-plugin/plugin.json"),
+  ]);
+  assert.equal(plugin.version, pkg.version);
+});
+
 test("the shipped plugin bundles no runtime dependency", async () => {
   // v0.1.1 dropped Zod to keep the hook cheap to install and start. Nothing
   // else would notice a dependency reappearing: the CI drift check only proves

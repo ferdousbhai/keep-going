@@ -1,6 +1,6 @@
 {
   "name": "stop-review",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Review the last assistant message before a Codex turn stops.",
   "author": {
     "name": "Ferdous Bhai",

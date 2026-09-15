@@ -21,7 +21,7 @@ new owner prompt starts a fresh count.
 ### Codex
 
 ```bash
-codex plugin marketplace add ferdousbhai/stop-review --ref v0.1.1
+codex plugin marketplace add ferdousbhai/stop-review --ref v0.2.0
 codex plugin add stop-review@stop-review
 ```
 
@@ -30,11 +30,11 @@ Start a new Codex session after installation.
 ### Claude Code
 
 ```bash
-npx --yes github:ferdousbhai/stop-review#v0.1.1 --claude
+npx --yes github:ferdousbhai/stop-review#v0.2.0 --claude
 ```
 
 ### Ghost
 
 ```bash
-npx --yes github:ferdousbhai/stop-review#v0.1.1 --ghost
+npx --yes github:ferdousbhai/stop-review#v0.2.0 --ghost
 ```
