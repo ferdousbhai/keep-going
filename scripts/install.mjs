@@ -24,13 +24,14 @@ const BUNDLED_HOOK = path.join(
 const STATUS_MESSAGE = "Deciding whether to keep going";
 
 function usage() {
-  return `Install Keep Going for Claude Code and Ghost.
+  return `Install Keep Going for Claude Code, Ghost, and Grok Build.
 
 Usage:
   keep-going --claude
   keep-going --ghost
+  keep-going --grok
   keep-going --all
-  keep-going --uninstall --claude|--ghost|--all
+  keep-going --uninstall --claude|--ghost|--grok|--all
 
 Codex installs through the repository marketplace; see README.md.`;
 }
@@ -46,6 +47,15 @@ const TARGETS = {
   ghost: {
     event: "session_stop",
     settings: ({ configHome }) => path.join(configHome, "ghost", "hooks.json"),
+  },
+  // Grok's Claude compatibility layer reads ~/.claude/settings.json and lists
+  // a Stop hook found there as enabled — and never dispatches it. Only hooks
+  // in Grok's own directory are dispatched, so that is where this one goes,
+  // and a Claude install alone buys nothing under Grok.
+  grok: {
+    event: "Stop",
+    settings: ({ userHome }) =>
+      path.join(process.env.GROK_HOME || path.join(userHome, ".grok"), "hooks", "keep-going.json"),
   },
 };
 
@@ -142,7 +152,9 @@ async function main() {
     return;
   }
   const runtimes = selectedRuntimes(args);
-  if (runtimes.length === 0) throw new Error(`Select --claude, --ghost, or --all.\n\n${usage()}`);
+  if (runtimes.length === 0) {
+    throw new Error(`Select ${new Intl.ListFormat("en", { type: "disjunction" }).format([...Object.keys(TARGETS).map((name) => `--${name}`), "--all"])}.\n\n${usage()}`);
+  }
 
   const uninstall = args.includes("--uninstall");
   const userHome = process.env.KEEP_GOING_HOME || homedir();

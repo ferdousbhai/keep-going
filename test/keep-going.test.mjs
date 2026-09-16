@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -23,13 +24,13 @@ import { HOOK_FILES, VERSIONED, hookFile, stampVersion } from "../scripts/build.
 
 
 const ENV_KEYS = [
-  "CODEX_HOME",
   "CLAUDE_CONFIG_DIR",
   "KEEP_GOING_CLAUDE_BIN",
   "KEEP_GOING_CLAUDE_MODEL",
   "KEEP_GOING_CODEX_BIN",
   "KEEP_GOING_CODEX_MODEL",
   "KEEP_GOING_GHOST_BIN",
+  "KEEP_GOING_GROK_BIN",
   "MOCK_CALL_LOG",
   "MOCK_REVIEW_RESPONSE",
   "MOCK_REVIEW_PAD",
@@ -67,6 +68,17 @@ async function appendRecords(file, records) {
   await writeFile(file, `${existing.trimEnd()}\n${records.join("\n")}\n`);
 }
 
+async function auditRows() {
+  return (await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8"))
+    .trim().split("\n").map((line) => JSON.parse(line));
+}
+
+// The tally key, spelled out here so a change to how a turn is identified has
+// to be made twice: session plus the host's turn discriminator, and a host that
+// sends none (Claude) has one key for the session.
+const tallyKey = (sessionId, discriminator = "") => `${sessionId}\u0000${discriminator}`;
+const promptDigest = (prompt) => createHash("sha256").update(prompt.trim()).digest("hex").slice(0, 16);
+
 function transcriptLine(payload, turnId) {
   return JSON.stringify({
     type: "response_item",
@@ -80,35 +92,19 @@ function transcriptLine(payload, turnId) {
 
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), "keep-going-test-"));
-  const codexHome = path.join(root, "codex");
-  const sessions = path.join(codexHome, "sessions", "2026", "08", "26");
+  const sessions = path.join(root, "codex", "sessions", "2026", "08", "26");
   const transcript = path.join(sessions, "rollout.jsonl");
   const turnId = "turn-test";
   const modelMock = path.join(root, "mock-codex.mjs");
   const callLog = path.join(root, "calls.jsonl");
 
+  // Codex sends a rollout path with every stop. Nothing reads it — the turn id
+  // beside it is the whole of what the hook needs — and a secret in it is how a
+  // test would notice if that changed.
   await mkdir(sessions, { recursive: true });
   await writeFile(
     transcript,
     [
-      transcriptLine(
-        { role: "user", content: [{ type: "input_text", text: "Please build the requested change." }] },
-        "previous-turn",
-      ),
-      transcriptLine(
-        { role: "assistant", content: [{ type: "output_text", text: "We agreed on the design." }] },
-        "previous-turn",
-      ),
-      transcriptLine(
-        {
-          role: "user",
-          content: [{
-            type: "input_text",
-            text: "<recommended_plugins>injected</recommended_plugins>\n<environment_context>injected</environment_context>",
-          }],
-        },
-        turnId,
-      ),
       transcriptLine(
         {
           role: "user",
@@ -120,19 +116,6 @@ async function fixture() {
         { role: "assistant", content: [{ type: "output_text", text: "Candidate final response." }] },
         turnId,
       ),
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "item_completed",
-          turn_id: turnId,
-          item: {
-            type: "CommandExecution",
-            command: ["npm", "test", "--token", "supersecretvalue"],
-            status: "completed",
-            exit_code: 0,
-          },
-        },
-      }),
     ].join("\n"),
   );
 
@@ -153,7 +136,6 @@ writeFileSync(output, value);
   await chmod(modelMock, 0o755);
 
   const previous = environmentSnapshot();
-  process.env.CODEX_HOME = codexHome;
   process.env.KEEP_GOING_CODEX_BIN = modelMock;
   process.env.KEEP_GOING_CODEX_MODEL = "gpt-5.6-luna";
   process.env.MOCK_CALL_LOG = callLog;
@@ -320,28 +302,40 @@ process.stdout.write(JSON.stringify({ text: process.env.MOCK_REVIEW_RESPONSE }))
   };
 }
 
-test("Codex counting includes only hook prompts in the current turn", { concurrency: false }, async () => {
+test("Codex counts against the turn id it sends, not its rollout", { concurrency: false }, async () => {
+  // The turn id is in the payload, so the count is keyed on it directly rather
+  // than rebuilt by matching it against every user message in the rollout.
   const context = await fixture();
+  const tallyFile = path.join(process.env.XDG_STATE_HOME, "keep-going", "continuations.json");
   try {
-    assert.equal(await countContinuations(context.input), 0);
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    for (const expected of [1, 2]) {
+      assert.equal((await handleStop(context.input)).decision, "block");
+      assert.equal(await recordedContinuations(context.input, "codex"), expected);
+    }
 
-    const additions = [
-      transcriptLine({
-        role: "user",
-        content: [{ type: "input_text", text: '<hook_prompt hook_run_id="stop:1:/x">continue</hook_prompt>' }],
-      }, context.input.turn_id),
-      transcriptLine({
-        role: "user",
-        content: [{ type: "input_text", text: '<hook_prompt hook_run_id="stop:1:/x">continue</hook_prompt>' }],
-      }, "previous-turn"),
-      transcriptLine({
-        role: "user",
-        content: [{ type: "input_text", text: "please keep going" }],
-      }, context.input.turn_id),
-    ];
-    await appendRecords(context.input.transcript_path, additions);
+    // The next turn is a new key, so it starts at zero whether or not the hook
+    // ever saw the stop that ended this one.
+    assert.equal(await recordedContinuations({ ...context.input, turn_id: "turn-next" }, "codex"), 0);
 
-    assert.equal(await countContinuations(context.input), 1);
+    // The rollout is on disk and next to the hook's own state; nothing reads it.
+    for (const row of await auditRows()) assert.equal(row.counted_by, "tally");
+
+    // At the cap the stop is accepted with no review at all.
+    await writeFile(
+      tallyFile,
+      JSON.stringify({
+        [tallyKey(context.input.session_id, context.input.turn_id)]: {
+          count: CONTINUATION_CAP,
+          updated: Date.now(),
+        },
+      }),
+    );
+    const before = (await context.calls()).length;
+    const capped = await handleStop(context.input);
+    assert.match(capped.systemMessage, /continuation cap \(100\) reached/);
+    assert.equal((await context.calls()).length, before);
+    assert.equal(await recordedContinuations(context.input, "codex"), 0);
   } finally {
     await context.cleanup();
   }
@@ -399,6 +393,9 @@ test("Claude counting starts at the last genuine prompt and counts only hook fee
     const additions = [
       JSON.stringify({ type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback:\ncontinue" } }),
       JSON.stringify({ type: "user", message: { role: "user", content: "Do one more thing." }, origin: { kind: "human" } }),
+      // Context the host injects as a user message is nobody's prompt: counting
+      // it would start the turn over on every pass.
+      JSON.stringify({ type: "user", message: { role: "user", content: "<environment_context>injected</environment_context>" } }),
       JSON.stringify({ type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback:\ncontinue" } }),
       JSON.stringify({
         type: "user",
@@ -542,6 +539,70 @@ test("the hook never asks for a register it does not keep itself", () => {
   }
 });
 
+async function grokFixture() {
+  const root = await mkdtemp(path.join(tmpdir(), "grok-keep-going-test-"));
+  const modelMock = path.join(root, "mock-grok.mjs");
+  const callLog = path.join(root, "calls.jsonl");
+  await writeFile(
+    modelMock,
+    `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ args }) + "\\n");
+process.stdout.write(process.env.MOCK_REVIEW_RESPONSE + "\\n");
+`,
+  );
+  await chmod(modelMock, 0o755);
+
+  const previous = environmentSnapshot();
+  process.env.KEEP_GOING_GROK_BIN = modelMock;
+  process.env.MOCK_CALL_LOG = callLog;
+  process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
+  process.env.XDG_STATE_HOME = path.join(root, "state");
+
+  return {
+    // The payload Grok's native Stop hook actually sends, spelling intact.
+    input: {
+      hook_event_name: "Stop",
+      session_id: "01a0aa1a-41d9-7e61-ab32-485671aff04c",
+      cwd: "/tmp/project",
+      transcript_path: "/home/someone/.grok/sessions/%2Ftmp%2Fproject/01a0aa1a/updates.jsonl",
+      lastAssistantMessage: "Candidate final response.",
+      stopHookActive: false,
+      reason: "end_turn",
+    },
+    calls: () => readCalls(callLog),
+    async cleanup() {
+      restoreEnvironment(previous);
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
+test("Grok is reviewed by Grok, on the message spelling it actually sends", { concurrency: false }, async () => {
+  const context = await grokFixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    const output = await handleStop(context.input, "grok");
+    assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
+
+    // Reviewing Grok with Grok is only safe because --single dispatches no
+    // stop hook; anything that starts a full session would re-enter this one.
+    const [call] = await context.calls();
+    assert.ok(call.args.includes("--single"));
+    assert.ok(call.args.includes("--max-turns"));
+    assert.match(call.args[call.args.indexOf("--single") + 1], /Candidate final response\./);
+
+    // Grok sends no transcript this runtime can read, so the tally is the cap.
+    const [row] = (await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8"))
+      .trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(row.counted_by, "tally");
+    assert.equal(await recordedContinuations(context.input, "grok"), 1);
+  } finally {
+    await context.cleanup();
+  }
+});
+
 test("the tally caps a turn the transcript cannot", { concurrency: false }, async () => {
   // Grok Build loads this hook through its Claude compatibility layer, and its
   // transcripts are neither in Claude's directories nor in Claude's shape. The
@@ -552,39 +613,39 @@ test("the tally caps a turn the transcript cannot", { concurrency: false }, asyn
   const { transcript_path: _ignored, ...input } = context.input;
   try {
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
-    assert.equal(await recordedContinuations(input.session_id), 0);
+    assert.equal(await recordedContinuations(input, "claude"), 0);
     for (const expected of [1, 2, 3]) {
       const output = await handleStop(input, "claude");
       assert.equal(output.decision, "block");
-      assert.equal(await recordedContinuations(input.session_id), expected);
+      assert.equal(await recordedContinuations(input, "claude"), expected);
     }
 
-    // A turn ends when the hook lets a stop through, which is what makes the
-    // count mean "continuations in this turn" without reading a transcript.
+    // Claude's payload names no turn, so one key covers the whole session and
+    // letting a stop through is the only thing that says the turn is over.
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
     assert.deepEqual(await handleStop(input, "claude"), {});
-    assert.equal(await recordedContinuations(input.session_id), 0);
+    assert.equal(await recordedContinuations(input, "claude"), 0);
 
     // At the cap the stop is accepted with no review at all.
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     await mkdir(path.dirname(tallyFile), { recursive: true });
     await writeFile(
       tallyFile,
-      JSON.stringify({ [input.session_id]: { count: CONTINUATION_CAP, updated: Date.now() } }),
+      JSON.stringify({ [tallyKey(input.session_id)]: { count: CONTINUATION_CAP, updated: Date.now() } }),
     );
     const before = (await context.calls()).length;
     const capped = await handleStop(input, "claude");
     assert.match(capped.systemMessage, /continuation cap \(100\) reached/);
     assert.equal((await context.calls()).length, before);
-    assert.equal(await recordedContinuations(input.session_id), 0);
+    assert.equal(await recordedContinuations(input, "claude"), 0);
 
-    // An interrupted turn never comes back to be cleared, so its entry expires
-    // instead of counting against whatever that session does next.
+    // Entries are collected rather than kept: an interrupted turn never comes
+    // back for its own to be cleared.
     await writeFile(
       tallyFile,
-      JSON.stringify({ [input.session_id]: { count: 7, updated: Date.now() - 31 * 60_000 } }),
+      JSON.stringify({ [tallyKey(input.session_id)]: { count: 7, updated: Date.now() - 31 * 60_000 } }),
     );
-    assert.equal(await recordedContinuations(input.session_id), 0);
+    assert.equal(await recordedContinuations(input, "claude"), 0);
   } finally {
     await context.cleanup();
   }
@@ -657,148 +718,69 @@ test("Claude stops unconditionally once the continuation cap is reached", { conc
   }
 });
 
-test("verbose assistant passes cannot hide the Codex continuation cap", { concurrency: false }, async () => {
-  const context = await fixture();
+test("Ghost's turn is its owner prompt, and its tally lives in the ghost home", { concurrency: false }, async () => {
+  const context = await ghostFixture();
+  const tallyFile = path.join(context.input.ghost_home, "keep-going", "continuations.json");
   try {
-    const records = [];
-    for (let continuation = 0; continuation < CONTINUATION_CAP; continuation += 1) {
-      records.push(transcriptLine({
-        role: "user",
-        content: [{
-          type: "input_text",
-          text: `<hook_prompt hook_run_id="stop:${continuation}:/x">continue</hook_prompt>`,
-        }],
-      }, context.input.turn_id));
-      for (let update = 0; update < 4; update += 1) {
-        records.push(transcriptLine({
-          role: "assistant",
-          content: [{ type: "output_text", text: `Update ${continuation}.${update}.` }],
-        }, context.input.turn_id));
-      }
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    assert.equal((await handleStop(context.input, "ghost")).decision, "block");
+
+    // Ghost declares where its state belongs, and the hook that refuses to read
+    // a transcript outside the ghost home writes the count inside it too.
+    assert.deepEqual(Object.keys(JSON.parse(await readFile(tallyFile, "utf8"))), [
+      tallyKey(context.input.session_id, promptDigest(context.input.owner_prompt)),
+    ]);
+    await assert.rejects(access(path.join(process.env.XDG_STATE_HOME, "keep-going")));
+
+    // A second owner prompt in the same session is a different turn, so the
+    // finished one's count is not spent on it.
+    const next = { ...context.input, owner_prompt: "Now do the other thing." };
+    assert.equal(await recordedContinuations(next, "ghost"), 0);
+    assert.equal(await recordedContinuations(context.input, "ghost"), 1);
+
+    // The owner prompt is the turn and the ghost home is the state, so a stop
+    // without either is refused rather than counted against the wrong turn.
+    for (const missing of ["owner_prompt", "ghost_home"]) {
+      await assert.rejects(
+        handleStop({ ...context.input, [missing]: "" }, "ghost"),
+        new RegExp(`missing ${missing}`),
+      );
     }
-    await appendRecords(context.input.transcript_path, records);
-
-    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
-    const output = await handleStop(context.input);
-    assert.match(output.systemMessage, /continuation cap \(100\) reached/);
-    assert.equal((await context.calls()).length, 0);
   } finally {
     await context.cleanup();
   }
 });
 
-function piLine(entry, id, parentId) {
-  return JSON.stringify({ id, parentId, timestamp: "2026-08-28T00:00:00.000Z", ...entry });
-}
-
-async function piTranscriptFixture(context) {
-  const sessionDir = path.join(context.input.ghost_home, "sessions");
-  await mkdir(sessionDir, { recursive: true });
-  const transcript = path.join(sessionDir, "conv.jsonl");
-  const lines = [
-    JSON.stringify({ type: "session", version: 3, id: "conv", timestamp: "2026-08-28T00:00:00.000Z", cwd: "/tmp" }),
-    piLine({ type: "message", message: { role: "user", content: [{ type: "text", text: "Earlier owner prompt." }] } }, "m1", null),
-    piLine({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Earlier answer." }] } }, "m2", "m1"),
-    // An abandoned branch that must not leak into the evidence.
-    piLine({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Abandoned branch answer." }] } }, "m2b", "m1"),
-    piLine({ type: "message", message: { role: "user", content: [{ type: "text", text: context.input.owner_prompt }] } }, "m3", "m2"),
-    piLine({ type: "message", message: { role: "assistant", content: [
-      { type: "thinking", thinking: "private" },
-      { type: "toolCall", id: "call-1", name: "read", arguments: { path: "/etc/passwd" } },
-    ] } }, "m4", "m3"),
-    piLine({ type: "message", message: { role: "toolResult", toolCallId: "call-1", toolName: "read", isError: false, content: [{ type: "text", text: "secret result supersecretvalue" }] } }, "m5", "m4"),
-    piLine({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "First pass." }] } }, "m6", "m5"),
-  ];
-  lines.push(piLine({ type: "custom_message", customType: "session-stop-continuation", content: "continue", display: false, attribution: "agent" }, "c0", "m6"));
-  lines.push(piLine({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Pass 2." }] } }, "p0", "c0"));
-  await writeFile(transcript, `${lines.join("\n")}\n`);
-  return transcript;
-}
-
-test("Ghost counts the current owner turn from its Pi transcript", { concurrency: false }, async () => {
+test("Ghost opens no transcript of its own", { concurrency: false }, async () => {
+  // Reading Pi's session tree rebuilt, from a format ghost chose, the turn that
+  // owner_prompt already names. The payload is the cheaper source and the only
+  // one that works for a ghost whose runtime writes no transcript at all.
   const context = await ghostFixture();
   try {
-    const transcript = await piTranscriptFixture(context);
-    const input = {
-      ...context.input,
-      conversation_runtime: "pi",
-      transcript_path: transcript,
-      last_assistant_message: { role: "assistant", content: [{ type: "text", text: "Pass 2." }] },
-    };
-    assert.equal(await countContinuations(input, "ghost"), 1);
+    const transcript = path.join(context.input.ghost_home, "sessions", "conv.jsonl");
+    await mkdir(path.dirname(transcript), { recursive: true });
+    await writeFile(transcript, [
+      JSON.stringify({ id: "m1", parentId: null, type: "message", message: { role: "user", content: [{ type: "text", text: context.input.owner_prompt }] } }),
+      JSON.stringify({ id: "c1", parentId: "m1", type: "custom_message", customType: "session-stop-continuation", content: "continue" }),
+    ].join("\n"));
 
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
-    const output = await handleStop(input, "ghost");
-    // The bare verdict carries no line, so the fallback rotates with the count.
-    assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[1] });
+    const input = { ...context.input, conversation_runtime: "pi", transcript_path: transcript };
+    // The bare verdict carries no line, so the fallback is the first of the pool.
+    assert.deepEqual(await handleStop(input, "ghost"), {
+      decision: "block",
+      reason: VERDICTS.CONTINUE.fallbacks[0],
+    });
     const [call] = await context.calls();
-    assert.match(call.input.prompt, /"last_assistant_message":"Pass 2\."/);
-    assert.doesNotMatch(
-      call.input.prompt,
-      /Earlier owner prompt|First pass|supersecretvalue|Abandoned branch|private|\/etc\/passwd/,
-    );
-  } finally {
-    await context.cleanup();
-  }
-});
+    assert.doesNotMatch(call.input.prompt, /Please finish the requested change/);
 
-test("Ghost rejects a transcript outside the ghost home and falls back without one", { concurrency: false }, async () => {
-  const context = await ghostFixture();
-  try {
-    const outside = path.join(path.dirname(context.input.ghost_home), "outside.jsonl");
-    await writeFile(outside, "");
-    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
-    const output = await handleStop({ ...context.input, conversation_runtime: "pi", transcript_path: outside }, "ghost");
-    // The path is refused, so nothing reads it; the tally caps the turn in its
-    // place and the reviewer still gets its say.
-    assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
-    assert.equal((await context.calls()).length, 1);
     // One row per stop, saying which mechanism capped the turn — and for a
     // host counted by the tally, the field names a RUNTIMES entry needs.
-    const [row] = (await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8"))
-      .trim().split("\n").map((line) => JSON.parse(line));
+    const [row] = await auditRows();
     assert.equal(row.counted_by, "tally");
     assert.ok(row.stop_input_fields.includes("transcript_path"));
     assert.equal(row.verdict, "CONTINUE");
-
-    assert.equal(await countContinuations(context.input, "ghost"), 0);
-    await assert.rejects(
-      countContinuations({ ...context.input, owner_prompt: " " }, "ghost"),
-      /missing owner_prompt/,
-    );
   } finally {
-    await context.cleanup();
-  }
-});
-
-test("Ghost's Claude Code runtime anchors the turn on the owner prompt", { concurrency: false }, async () => {
-  const context = await ghostFixture();
-  const claudeHome = await mkdtemp(path.join(tmpdir(), "ghost-claude-home-"));
-  const previousEnvironment = environmentSnapshot();
-  try {
-    process.env.CLAUDE_CONFIG_DIR = claudeHome;
-    const projectDir = path.join(claudeHome, "projects", "-tmp-project");
-    await mkdir(projectDir, { recursive: true });
-    const transcript = path.join(projectDir, "sdk-session.jsonl");
-    await writeFile(transcript, [
-      JSON.stringify({ type: "user", message: { role: "user", content: "Older prompt." } }),
-      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Older answer." }] } }),
-      JSON.stringify({ type: "user", message: { role: "user", content: context.input.owner_prompt } }),
-      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "First pass." }] } }),
-      // Ghost's Claude Code runtime re-prompts with a plain user message.
-      JSON.stringify({ type: "user", message: { role: "user", content: "continue" } }),
-      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Second pass." }] } }),
-    ].join("\n"));
-    assert.equal(await countContinuations({
-      ...context.input,
-      runtime: "claude-code",
-      conversation_runtime: "claude-code",
-      transcript_path: transcript,
-      last_assistant_message: { role: "assistant", content: [{ type: "text", text: "Second pass." }] },
-    }, "ghost"), 1);
-  } finally {
-    restoreEnvironment(previousEnvironment);
-    await rm(claudeHome, { recursive: true, force: true });
     await context.cleanup();
   }
 });

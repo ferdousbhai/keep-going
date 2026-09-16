@@ -28,16 +28,17 @@ without a review; over the last 10 the reviewer is asked for a line about
 landing what is in flight rather than starting something new. A new owner
 prompt starts a fresh count.
 
-Continuations are counted from the transcript where the host's format is known,
-and otherwise from a tally the hook keeps itself under
-`$XDG_STATE_HOME/keep-going`, cleared whenever a stop is allowed through. So the
-cap holds on a host whose transcript cannot be read — which is also why the hook
-does something useful there at all.
+Continuations are counted from the stop payload wherever it says which turn it
+belongs to: the hook keeps its own tally per session and turn under
+`$XDG_STATE_HOME/keep-going`, or inside the ghost home for Ghost. So the cap
+holds on a host whose transcript cannot be read — which is also why the hook
+does something useful there at all. Claude Code names no turn, so there the
+count comes from the transcript, read for that and nothing else.
 
 ## Install
 
-Requires Node.js 22+ and the host CLI (`codex`, `claude`, or `ghostd`; Ghost
-also needs `ghostd hook-smol-complete`).
+Requires Node.js 22+ and the host CLI (`codex`, `claude`, `ghostd`, or `grok`;
+Ghost also needs `ghostd hook-smol-complete`).
 
 ```bash
 # Codex — then start a new session
@@ -48,9 +49,16 @@ codex plugin add keep-going@keep-going
 claude plugin marketplace add ferdousbhai/keep-going
 claude plugin install keep-going@keep-going
 
-# Ghost, or Claude Code without the plugin: --claude, --ghost, --all
-npx --yes github:ferdousbhai/keep-going --ghost
+# Ghost, Grok Build, or Claude Code without the plugin
+npx --yes github:ferdousbhai/keep-going --ghost   # --claude, --grok, --all
 ```
+
+Grok Build needs `--grok` **only** if keep-going is not already in
+`~/.claude/settings.json`. Grok reads that file and dispatches what it finds
+there, so a Claude Code install already covers Grok — reviewed by `claude`,
+which a Grok-only machine may not have. `--grok` writes a hook to
+`~/.grok/hooks/keep-going.json` that is reviewed by `grok --single` instead.
+Install both and Grok runs the reviewer twice on every stop.
 
 One route per host: the plugin and the `npx` installer each register their own
 Stop hook, and a host with both runs the reviewer twice on every stop.

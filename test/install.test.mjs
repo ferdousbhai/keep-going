@@ -65,7 +65,7 @@ for (const legacyName of ["unblock", "stop-review"]) {
   });
 }
 
-test("installer adds, updates, and removes Claude Code and Ghost hooks", async () => {
+test("installer adds, updates, and removes Claude Code, Ghost, and Grok hooks", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "keep-going-install-"));
   const home = path.join(root, "home");
   const dataHome = path.join(root, "data");
@@ -95,19 +95,24 @@ test("installer adds, updates, and removes Claude Code and Ghost hooks", async (
     await access(installed);
     const claude = JSON.parse(await readFile(path.join(claudeHome, "settings.json"), "utf8"));
     const ghost = JSON.parse(await readFile(path.join(configHome, "ghost", "hooks.json"), "utf8"));
+    const grok = JSON.parse(await readFile(path.join(home, ".grok", "hooks", "keep-going.json"), "utf8"));
     assert.equal(claude.theme, "dark");
     assert.equal(claude.hooks.SessionStart[0].hooks[0].command, "keep-me");
     assert.equal(claude.hooks.Stop.length, 1);
     assert.match(claude.hooks.Stop[0].hooks[0].command, /keep-going\.mjs' claude$/);
     assert.equal(ghost.hooks.session_stop.length, 1);
     assert.match(ghost.hooks.session_stop[0].hooks[0].command, /keep-going\.mjs' ghost$/);
+    assert.equal(grok.hooks.Stop.length, 1);
+    assert.match(grok.hooks.Stop[0].hooks[0].command, /keep-going\.mjs' grok$/);
 
     const result = await runInstaller(["--uninstall", "--all"], env);
     assert.equal(result.code, 0, result.stderr);
     const removedClaude = JSON.parse(await readFile(path.join(claudeHome, "settings.json"), "utf8"));
     const removedGhost = JSON.parse(await readFile(path.join(configHome, "ghost", "hooks.json"), "utf8"));
+    const removedGrok = JSON.parse(await readFile(path.join(home, ".grok", "hooks", "keep-going.json"), "utf8"));
     assert.deepEqual(removedClaude.hooks.Stop, []);
     assert.deepEqual(removedGhost.hooks.session_stop, []);
+    assert.deepEqual(removedGrok.hooks.Stop, []);
     assert.equal(removedClaude.hooks.SessionStart[0].hooks[0].command, "keep-me");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -117,7 +122,7 @@ test("installer adds, updates, and removes Claude Code and Ghost hooks", async (
 test("installer requires an explicit target", async () => {
   const result = await runInstaller([], {});
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /Select --claude, --ghost, or --all/);
+  assert.match(result.stderr, /Select --claude, --ghost, --grok, or --all/);
 });
 
 test("uninstalling an absent hook does not create a settings file", async () => {

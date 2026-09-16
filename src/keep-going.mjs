@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -17,30 +18,39 @@ const CONTINUATION_CAP = 100;
 const LAST_STRETCH = 10;
 
 // Everything that differs per host, keyed once: the inputs it must supply, the
-// directories its transcripts may live in, how its continuations are counted,
-// and how its reviewer is run. Function declarations hoist, so the counters and
-// runners below are already bound when this is evaluated.
+// directory its state belongs under, the directories its transcripts may live
+// in, how its continuations are counted, and how its reviewer is run. A host
+// whose stop payload already identifies the turn needs no counter — the tally
+// is keyed on that identity. Function declarations hoist, so the counter and
+// the runners below are already bound when this is evaluated.
 const RUNTIMES = {
   codex: {
     requires: ["turn_id", "session_id"],
-    roots: () => {
-      const home = process.env.CODEX_HOME || path.join(homedir(), ".codex");
-      return [path.join(home, "sessions"), path.join(home, "archived_sessions")];
-    },
-    count: codexContinuations,
+    state: xdgStateHome,
     run: runCodexModel,
   },
   claude: {
     requires: ["session_id"],
+    state: xdgStateHome,
     roots: () => [path.join(process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), ".claude"), "projects")],
     count: claudeContinuations,
     run: runClaudeModel,
   },
   ghost: {
-    requires: ["session_id"],
-    roots: (input) => [input.ghost_home],
-    count: ghostContinuations,
+    requires: ["session_id", "owner_prompt", "ghost_home"],
+    state: (input) => input.ghost_home,
     run: runGhostModel,
+  },
+  // Grok reads ~/.claude/settings.json and lists a Stop hook found there as
+  // enabled, but dispatches only hooks from its own directory — so this runs
+  // from ~/.grok/hooks/keep-going.json, and a Claude install alone does
+  // nothing under Grok. Its transcript is a log of ACP session/update frames
+  // in which a blocked turn's nudge lands inside the agent's own reasoning,
+  // leaving no continuation to count; the tally counts them instead.
+  grok: {
+    requires: ["session_id"],
+    state: xdgStateHome,
+    run: runGrokModel,
   },
 };
 
@@ -166,14 +176,6 @@ function messageText(payload) {
     .join("\n");
 }
 
-function recordTurnId(record) {
-  return (
-    record?.payload?.turn_id ??
-    record?.payload?.internal_chat_message_metadata_passthrough?.turn_id ??
-    null
-  );
-}
-
 function isInjectedContext(text) {
   const trimmed = text.trimStart();
   return (
@@ -198,19 +200,9 @@ async function* jsonLines(file) {
   }
 }
 
-function turnStartIndex(items, ownerPrompt, ownerText) {
-  if (ownerPrompt) {
-    const matchingOwner = items.findLastIndex((item) => ownerText(item)?.trim() === ownerPrompt);
-    if (matchingOwner >= 0) return matchingOwner;
-  }
-  return items.findLastIndex((item) => ownerText(item) !== null);
-}
-
-// Prompts the host injected on behalf of this hook. Claude Code records them as
-// "Stop hook feedback: ..." meta user messages and Codex as <hook_prompt ...>
-// user messages; ghost's transcripts hold nothing but hook continuations
-// between owner prompts, so every one of them counts.
-const HOOK_PROMPT_PATTERN = /^\s*(?:Stop hook feedback\b|<hook_prompt\b)/;
+// Prompts the host injected on behalf of this hook: Claude Code records them as
+// "Stop hook feedback: ..." meta user messages.
+const HOOK_PROMPT_PATTERN = /^\s*Stop hook feedback\b/;
 
 async function allowedTranscriptPath(input, runner) {
   const transcriptPath = input.transcript_path;
@@ -219,7 +211,7 @@ async function allowedTranscriptPath(input, runner) {
   }
   const candidate = await realpath(transcriptPath);
 
-  for (const root of RUNTIMES[runner].roots(input)) {
+  for (const root of RUNTIMES[runner].roots()) {
     if (typeof root !== "string" || !root) continue;
     try {
       const resolvedRoot = await realpath(root);
@@ -229,24 +221,6 @@ async function allowedTranscriptPath(input, runner) {
     }
   }
   throw new Error(`transcript_path is outside the ${runner} transcript directories`);
-}
-
-async function codexContinuations(input) {
-  const transcriptPath = await allowedTranscriptPath(input, "codex");
-  let count = 0;
-  for await (const record of jsonLines(transcriptPath)) {
-    const payload = record?.payload;
-    if (
-      record?.type === "response_item" &&
-      payload?.type === "message" &&
-      payload.role === "user" &&
-      recordTurnId(record) === input.turn_id &&
-      HOOK_PROMPT_PATTERN.test(messageText(payload))
-    ) {
-      count += 1;
-    }
-  }
-  return count;
 }
 
 function claudeUserMessage(record) {
@@ -265,7 +239,11 @@ function claudeUserMessage(record) {
   };
 }
 
-async function claudeContinuations(input, ownerPromptText = null) {
+// Claude's stop payload names the session and nothing else, so where one owner
+// turn ends and the next begins is information only the transcript has: the
+// turn starts at the last genuine user message, and the hook prompts after it
+// are this turn's continuations.
+async function claudeContinuations(input) {
   const transcriptPath = await allowedTranscriptPath(input, "claude");
   const messages = [];
   for await (const record of jsonLines(transcriptPath)) {
@@ -273,14 +251,8 @@ async function claudeContinuations(input, ownerPromptText = null) {
     if (message) messages.push(message);
   }
 
-  // The current turn starts at the last genuine user message. A host that
-  // re-prompts with plain user messages (ghost's Claude Code runtime) supplies
-  // the owner prompt so those continuations stay inside the turn — and every
-  // user message after it counts as a continuation.
-  const ownerPrompt = typeof ownerPromptText === "string" ? ownerPromptText.trim() : null;
-  const turnStart = turnStartIndex(messages, ownerPrompt, (item) => (item.genuine ? item.text : null));
+  const turnStart = messages.findLastIndex((message) => message.genuine);
   if (turnStart < 0) return 0;
-  if (ownerPrompt) return messages.length - turnStart - 1;
   let count = 0;
   for (let index = turnStart + 1; index < messages.length; index += 1) {
     if (HOOK_PROMPT_PATTERN.test(messages[index].text)) count += 1;
@@ -288,96 +260,49 @@ async function claudeContinuations(input, ownerPromptText = null) {
   return count;
 }
 
-// Pi session files are trees: every entry carries id/parentId and the live
-// conversation is the chain from the last written entry back to the root.
-function piActiveBranch(records) {
-  const byId = new Map();
-  let leaf = null;
-  for (const record of records) {
-    if (typeof record?.id !== "string") continue;
-    byId.set(record.id, record);
-    leaf = record;
-  }
-  if (!leaf) return records;
-  const branch = [];
-  const seen = new Set();
-  for (let cursor = leaf; cursor && !seen.has(cursor.id); cursor = cursor.parentId ? byId.get(cursor.parentId) : null) {
-    seen.add(cursor.id);
-    branch.push(cursor);
-  }
-  return branch.reverse();
-}
-
-async function piContinuations(input, transcriptPath) {
-  const records = [];
-  for await (const record of jsonLines(transcriptPath)) records.push(record);
-
-  // One timeline of owner prompts and hook continuations; everything after the
-  // owner prompt that starts the current turn is a continuation.
-  const prompts = [];
-  for (const entry of piActiveBranch(records)) {
-    if (entry?.type === "message" && entry.message?.role === "user") {
-      const text = messageText(entry.message);
-      if (text) prompts.push({ owner: true, text });
-    } else if (
-      entry?.type === "custom_message" &&
-      entry.customType === "session-stop-continuation" &&
-      typeof entry.content === "string" &&
-      entry.content
-    ) {
-      prompts.push({ owner: false, text: entry.content });
-    }
-  }
-
-  const ownerPrompt = typeof input.owner_prompt === "string" ? input.owner_prompt.trim() : "";
-  const turnStart = turnStartIndex(prompts, ownerPrompt, (item) => (item.owner ? item.text : null));
-  if (turnStart < 0) return 0;
-  return prompts.length - turnStart - 1;
-}
-
-// Ghost hands over its runtime's native transcript when one exists: the Pi
-// session file (OMP conversations) or the Claude Code SDK session file
-// (Claude Code conversations). Without one, only the current pass is known.
-async function ghostContinuations(input) {
-  if (typeof input.owner_prompt !== "string" || !input.owner_prompt.trim()) {
-    throw new Error("Ghost stop input is missing owner_prompt");
-  }
-  if (typeof input.transcript_path !== "string" || !input.transcript_path) return 0;
-  if (input.conversation_runtime === "claude-code") {
-    return claudeContinuations(input, input.owner_prompt);
-  }
-  const transcriptPath = await allowedTranscriptPath(input, "ghost");
-  return piContinuations(input, transcriptPath);
-}
-
-async function countContinuations(input, runner = "codex") {
+async function countContinuations(input, runner) {
   return RUNTIMES[runner].count(input);
 }
 
 // The cap is the only thing between a stuck reviewer and a hundred turns of
-// spend, and every count above reads a transcript in a format the host chose.
-// A host we cannot parse — or one that sends no transcript at all — left the
-// cap unenforceable, so the hook kept its own tally as well: blocks since this
-// session last ended a turn, which is what a continuation is. It needs nothing
-// from the host but the session id every runtime already requires.
-const TALLY_FILE = () =>
-  path.join(
-    process.env.XDG_STATE_HOME || path.join(homedir(), ".local", "state"),
-    "keep-going",
-    "continuations.json",
-  );
-// An interrupted turn never reaches the hook again to be cleared, so entries
-// expire rather than counting against whatever the session does next.
+// spend, and counting from a transcript costs a parser per host and works only
+// where the host's format is one this file knows. So the hook keeps its own
+// tally instead, from what the stop payload already carries: blocks recorded
+// against the turn they belong to.
+function xdgStateHome() {
+  return process.env.XDG_STATE_HOME || path.join(homedir(), ".local", "state");
+}
+
+const tallyFile = (input, runner) =>
+  path.join(RUNTIMES[runner].state(input), "keep-going", "continuations.json");
+
+// The session plus whatever the host sends that tells one owner turn from the
+// next, so that a new key is a new turn. Codex sends a turn id and Ghost the
+// owner's prompt, digested because a file on disk has no business holding what
+// the user typed. Claude sends neither, and so has one key per session.
+function turnKey(input) {
+  const ownerPrompt = typeof input.owner_prompt === "string" ? input.owner_prompt.trim() : "";
+  const turn = typeof input.turn_id === "string" && input.turn_id
+    ? input.turn_id
+    : ownerPrompt
+      ? createHash("sha256").update(ownerPrompt).digest("hex").slice(0, 16)
+      : "";
+  return `${input.session_id}\u0000${turn}`;
+}
+
+// Garbage collection rather than scoping, now that the key says which turn a
+// count belongs to: an interrupted turn never comes back for its entry to be
+// cleared, and the file would otherwise keep one per turn forever.
 const TALLY_IDLE_MS = 30 * 60_000;
 
-async function readTally() {
+async function readTally(file) {
   try {
-    const parsed = JSON.parse(await readFile(TALLY_FILE(), "utf8"));
+    const parsed = JSON.parse(await readFile(file, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const fresh = {};
-    for (const [session, entry] of Object.entries(parsed)) {
+    for (const [key, entry] of Object.entries(parsed)) {
       if (Number.isInteger(entry?.count) && Date.now() - entry.updated < TALLY_IDLE_MS) {
-        fresh[session] = entry;
+        fresh[key] = entry;
       }
     }
     return fresh;
@@ -387,8 +312,7 @@ async function readTally() {
   }
 }
 
-async function writeTally(tally) {
-  const file = TALLY_FILE();
+async function writeTally(file, tally) {
   const temporary = `${file}.${process.pid}.tmp`;
   try {
     await mkdir(path.dirname(file), { recursive: true });
@@ -400,27 +324,33 @@ async function writeTally(tally) {
   }
 }
 
-// A turn ends when this hook lets a stop through, so clearing on STOP is what
-// makes the tally mean "continuations in the current turn" without ever
-// knowing what the owner typed.
-async function recordTurnState(sessionId, blocked, exact = null) {
-  if (typeof sessionId !== "string" || !sessionId) return;
-  const tally = await readTally();
+// The key scopes the count to a turn wherever the host names one, but Claude
+// names none, and an owner who repeats a prompt word for word re-derives the
+// key of the turn before. Ending a turn where the hook lets the stop through is
+// what keeps a finished turn's count from being spent on the next one in both.
+async function recordTurnState(input, runner, blocked, exact = null) {
+  const file = tallyFile(input, runner);
+  const key = turnKey(input);
+  const tally = await readTally(file);
   if (!blocked) {
-    delete tally[sessionId];
+    delete tally[key];
   } else {
     // Where the transcript was readable it is the truth, so the tally is set
     // from it rather than incremented past its own stale value — otherwise the
     // number the hook falls back to is one it has been drifting all turn.
-    const from = exact ?? tally[sessionId]?.count ?? 0;
-    tally[sessionId] = { count: from + 1, updated: Date.now() };
+    const from = exact ?? tally[key]?.count ?? 0;
+    tally[key] = { count: from + 1, updated: Date.now() };
   }
-  await writeTally(tally);
+  await writeTally(file, tally);
 }
 
 function stopCandidateText(input) {
-  if (typeof input.last_assistant_message === "string") return input.last_assistant_message;
-  return messageText(input.last_assistant_message);
+  // Grok spells this one key in camelCase while sending session_id and
+  // transcript_path in snake_case; an unread message is an accepted stop, so
+  // the difference would silently disable the hook there.
+  const candidate = input.last_assistant_message ?? input.lastAssistantMessage;
+  if (typeof candidate === "string") return candidate;
+  return messageText(candidate);
 }
 
 // setEncoding("utf8") guarantees a chunk never splits a code point, so summing
@@ -593,10 +523,39 @@ async function runClaudeModel({ prompt, timeoutMs }) {
   }
 }
 
-async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
-  if (typeof ghostHome !== "string" || !ghostHome) {
-    throw new Error("Ghost stop input is missing ghost_home");
+// Grok's own headless mode is the reviewer, which also makes the recursion
+// impossible by construction: `grok --single` dispatches session_start hooks
+// and no stop hook, so the reviewer cannot trip the hook that spawned it.
+async function runGrokModel({ prompt, timeoutMs }) {
+  const directory = await mkdtemp(path.join(tmpdir(), "grok-keep-going-"));
+  try {
+    const grok = process.env.KEEP_GOING_GROK_BIN || "grok";
+    const args = [
+      "--single",
+      prompt,
+      "--output-format",
+      "plain",
+      "--max-turns",
+      "1",
+      "--disable-web-search",
+      "--no-subagents",
+      "--no-plan",
+      "--cwd",
+      directory,
+    ];
+    const model = process.env.KEEP_GOING_GROK_MODEL;
+    if (model) args.push("--model", model);
+    const result = assertExitOk(
+      await runProcess(grok, args, "", timeoutMs, process.env, directory),
+      "grok",
+    );
+    return result.stdout;
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
+}
+
+async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
   const ghostd = process.env.KEEP_GOING_GHOST_BIN || "ghostd";
   const result = assertExitOk(
     await runProcess(
@@ -674,9 +633,9 @@ async function recordReviewAudit(input, runner, { verdict, reason, error, counte
   }
 }
 
-async function recordedContinuations(sessionId) {
-  const tally = await readTally();
-  return tally[sessionId]?.count ?? 0;
+async function recordedContinuations(input, runner) {
+  const tally = await readTally(tallyFile(input, runner));
+  return tally[turnKey(input)]?.count ?? 0;
 }
 
 async function handleStop(input, runner = "codex") {
@@ -692,19 +651,20 @@ async function handleStop(input, runner = "codex") {
   // the count survives into a turn that never earned it.
   const lastAssistantMessage = compactText(stopCandidateText(input), 12_000);
   if (!lastAssistantMessage) {
-    await recordTurnState(input.session_id, false);
+    await recordTurnState(input, runner, false);
     return {};
   }
 
   let review;
   // Kept after the cap check: the nudge changes tone as the turn nears the cap.
-  let continuations = await recordedContinuations(input.session_id);
+  let continuations = await recordedContinuations(input, runner);
   let countedBy = "tally";
   try {
-    // The transcript is used only to enforce the continuation cap. Its content
-    // is never supplied to the reviewer. Where it can be read it is exact and
-    // it replaces the tally, here and in what the tally is left holding.
-    if (typeof input.transcript_path === "string" && input.transcript_path) {
+    // A transcript is read only by a host whose payload leaves the turn
+    // unidentified, and then only to count: its content never reaches the
+    // reviewer. Where it can be read it is exact and it replaces the tally,
+    // here and in what the tally is left holding.
+    if (runtime.count && typeof input.transcript_path === "string" && input.transcript_path) {
       try {
         continuations = await countContinuations(input, runner);
         countedBy = "transcript";
@@ -718,7 +678,7 @@ async function handleStop(input, runner = "codex") {
       const capped = {
         systemMessage: `keep-going: continuation cap (${CONTINUATION_CAP}) reached for this turn; accepting the stop.`,
       };
-      await recordTurnState(input.session_id, false);
+      await recordTurnState(input, runner, false);
       await recordReviewAudit(input, runner, { verdict: "CAP", reason: capped.systemMessage, countedBy });
       return capped;
     }
@@ -735,14 +695,15 @@ async function handleStop(input, runner = "codex") {
     // accepted stop. This is the path a reviewer timeout takes — the stuck
     // case the cap exists for — and leaving the count behind would spend it
     // against whatever the session does next.
-    await recordTurnState(input.session_id, false);
+    await recordTurnState(input, runner, false);
     await recordReviewAudit(input, runner, { error: error.message, countedBy });
     return { systemMessage: `keep-going was skipped: ${compactText(error.message, 500)}` };
   }
 
   const output = hookOutputForVerdict(review.verdict, continuations, review.nudge);
   await recordTurnState(
-    input.session_id,
+    input,
+    runner,
     output.decision === "block",
     countedBy === "transcript" ? continuations : null,
   );
