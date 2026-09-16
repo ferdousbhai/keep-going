@@ -78,8 +78,34 @@ function registrationsIn(config, event) {
   return groups
     .flatMap((group) => (Array.isArray(group?.hooks) ? group.hooks : []))
     .map((hook) => (typeof hook?.command === "string" ? hook.command : ""))
-    .filter((command) => command.includes("keep-going.mjs"))
+    .filter(Boolean)
     .map((command) => ({ command, runner: command.trimEnd().split(/\s+/).at(-1) }));
+}
+
+// Claude Code plugins register hooks from their own install directory, which
+// no settings file mentions. A keep-going installed that way looked
+// unregistered here, and every other plugin's Stop hook — which runs on the
+// same stop, for the same turn — was invisible.
+async function pluginHooks(paths) {
+  const root = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(paths.userHome, ".claude"), "plugins");
+  const installed = await readJson(path.join(root, "installed_plugins.json"), null);
+  if (!isJsonObject(installed?.plugins)) return [];
+  const found = [];
+  for (const [name, entries] of Object.entries(installed.plugins)) {
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      if (typeof entry?.installPath !== "string") continue;
+      const manifest = await readJson(path.join(entry.installPath, ".claude-plugin", "plugin.json"), {});
+      const declared = typeof manifest.hooks === "string" ? manifest.hooks : "hooks/hooks.json";
+      const config = await readJson(path.join(entry.installPath, declared), null);
+      if (!isJsonObject(config?.hooks)) continue;
+      for (const [event, groups] of Object.entries(config.hooks)) {
+        if (!/^(Stop|SubagentStop)$/.test(event)) continue;
+        const commands = registrationsIn(config, event);
+        if (commands.length) found.push({ name, event, scope: entry.scope ?? "user", commands });
+      }
+    }
+  }
+  return found;
 }
 
 async function reportStatus(paths) {
@@ -89,7 +115,10 @@ async function reportStatus(paths) {
   for (const [runner, { events, settings }] of Object.entries(TARGETS)) {
     const file = settings(paths);
     const config = await readJson(file, null);
-    const perEvent = events.map((event) => [event, config === null ? [] : registrationsIn(config, event)]);
+    const perEvent = events.map((event) => [
+      event,
+      config === null ? [] : registrationsIn(config, event).filter((hook) => hook.command.includes("keep-going.mjs")),
+    ]);
     const hooks = perEvent.flatMap(([, found]) => found);
     found[runner] = hooks;
     const missing = perEvent.filter(([, found]) => found.length === 0).map(([event]) => event);
@@ -121,6 +150,27 @@ async function reportStatus(paths) {
     const grok = rows.find((row) => row[0] === "grok");
     grok[1] = "covered";
     grok[2] = "by Claude's settings, reviewed by claude";
+  }
+
+  // A plugin-installed keep-going is registered, whatever the settings file
+  // says, and anything else on Stop shares the turn with it.
+  const plugins = await pluginHooks(paths);
+  const ours = plugins.filter((hook) => hook.commands.some((c) => c.command.includes("keep-going.mjs")));
+  const others = plugins.filter((hook) => !ours.includes(hook));
+  if (ours.length) {
+    const claude = rows.find((row) => row[0] === "claude");
+    const events = [...new Set(ours.map((hook) => hook.event))].join(", ");
+    if (claude[1] === "not registered") {
+      claude[1] = "plugin";
+      claude[2] = `${events} from ${ours[0].name}`;
+    } else {
+      warnings.push(`claude is registered in settings and as the plugin ${ours[0].name}, so it reviews every stop twice`);
+    }
+  }
+  // These are Claude Code plugins, so they run on Claude's stops — naming them
+  // after themselves would read as a fifth host.
+  for (const hook of others) {
+    rows.push(["claude", "also runs", `${hook.event} from plugin ${hook.name}`]);
   }
 
   // Codex is the one host this installer does not write to; leaving it out

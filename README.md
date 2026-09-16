@@ -78,8 +78,10 @@ reinstall. Switching between `--link` and a copy replaces the registration
 instead of adding a second one.
 
 `npx --yes github:ferdousbhai/keep-going --status` prints where keep-going is
-registered on this machine, for all four hosts, naming any event a host is
-missing and warning when one is wired to review a stop twice.
+registered on this machine, for all four hosts — settings files and Claude Code
+plugins alike — naming any event a host is missing, listing any other plugin
+that also runs on the same stop, and warning when one host is wired to review
+a stop twice.
 
 Uninstall: `claude plugin uninstall keep-going`, or the same `npx` command with
 `--uninstall`.

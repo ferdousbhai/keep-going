@@ -119,6 +119,59 @@ test("installer adds, updates, and removes Claude Code, Ghost, and Grok hooks", 
   }
 });
 
+test("status sees plugin-registered hooks, ours and everyone else's", async () => {
+  // A keep-going installed as a Claude plugin lives in no settings file, so
+  // status called it unregistered; and this session found a second Stop hook
+  // from another plugin that had been running on every stop unremarked.
+  const root = await mkdtemp(path.join(tmpdir(), "keep-going-plugins-"));
+  const claudeHome = path.join(root, "claude");
+  const plugins = path.join(claudeHome, "plugins");
+  const env = {
+    KEEP_GOING_HOME: path.join(root, "home"),
+    XDG_DATA_HOME: path.join(root, "data"),
+    XDG_CONFIG_HOME: path.join(root, "config"),
+    CLAUDE_CONFIG_DIR: claudeHome,
+  };
+  const install = async (name, file, hooks) => {
+    const dir = path.join(plugins, "cache", name);
+    await mkdir(path.join(dir, path.dirname(file)), { recursive: true });
+    await writeFile(path.join(dir, file), JSON.stringify({ hooks }));
+    return dir;
+  };
+  try {
+    const otherDir = await install("other", "hooks/hooks.json", {
+      Stop: [{ hooks: [{ type: "command", command: 'bash "${CLAUDE_PLUGIN_ROOT}/gate.sh"' }] }],
+    });
+    const oursDir = await install("kg", "hooks/hooks.json", {
+      Stop: [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/keep-going.mjs" claude' }] }],
+    });
+    await writeFile(
+      path.join(plugins, "installed_plugins.json"),
+      JSON.stringify({
+        version: 2,
+        plugins: {
+          "gate@somewhere": [{ scope: "user", installPath: otherDir }],
+          "keep-going@keep-going": [{ scope: "user", installPath: oursDir }],
+        },
+      }),
+    );
+
+    const report = await runInstaller(["--status"], env);
+    assert.equal(report.code, 0, report.stderr);
+    // Ours counts as registered even with an empty settings.json.
+    assert.match(report.stdout, /claude\s+plugin\s+Stop from keep-going@keep-going/);
+    // And the hook that is not ours is named rather than ignored.
+    assert.match(report.stdout, /claude\s+also runs\s+Stop from plugin gate@somewhere/);
+
+    // Installed both ways is the double review worth warning about.
+    assert.equal((await runInstaller(["--claude"], env)).code, 0);
+    const both = await runInstaller(["--status"], env);
+    assert.match(both.stdout, /! claude is registered in settings and as the plugin keep-going@keep-going/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("--link registers the checkout, and switching modes replaces rather than adds", async () => {
   // Wiring a hook at a working tree by hand is what a maintainer wants and how
   // this machine drifted: the hand-written entry missed an event the installer
