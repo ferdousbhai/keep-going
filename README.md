@@ -9,10 +9,6 @@ yourself." This is that, on a hook.
 
 ## How it works
 
-On Claude Code it reviews subagents too, on the same terms: a subagent that
-quits with work left is the failure this hook is named for, and each one is
-capped on its own account rather than out of the turn that launched it.
-
 When the agent tries to end a turn, keep-going shows the last assistant message
 — redacted, truncated, and nothing else — to a small reviewer model, which
 answers with one of:
@@ -36,8 +32,13 @@ Continuations are counted from the stop payload wherever it says which turn it
 belongs to: the hook keeps its own tally per session and turn under
 `$XDG_STATE_HOME/keep-going`, or inside the ghost home for Ghost. So the cap
 holds on a host whose transcript cannot be read — which is also why the hook
-does something useful there at all. Claude Code names no turn, so there the
-count comes from the transcript, read for that and nothing else.
+does something useful there at all. A plain Claude Code stop names no turn, so
+there the count comes from the transcript, read for that and nothing else.
+
+On Claude Code it reviews subagents too, on the same terms: a subagent that
+quits with work left is the failure this hook is named for. A subagent stop
+names the agent it came from and carries its parent's session, so each subagent
+gets its own count of 100 and spends none of the turn that launched it.
 
 ## Install
 
@@ -49,7 +50,7 @@ Ghost also needs `ghostd hook-smol-complete`).
 codex plugin marketplace add ferdousbhai/keep-going
 codex plugin add keep-going@keep-going
 
-# Claude Code
+# Claude Code — registers Stop and SubagentStop
 claude plugin marketplace add ferdousbhai/keep-going
 claude plugin install keep-going@keep-going
 
@@ -77,8 +78,8 @@ reinstall. Switching between `--link` and a copy replaces the registration
 instead of adding a second one.
 
 `npx --yes github:ferdousbhai/keep-going --status` prints where keep-going is
-registered on this machine, for all four hosts, and warns when one of them is
-wired to review a stop twice.
+registered on this machine, for all four hosts, naming any event a host is
+missing and warning when one is wired to review a stop twice.
 
 Uninstall: `claude plugin uninstall keep-going`, or the same `npx` command with
 `--uninstall`.
