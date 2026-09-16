@@ -11,6 +11,8 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+
+import { HOOK_TIMEOUT, HOSTS, STATUS_MESSAGE } from "./hosts.mjs";
 import { fileURLToPath } from "node:url";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -21,7 +23,6 @@ const BUNDLED_HOOK = path.join(
   "scripts",
   "keep-going.mjs",
 );
-const STATUS_MESSAGE = "Deciding whether to keep going";
 
 function usage() {
   return `Install Keep Going for Claude Code, Ghost, and Grok Build.
@@ -42,6 +43,8 @@ copy replaces the old registration rather than adding to it.
 Codex installs through the repository marketplace; see README.md.`;
 }
 
+const claudeConfigDir = (userHome) => process.env.CLAUDE_CONFIG_DIR || path.join(userHome, ".claude");
+
 // The hosts this installer writes to, and where each keeps its hook config.
 // Codex installs through the repository marketplace instead.
 const TARGETS = {
@@ -49,20 +52,19 @@ const TARGETS = {
     // A Stop registration is rewritten to SubagentStop only for hooks a session
     // registers at runtime, so a settings.json Stop hook never sees a subagent
     // and the event has to be asked for by name.
-    events: ["Stop", "SubagentStop"],
-    settings: ({ userHome }) =>
-      path.join(process.env.CLAUDE_CONFIG_DIR || path.join(userHome, ".claude"), "settings.json"),
+    events: HOSTS.claude.events,
+    settings: ({ userHome }) => path.join(claudeConfigDir(userHome), "settings.json"),
   },
   ghost: {
-    events: ["session_stop"],
+    events: HOSTS.ghost.events,
     settings: ({ configHome }) => path.join(configHome, "ghost", "hooks.json"),
   },
-  // Grok's Claude compatibility layer reads ~/.claude/settings.json and lists
-  // a Stop hook found there as enabled — and never dispatches it. Only hooks
-  // in Grok's own directory are dispatched, so that is where this one goes,
-  // and a Claude install alone buys nothing under Grok.
+  // Grok dispatches what it finds in ~/.claude/settings.json through its Claude
+  // compatibility layer, so a Claude install already covers it — reviewed by
+  // claude, which a Grok-only machine may not have. This registration is for
+  // that machine, and installing both makes Grok review every stop twice.
   grok: {
-    events: ["Stop"],
+    events: HOSTS.grok.events,
     settings: ({ userHome }) =>
       path.join(process.env.GROK_HOME || path.join(userHome, ".grok"), "hooks", "keep-going.json"),
   },
@@ -72,22 +74,46 @@ const TARGETS = {
 // by hand to a working tree counts, and so does a stale one left at a path the
 // installer no longer uses. Matching the script name rather than a known path
 // is the point.
-function registrationsIn(config, event) {
-  const groups = isJsonObject(config.hooks) ? config.hooks[event] : undefined;
+const OURS = /keep-going\.mjs["']?\s+\S+\s*$/;
+
+function registrationsIn(groups, event, where) {
   if (!Array.isArray(groups)) return [];
   return groups
     .flatMap((group) => (Array.isArray(group?.hooks) ? group.hooks : []))
     .map((hook) => (typeof hook?.command === "string" ? hook.command : ""))
     .filter(Boolean)
-    .map((command) => ({ command, runner: command.trimEnd().split(/\s+/).at(-1) }));
+    .map((command) => ({
+      event,
+      where,
+      command,
+      ours: OURS.test(command),
+      runner: command.trimEnd().split(/\s+/).at(-1),
+    }));
+}
+
+// The events that end a turn. A hook on one of these shares the stop with
+// ours, whoever wrote it, which is the only reason to report other people's.
+const STOP_EVENTS = new Set(["Stop", "SubagentStop", "session_stop"]);
+
+// Where a host looks for hooks. Mostly its own settings file — but Grok also
+// dispatches Claude's, and Claude also dispatches its plugins' — so "who
+// dispatches this stop" is a list per host rather than one path, and
+// "covered by another host's file" stops being a special case.
+function settingsSource(runner) {
+  return async (paths) => {
+    const file = TARGETS[runner].settings(paths);
+    const config = await readJson(file, null);
+    if (config === null) return [];
+    return HOSTS[runner].events.flatMap((event) =>
+      registrationsIn(isJsonObject(config.hooks) ? config.hooks[event] : undefined, event, file));
+  };
 }
 
 // Claude Code plugins register hooks from their own install directory, which
-// no settings file mentions. A keep-going installed that way looked
-// unregistered here, and every other plugin's Stop hook — which runs on the
-// same stop, for the same turn — was invisible.
-async function pluginHooks(paths) {
-  const root = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(paths.userHome, ".claude"), "plugins");
+// no settings file mentions — so a keep-going installed that way looked
+// unregistered, and every other plugin's Stop hook was invisible.
+async function claudePluginSource(paths) {
+  const root = path.join(claudeConfigDir(paths.userHome), "plugins");
   const installed = await readJson(path.join(root, "installed_plugins.json"), null);
   if (!isJsonObject(installed?.plugins)) return [];
   const found = [];
@@ -99,88 +125,68 @@ async function pluginHooks(paths) {
       const config = await readJson(path.join(entry.installPath, declared), null);
       if (!isJsonObject(config?.hooks)) continue;
       for (const [event, groups] of Object.entries(config.hooks)) {
-        if (!/^(Stop|SubagentStop)$/.test(event)) continue;
-        const commands = registrationsIn(config, event);
-        if (commands.length) found.push({ name, event, scope: entry.scope ?? "user", commands });
+        if (STOP_EVENTS.has(event)) found.push(...registrationsIn(groups, event, `plugin ${name}`));
       }
     }
   }
   return found;
 }
 
+// Codex installs through a marketplace, so its registration is a config entry
+// rather than a hook command; it reports as one registration all the same.
+async function codexSource(paths) {
+  const file = path.join(process.env.CODEX_HOME || path.join(paths.userHome, ".codex"), "config.toml");
+  const config = await readFile(file, "utf8").catch(() => "");
+  if (!/\[plugins\."keep-going@[^"]+"\]\s*\nenabled\s*=\s*true/.test(config)) return [];
+  // Only the [features] table decides this, and only when it says so: the key
+  // is absent by default and the literal appears elsewhere in the file.
+  const features = /^\[features\]$([\s\S]*?)(?=^\[|\Z)/m.exec(config)?.[1] ?? "";
+  const loads = !/^\s*plugins\s*=\s*false/m.test(features);
+  return [{ event: "Stop", where: `plugin in ${file}`, command: "", ours: true, runner: "codex", loads }];
+}
+
+const SOURCES = {
+  claude: [settingsSource("claude"), claudePluginSource],
+  ghost: [settingsSource("ghost")],
+  grok: [settingsSource("grok"), settingsSource("claude")],
+  codex: [codexSource],
+};
+
 async function reportStatus(paths) {
   const rows = [];
   const warnings = [];
-  const found = {};
-  for (const [runner, { events, settings }] of Object.entries(TARGETS)) {
-    const file = settings(paths);
-    const config = await readJson(file, null);
-    const perEvent = events.map((event) => [
-      event,
-      config === null ? [] : registrationsIn(config, event).filter((hook) => hook.command.includes("keep-going.mjs")),
-    ]);
-    const hooks = perEvent.flatMap(([, found]) => found);
-    found[runner] = hooks;
-    const missing = perEvent.filter(([, found]) => found.length === 0).map(([event]) => event);
-    const doubled = perEvent.filter(([, found]) => found.length > 1);
-    const wrong = hooks.find((hook) => hook.runner !== runner);
+  for (const [host, sources] of Object.entries(SOURCES)) {
+    const all = (await Promise.all(sources.map((source) => source(paths)))).flat();
+    const ours = all.filter((hook) => hook.ours);
+    const events = HOSTS[host].events;
+    const missing = events.filter((event) => !ours.some((hook) => hook.event === event));
+    // A host reached through another host's file runs that host's runtime, so
+    // the runner is worth naming exactly when it is not the obvious one.
+    const where = [...new Set(ours.map((hook) =>
+      hook.runner && hook.runner !== host ? `${hook.where} (reviewed by ${hook.runner})` : hook.where))].join(", ");
 
-    // One registration per event is the healthy shape; anything else is named
-    // for what it is, since "1 registrations" tells nobody what to do.
     rows.push([
-      runner,
-      hooks.length === 0 ? "not registered" : missing.length ? `missing ${missing.join(", ")}` : "registered",
-      `${events.join(", ")} in ${file}`,
+      host,
+      ours.length === 0 ? "not registered" : missing.length ? `missing ${missing.join(", ")}` : "registered",
+      ours.length === 0 ? `${events.join(", ")} in ${TARGETS[host]?.settings(paths) ?? "its own config"}` : where,
     ]);
-    for (const [event, found] of doubled) {
-      warnings.push(`${runner} has ${found.length} hooks on ${event} and reviews it ${found.length} times`);
-    }
-    if (missing.length && hooks.length) {
-      warnings.push(`${runner} is not registered for ${missing.join(", ")}; re-run the installer to add it`);
-    }
-    if (wrong) warnings.push(`${runner} is registered to run the ${wrong.runner} runtime`);
-  }
 
-  // Grok dispatches what it finds in Claude's settings, which is both why it
-  // needs no hook of its own and why two hooks are one too many. Reporting the
-  // file alone would call a covered Grok unregistered.
-  if (found.claude?.length && found.grok?.length) {
-    warnings.push("grok reads Claude's settings too, so it reviews every stop twice; drop the --grok hook");
-  } else if (found.claude?.length && !found.grok?.length) {
-    const grok = rows.find((row) => row[0] === "grok");
-    grok[1] = "covered";
-    grok[2] = "by Claude's settings, reviewed by claude";
-  }
-
-  // A plugin-installed keep-going is registered, whatever the settings file
-  // says, and anything else on Stop shares the turn with it.
-  const plugins = await pluginHooks(paths);
-  const ours = plugins.filter((hook) => hook.commands.some((c) => c.command.includes("keep-going.mjs")));
-  const others = plugins.filter((hook) => !ours.includes(hook));
-  if (ours.length) {
-    const claude = rows.find((row) => row[0] === "claude");
-    const events = [...new Set(ours.map((hook) => hook.event))].join(", ");
-    if (claude[1] === "not registered") {
-      claude[1] = "plugin";
-      claude[2] = `${events} from ${ours[0].name}`;
-    } else {
-      warnings.push(`claude is registered in settings and as the plugin ${ours[0].name}, so it reviews every stop twice`);
+    for (const event of events) {
+      const on = ours.filter((hook) => hook.event === event);
+      if (on.length > 1) warnings.push(`${host} has ${on.length} hooks on ${event} and reviews it ${on.length} times`);
     }
-  }
-  // These are Claude Code plugins, so they run on Claude's stops — naming them
-  // after themselves would read as a fifth host.
-  for (const hook of others) {
-    rows.push(["claude", "also runs", `${hook.event} from plugin ${hook.name}`]);
-  }
-
-  // Codex is the one host this installer does not write to; leaving it out
-  // would read as "not installed" rather than "installed elsewhere".
-  const codexConfig = path.join(process.env.CODEX_HOME || path.join(paths.userHome, ".codex"), "config.toml");
-  const codex = await readFile(codexConfig, "utf8").catch(() => "");
-  const enabled = /\[plugins\."keep-going@[^"]+"\]\s*\nenabled\s*=\s*true/.test(codex);
-  rows.push(["codex", enabled ? "registered" : "not registered", `plugin in ${codexConfig}`]);
-  if (enabled && !/\bplugins\s*=\s*true/.test(codex)) {
-    warnings.push("codex has [features] plugins disabled, so its plugin never loads");
+    if (missing.length && ours.length) {
+      warnings.push(`${host} is not registered for ${missing.join(", ")}; re-run the installer to add it`);
+    }
+    const wrong = ours.find((hook) => hook.runner !== host && hook.command);
+    if (wrong && host !== "grok") warnings.push(`${host} is registered to run the ${wrong.runner} runtime`);
+    if (ours.some((hook) => hook.loads === false)) {
+      warnings.push(`${host} has [features] plugins disabled, so its plugin never loads`);
+    }
+    // Everything else on the same stop, named under the host that runs it.
+    for (const hook of all.filter((hook) => !hook.ours)) {
+      rows.push([host, "also runs", `${hook.event} from ${hook.where}`]);
+    }
   }
 
   const width = Math.max(...rows.map((row) => row[1].length));
@@ -234,9 +240,12 @@ function installedCommand(hookFile, runner) {
   return `${shellQuote(process.execPath)} ${shellQuote(hookFile)} ${runner}`;
 }
 
-function isInstalledHook(hook, hookFile, runner) {
+// --status counts any command naming this hook; the installer used to strip
+// only the exact paths it knew, so a hand-wired hook at another checkout was
+// reported as a duplicate the tool could not remove. Same predicate now.
+function isInstalledHook(hook, scripts, runner) {
   return typeof hook?.command === "string" &&
-    hook.command.includes(shellQuote(hookFile)) &&
+    scripts.some((script) => hook.command.includes(script)) &&
     hook.command.trimEnd().endsWith(` ${runner}`);
 }
 
@@ -248,21 +257,19 @@ function removeInstalledHooks(groups, hookFiles, runner) {
       kept.push(group);
       continue;
     }
-    const hooks = group.hooks.filter(
-      (hook) => !hookFiles.some((file) => isInstalledHook(hook, file, runner)),
-    );
+    const hooks = group.hooks.filter((hook) => !isInstalledHook(hook, hookFiles, runner));
     if (hooks.length > 0) kept.push({ ...group, hooks });
   }
   return kept;
 }
 
-function updateHookConfig(config, events, hookFile, runner, uninstall, legacyHookFiles) {
+function updateHookConfig(config, events, hookFile, runner, uninstall, knownScripts) {
   const hooks = isJsonObject(config.hooks) ? { ...config.hooks } : {};
   for (const event of events) {
-    // Earlier releases installed under different names. Strip those
-    // registrations as well, or an upgrade leaves one beside the new one and
-    // the reviewer runs twice on every stop.
-    const groups = removeInstalledHooks(hooks[event], [hookFile, ...legacyHookFiles], runner);
+    // Earlier releases installed under different names, and a hand-wired hook
+    // points wherever its author chose. Strip them all, or an upgrade leaves
+    // one beside the new one and the reviewer runs twice on every stop.
+    const groups = removeInstalledHooks(hooks[event], knownScripts, runner);
     if (!uninstall) {
       groups.push({
         hooks: [{
@@ -284,10 +291,11 @@ async function main() {
     process.stdout.write(`${usage()}\n`);
     return;
   }
-  const userHomeEarly = process.env.KEEP_GOING_HOME || homedir();
+  const userHome = process.env.KEEP_GOING_HOME || homedir();
+  const dataHome = process.env.XDG_DATA_HOME || path.join(userHome, ".local", "share");
+  const configHome = process.env.XDG_CONFIG_HOME || path.join(userHome, ".config");
   if (args.includes("--status")) {
-    const configHomeEarly = process.env.XDG_CONFIG_HOME || path.join(userHomeEarly, ".config");
-    process.stdout.write(`${await reportStatus({ userHome: userHomeEarly, configHome: configHomeEarly })}\n`);
+    process.stdout.write(`${await reportStatus({ userHome, configHome })}\n`);
     return;
   }
 
@@ -297,21 +305,16 @@ async function main() {
   }
 
   const uninstall = args.includes("--uninstall");
-  const userHome = process.env.KEEP_GOING_HOME || homedir();
-  const dataHome = process.env.XDG_DATA_HOME || path.join(userHome, ".local", "share");
-  const configHome = process.env.XDG_CONFIG_HOME || path.join(userHome, ".config");
   // A checkout registered with --link runs whatever it currently holds, which
   // is what anyone developing the hook wants and what a user should never get
-  // by accident. The mode not chosen is stripped, so switching between them
+  // by accident. Both spellings are always stripped, so switching between them
   // replaces the registration instead of leaving both to review every stop.
   const link = args.includes("--link");
   const copiedHook = path.join(dataHome, "keep-going", "keep-going.mjs");
   const hookFile = link ? BUNDLED_HOOK : copiedHook;
-  const legacyHookFiles = [
-    link ? copiedHook : BUNDLED_HOOK,
-    path.join(dataHome, "unblock", "unblock.mjs"),
-    path.join(dataHome, "stop-review", "stop-review.mjs"),
-  ];
+  // Names rather than paths: one keep-going registration per host per event,
+  // wherever it points — a copy, this checkout, or another one entirely.
+  const knownScripts = ["keep-going.mjs", "unblock.mjs", "stop-review.mjs"];
 
   if (!uninstall && !link) {
     await mkdir(path.dirname(hookFile), { recursive: true });
@@ -329,7 +332,7 @@ async function main() {
     }
     await writeJsonAtomic(
       settingsFile,
-      updateHookConfig(config, events, hookFile, runner, uninstall, legacyHookFiles),
+      updateHookConfig(config, events, hookFile, runner, uninstall, knownScripts),
     );
     process.stdout.write(`${uninstall ? "Removed" : "Installed"} ${runner} hook in ${settingsFile}\n`);
   }

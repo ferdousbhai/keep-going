@@ -41,10 +41,10 @@ const RUNTIMES = {
     state: (input) => input.ghost_home,
     run: runGhostModel,
   },
-  // Grok reads ~/.claude/settings.json and lists a Stop hook found there as
-  // enabled, but dispatches only hooks from its own directory — so this runs
-  // from ~/.grok/hooks/keep-going.json, and a Claude install alone does
-  // nothing under Grok. Its transcript is a log of ACP session/update frames
+  // Grok dispatches hooks it finds in ~/.claude/settings.json as well as its
+  // own, so this runtime is reached only from ~/.grok/hooks/keep-going.json,
+  // which a machine without a Claude registration installs to be reviewed by
+  // grok rather than by claude. Its transcript is a log of session/update frames
   // in which a blocked turn's nudge lands inside the agent's own reasoning,
   // leaving no continuation to count; the tally counts them instead.
   grok: {
@@ -129,6 +129,13 @@ agent. Name no task, file, command, or requirement its message did not already
 state. A longer line is discarded for a generic one.
 
 ${BLOCKING_VERDICTS.map((name) => `After ${name}, ${VERDICTS[name].directive}.`).join(" ")}`;
+
+// No host is given a model it did not choose, so the flag is absent unless the
+// variable names one.
+function modelArgs(variable) {
+  const model = process.env[variable];
+  return model ? ["--model", model] : [];
+}
 
 function redactSensitive(value) {
   return value
@@ -284,16 +291,15 @@ const tallyFile = (input, runner) =>
 // A subagent stop carries the *parent* session id, so agent_id comes first:
 // without it a subagent's continuations are spent out of the turn that
 // launched it, and enough subagents would cap a turn that had barely started.
-function turnKey(input) {
+function payloadTurn(input) {
+  const named = [input.agent_id, input.turn_id].find((value) => typeof value === "string" && value);
+  if (named) return named;
   const ownerPrompt = typeof input.owner_prompt === "string" ? input.owner_prompt.trim() : "";
-  const turn = typeof input.agent_id === "string" && input.agent_id
-    ? input.agent_id
-    : typeof input.turn_id === "string" && input.turn_id
-      ? input.turn_id
-      : ownerPrompt
-        ? createHash("sha256").update(ownerPrompt).digest("hex").slice(0, 16)
-        : "";
-  return `${input.session_id}\u0000${turn}`;
+  return ownerPrompt ? createHash("sha256").update(ownerPrompt).digest("hex").slice(0, 16) : "";
+}
+
+function turnKey(input) {
+  return `${input.session_id}\u0000${payloadTurn(input)}`;
 }
 
 // Garbage collection rather than scoping, now that the key says which turn a
@@ -466,8 +472,7 @@ async function runCodexModel({ prompt, timeoutMs }) {
       outputPath,
       "-",
     ];
-    const codexModel = process.env.KEEP_GOING_CODEX_MODEL;
-    if (codexModel) args.push("--model", codexModel);
+    args.push(...modelArgs("KEEP_GOING_CODEX_MODEL"));
     assertExitOk(await runProcess(codex, args, prompt, timeoutMs), "codex exec");
     return await readFile(outputPath, "utf8");
   } finally {
@@ -497,8 +502,7 @@ async function runClaudeModel({ prompt, timeoutMs }) {
       "--output-format",
       "json",
     ];
-    const claudeModel = process.env.KEEP_GOING_CLAUDE_MODEL;
-    if (claudeModel) args.push("--model", claudeModel);
+    args.push(...modelArgs("KEEP_GOING_CLAUDE_MODEL"));
     const env = { ...process.env };
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_EFFORT_LEVEL;
@@ -547,8 +551,7 @@ async function runGrokModel({ prompt, timeoutMs }) {
       "--cwd",
       directory,
     ];
-    const model = process.env.KEEP_GOING_GROK_MODEL;
-    if (model) args.push("--model", model);
+    args.push(...modelArgs("KEEP_GOING_GROK_MODEL"));
     const result = assertExitOk(
       await runProcess(grok, args, "", timeoutMs, process.env, directory),
       "grok",
@@ -668,11 +671,10 @@ async function handleStop(input, runner = "codex") {
     // unidentified, and then only to count: its content never reaches the
     // reviewer. Where it can be read it is exact and it replaces the tally,
     // here and in what the tally is left holding.
-    // A subagent stop carries the parent's transcript, whose user messages
-    // belong to the parent's turn, and its own agent_transcript_path holds a
-    // task the owner never typed. agent_id already keys the tally, so there is
-    // nothing here a transcript could tell us.
-    if (!input.agent_id && runtime.count && typeof input.transcript_path === "string" && input.transcript_path) {
+    // Only where the payload named no turn. A subagent names one, and its
+    // parent's transcript holds the parent's user messages anyway, so there is
+    // nothing a transcript could add that the tally does not already know.
+    if (!payloadTurn(input) && runtime.count && typeof input.transcript_path === "string" && input.transcript_path) {
       try {
         continuations = await countContinuations(input, runner);
         countedBy = "transcript";

@@ -627,9 +627,7 @@ test("a subagent is capped on its own account, not its parent's", { concurrency:
     assert.equal(await recordedContinuations({ ...subagent, agent_id: "agent-b201" }, "claude"), 0);
 
     // Its parent's transcript is never opened on its behalf.
-    const rows = (await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8"))
-      .trim().split("\n").map((line) => JSON.parse(line));
-    assert.deepEqual([...new Set(rows.map((row) => row.counted_by))], ["tally"]);
+    assert.deepEqual([...new Set((await auditRows()).map((row) => row.counted_by))], ["tally"]);
   } finally {
     await context.cleanup();
   }

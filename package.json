@@ -16,6 +16,7 @@
   },
   "files": [
     "plugins/keep-going",
+    "scripts/hosts.mjs",
     "scripts/install.mjs",
     "LICENSE",
     "README.md"
