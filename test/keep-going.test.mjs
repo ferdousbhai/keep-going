@@ -19,6 +19,7 @@ import {
   hookOutputForVerdict,
   parseReviewVerdict,
 } from "../src/keep-going.mjs";
+import { HOOK_FILES, VERSIONED, hookFile, stampVersion } from "../scripts/build.mjs";
 
 
 const ENV_KEYS = [
@@ -589,30 +590,34 @@ test("the tally caps a turn the transcript cannot", { concurrency: false }, asyn
   }
 });
 
-test("every plugin manifest declares the package version", async () => {
-  // v0.1.1 shipped a manifest still declaring 0.1.0, so the marketplace
-  // reported the wrong version for the whole release. Nothing referenced both
-  // files, so the drift was invisible until someone read them side by side.
-  // There are three manifests to keep in step now, one per install route.
-  const read = async (relative) =>
-    JSON.parse(await readFile(new URL(relative, import.meta.url), "utf8"));
-  const [pkg, codex, claude, marketplace] = await Promise.all([
-    read("../package.json"),
-    read("../plugins/keep-going/.codex-plugin/plugin.json"),
-    read("../plugins/keep-going/.claude-plugin/plugin.json"),
-    read("../.claude-plugin/marketplace.json"),
-  ]);
-  assert.equal(codex.version, pkg.version);
-  assert.equal(claude.version, pkg.version);
-  for (const entry of marketplace.plugins) assert.equal(entry.version, pkg.version);
+test("the committed manifests and hook files are what the build emits", async () => {
+  // v0.1.1 shipped a manifest still declaring 0.1.0: four files had to agree
+  // and the drift was invisible until someone read them side by side. The
+  // build stamps the version and writes both hook files now, so the thing
+  // left to check is that the committed copies equal what it emits — a hand
+  // edit, or a release that skipped `npm run build`, fails here.
+  const readText = (relative) => readFile(new URL(relative, import.meta.url), "utf8");
+  const { version } = JSON.parse(await readText("../package.json"));
+  for (const relative of VERSIONED) {
+    const source = await readText(`../${relative}`);
+    assert.equal(source, stampVersion(source, version), `${relative} is not stamped ${version}`);
+  }
+  for (const runner of Object.keys(HOOK_FILES)) {
+    assert.equal(await readText(`../${HOOK_FILES[runner].file}`), hookFile(runner));
+  }
 
-  // Each host reads its own manifest, so the Claude hook has to name the Claude
-  // runner: the Codex file next to it spells the same script with a different
-  // trailing argument, and a copy-paste between them fails open on every stop.
-  const hooks = await read(`../plugins/keep-going/${claude.hooks}`);
-  const [{ command }] = hooks.hooks.Stop[0].hooks;
-  assert.match(command, /\$\{CLAUDE_PLUGIN_ROOT\}/);
-  assert.match(command, /keep-going\.mjs" claude$/);
+  // Generation makes the two hook files agree with one table, not with each
+  // other, so the host-specific halves are still spelled out: a swap in that
+  // table would emit two self-consistent files that fail open on every stop.
+  assert.match(hookFile("codex"), /node \\"\$PLUGIN_ROOT\/scripts\/keep-going\.mjs\\" codex/);
+  assert.match(
+    hookFile("claude"),
+    /node \\"\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/keep-going\.mjs\\" claude/,
+  );
+
+  // Claude finds its hook file through the manifest, which is hand-written.
+  const claude = JSON.parse(await readText("../plugins/keep-going/.claude-plugin/plugin.json"));
+  assert.equal(path.posix.join("plugins/keep-going", claude.hooks), HOOK_FILES.claude.file);
 });
 
 test("the shipped plugin bundles no runtime dependency", async () => {

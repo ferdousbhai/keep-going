@@ -18,5 +18,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - name: Verify committed bundle
-        run: git diff --exit-code -- plugins/keep-going/scripts/keep-going.mjs
+      # The build writes the bundle, both hook files and the stamped versions,
+      # and all of them ship from the tree. A skipped build has to fail here
+      # rather than release stale files.
+      - name: Verify committed build output
+        run: git diff --exit-code -- plugins/keep-going .claude-plugin/marketplace.json
