@@ -433,6 +433,28 @@ test("Claude uses Sonnet with its default effort for classification", { concurre
   }
 });
 
+test("names no model unless one is configured", { concurrency: false }, async () => {
+  // Every host picks its own reviewer when the knob is unset, the way ghost and
+  // grok always have. A default here would be this tool choosing a vendor's
+  // model on the owner's behalf, and would age: the codex one named a specific
+  // release, not a tier.
+  for (const [runner, fixtureFor, variable] of [
+    ["codex", fixture, "KEEP_GOING_CODEX_MODEL"],
+    ["claude", claudeFixture, "KEEP_GOING_CLAUDE_MODEL"],
+  ]) {
+    const context = await fixtureFor();
+    try {
+      delete process.env[variable];
+      process.env.MOCK_REVIEW_RESPONSE = "STOP";
+      await handleStop(context.input, runner);
+      const [call] = await context.calls();
+      assert.ok(!call.args.includes("--model"), `${runner} passed --model with ${variable} unset`);
+    } finally {
+      await context.cleanup();
+    }
+  }
+});
+
 test("Ghost delegates classification to its smol-model bridge", { concurrency: false }, async () => {
   const context = await ghostFixture();
   try {

@@ -86,13 +86,15 @@ Uninstall: `claude plugin uninstall keep-going`, or the same `npx` command with
 | `KEEP_GOING_CLAUDE_BIN` | `claude` |
 | `KEEP_GOING_GHOST_BIN` | `ghostd` |
 | `KEEP_GOING_GROK_BIN` | `grok` |
-| `KEEP_GOING_CODEX_MODEL` | `gpt-5.6-luna` |
-| `KEEP_GOING_CLAUDE_MODEL` | `sonnet` |
+| `KEEP_GOING_CODEX_MODEL` | unset; codex is run without `--model`, so it picks |
+| `KEEP_GOING_CLAUDE_MODEL` | unset; claude is run without `--model`, so it picks |
 | `KEEP_GOING_GROK_MODEL` | unset; grok is run without `--model`, so it picks |
 | `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, saying which mechanism capped the turn |
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
-Ghost's reviewer model is ghostd's, not ours.
+No host is given a model it did not choose: the reviewer runs on whatever
+that CLI is configured to use unless the variable above names one. Ghost's
+reviewer model is ghostd's, not ours.
 
 ## Upgrading from Unblock or Stop Review
 
