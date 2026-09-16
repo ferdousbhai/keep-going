@@ -12,7 +12,7 @@ import {
 import { homedir } from "node:os";
 import path from "node:path";
 
-import { HOOK_TIMEOUT, HOSTS, STATUS_MESSAGE } from "./hosts.mjs";
+import { HOSTS, hookEntry } from "./hosts.mjs";
 import { fileURLToPath } from "node:url";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -297,14 +297,7 @@ function updateHookConfig(config, events, hookFile, runner, uninstall) {
     // one beside the new one and the reviewer runs twice on every stop.
     const groups = removeInstalledHooks(hooks[event]);
     if (!uninstall) {
-      groups.push({
-        hooks: [{
-          type: "command",
-          command: installedCommand(hookFile, runner),
-          timeout: HOOK_TIMEOUT,
-          statusMessage: STATUS_MESSAGE,
-        }],
-      });
+      groups.push(hookEntry(installedCommand(hookFile, runner)));
     }
     hooks[event] = groups;
   }

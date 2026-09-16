@@ -16,3 +16,11 @@ export const HOSTS = {
 // The hook waits on a reviewer model call, so it has to outlast one.
 export const HOOK_TIMEOUT = 240;
 export const STATUS_MESSAGE = "Deciding whether to keep going";
+
+// The shape itself, not just the constants in it: the build writes the
+// plugin's registration and the installer writes the settings one, and they
+// have to stay byte-identical. Written out twice, a field added to one is a
+// field the other host never gets.
+export const hookEntry = (command) => ({
+  hooks: [{ type: "command", command, timeout: HOOK_TIMEOUT, statusMessage: STATUS_MESSAGE }],
+});

@@ -62,7 +62,7 @@ for (const legacyName of ["unblock", "stop-review"]) {
     // names that path. removeInstalledHooks matches on the path, so without
     // stripping the old one an upgrade leaves both registered and the reviewer
     // runs twice on every stop.
-    const { settings, dataHome, claudeHome, env, cleanup } = await installHome("upgrade");
+    const { settings, dataHome, env, cleanup } = await installHome("upgrade");
     try {
       const legacy = path.join(dataHome, legacyName, `${legacyName}.mjs`);
       await writeFile(settings, JSON.stringify({
@@ -90,7 +90,7 @@ for (const legacyName of ["unblock", "stop-review"]) {
 }
 
 test("installer adds, updates, and removes Claude Code, Ghost, and Grok hooks", async () => {
-  const { settings, home, dataHome, configHome, claudeHome, env, cleanup } = await installHome("install");
+  const { settings, home, dataHome, configHome, env, cleanup } = await installHome("install");
   try {
     await writeFile(settings, JSON.stringify({
       hooks: {
@@ -185,7 +185,7 @@ test("--link registers the checkout, and switching modes replaces rather than ad
   // Wiring a hook at a working tree by hand is what a maintainer wants and how
   // this machine drifted: the hand-written entry missed an event the installer
   // would have added. Linking is the same thing, managed.
-  const { settings, claudeHome, dataHome, env, cleanup } = await installHome("link");
+  const { settings, dataHome, env, cleanup } = await installHome("link");
   const bundled = path.join(ROOT, "plugins", "keep-going", "scripts", "keep-going.mjs");
   const copied = path.join(dataHome, "keep-going", "keep-going.mjs");
   const commands = async () => {
@@ -221,7 +221,7 @@ test("a registration naming the wrong runner is replaced, not preserved forever"
   // --status counted this as a duplicate while the installer, which required
   // the runner word to match, refused to strip it — so re-running the tool
   // could never fix what the tool was reporting.
-  const { settings, claudeHome, env, cleanup } = await installHome("wrongrunner");
+  const { settings, env, cleanup } = await installHome("wrongrunner");
   try {
     await writeFile(settings, JSON.stringify({
       hooks: { Stop: [{ hooks: [{ type: "command", command: "'/usr/bin/node' '/x/keep-going.mjs' ghost" }] }] },
@@ -273,7 +273,7 @@ test("--all leaves Grok to Claude's registration, but --uninstall --all still cl
   // two reviews of every Grok stop — which --all itself used to produce and
   // --status then reported as a fault. Removal has to stay exhaustive, or an
   // --all uninstall leaves behind what an older --all install wrote.
-  const { settings, claudeHome, grokHome, env, cleanup } = await installHome("all");
+  const { settings, grokHome, env, cleanup } = await installHome("all");
   const grokHook = path.join(grokHome, "hooks", "keep-going.json");
   try {
     assert.equal((await runInstaller(["--all"], env)).code, 0);
@@ -301,7 +301,7 @@ test("installing strips a hand-wired hook wherever it points", async () => {
   // --status reported these as duplicates while the installer, which matched
   // exact paths it had written, could not remove them. The remedy was hand
   // editing, which is the thing this tool exists to avoid.
-  const { settings, claudeHome, env, cleanup } = await installHome("handwired");
+  const { settings, env, cleanup } = await installHome("handwired");
   try {
     await writeFile(settings, JSON.stringify({
       hooks: {

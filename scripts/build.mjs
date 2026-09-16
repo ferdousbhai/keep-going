@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
-import { HOOK_TIMEOUT, HOSTS, STATUS_MESSAGE } from "./hosts.mjs";
+import { HOSTS, hookEntry } from "./hosts.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bundle = path.join(root, "plugins", "keep-going", "scripts", "keep-going.mjs");
@@ -43,18 +43,7 @@ export const HOOK_FILES = {
 
 export function hookFile(runner) {
   const { pluginRoot } = HOOK_FILES[runner];
-  const entry = [
-    {
-      hooks: [
-        {
-          type: "command",
-          command: `node "${pluginRoot}/scripts/keep-going.mjs" ${runner}`,
-          timeout: HOOK_TIMEOUT,
-          statusMessage: STATUS_MESSAGE,
-        },
-      ],
-    },
-  ];
+  const entry = [hookEntry(`node "${pluginRoot}/scripts/keep-going.mjs" ${runner}`)];
   const config = { hooks: Object.fromEntries(HOSTS[runner].events.map((event) => [event, entry])) };
   return `${JSON.stringify(config, null, 2)}\n`;
 }
