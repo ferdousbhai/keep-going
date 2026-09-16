@@ -579,6 +579,40 @@ process.stdout.write(process.env.MOCK_REVIEW_RESPONSE + "\\n");
   };
 }
 
+test("a subagent is capped on its own account, not its parent's", { concurrency: false }, async () => {
+  // SubagentStop carries the parent session's id, so without agent_id in the
+  // key a handful of subagents would spend the cap of the turn that launched
+  // them. The parent's transcript is the parent's, too: its user messages are
+  // not this subagent's continuations.
+  const context = await claudeFixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    const subagent = {
+      ...context.input,
+      hook_event_name: "SubagentStop",
+      agent_id: "agent-7f3c",
+      agent_type: "Explore",
+      agent_transcript_path: "/tmp/agent-7f3c.jsonl",
+      last_assistant_message: "Searched three files and stopped.",
+    };
+
+    for (const expected of [1, 2]) {
+      assert.equal((await handleStop(subagent, "claude")).decision, "block");
+      assert.equal(await recordedContinuations(subagent, "claude"), expected);
+    }
+    // The turn that launched it is untouched, and a second subagent starts fresh.
+    assert.equal(await recordedContinuations(context.input, "claude"), 0);
+    assert.equal(await recordedContinuations({ ...subagent, agent_id: "agent-b201" }, "claude"), 0);
+
+    // Its parent's transcript is never opened on its behalf.
+    const rows = (await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8"))
+      .trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual([...new Set(rows.map((row) => row.counted_by))], ["tally"]);
+  } finally {
+    await context.cleanup();
+  }
+});
+
 test("Grok is reviewed by Grok, on the message spelling it actually sends", { concurrency: false }, async () => {
   const context = await grokFixture();
   try {

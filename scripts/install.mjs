@@ -41,7 +41,10 @@ Codex installs through the repository marketplace; see README.md.`;
 // Codex installs through the repository marketplace instead.
 const TARGETS = {
   claude: {
-    events: ["Stop"],
+    // A Stop registration is rewritten to SubagentStop only for hooks a session
+    // registers at runtime, so a settings.json Stop hook never sees a subagent
+    // and the event has to be asked for by name.
+    events: ["Stop", "SubagentStop"],
     settings: ({ userHome }) =>
       path.join(process.env.CLAUDE_CONFIG_DIR || path.join(userHome, ".claude"), "settings.json"),
   },
@@ -81,16 +84,25 @@ async function reportStatus(paths) {
   for (const [runner, { events, settings }] of Object.entries(TARGETS)) {
     const file = settings(paths);
     const config = await readJson(file, null);
-    const hooks = config === null ? [] : events.flatMap((event) => registrationsIn(config, event));
+    const perEvent = events.map((event) => [event, config === null ? [] : registrationsIn(config, event)]);
+    const hooks = perEvent.flatMap(([, found]) => found);
     found[runner] = hooks;
+    const missing = perEvent.filter(([, found]) => found.length === 0).map(([event]) => event);
+    const doubled = perEvent.filter(([, found]) => found.length > 1);
     const wrong = hooks.find((hook) => hook.runner !== runner);
+
+    // One registration per event is the healthy shape; anything else is named
+    // for what it is, since "1 registrations" tells nobody what to do.
     rows.push([
       runner,
-      hooks.length === 0 ? "not registered" : hooks.length > 1 ? `${hooks.length} registrations` : "registered",
-      `${events.join("+")} in ${file}`,
+      hooks.length === 0 ? "not registered" : missing.length ? `missing ${missing.join(", ")}` : "registered",
+      `${events.join(", ")} in ${file}`,
     ]);
-    if (hooks.length > events.length) {
-      warnings.push(`${runner} has ${hooks.length} registrations for ${events.length} event(s) and reviews stops more than once`);
+    for (const [event, found] of doubled) {
+      warnings.push(`${runner} has ${found.length} hooks on ${event} and reviews it ${found.length} times`);
+    }
+    if (missing.length && hooks.length) {
+      warnings.push(`${runner} is not registered for ${missing.join(", ")}; re-run the installer to add it`);
     }
     if (wrong) warnings.push(`${runner} is registered to run the ${wrong.runner} runtime`);
   }

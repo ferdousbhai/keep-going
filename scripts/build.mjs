@@ -35,29 +35,32 @@ export function stampVersion(source, version) {
 // variable, so a copy-paste between them fails open on every stop of whichever
 // host got the wrong one; writing both from here removes the copy-paste.
 export const HOOK_FILES = {
-  codex: { file: "plugins/keep-going/hooks/hooks.json", pluginRoot: "$PLUGIN_ROOT" },
-  claude: { file: "plugins/keep-going/claude-hooks.json", pluginRoot: "${CLAUDE_PLUGIN_ROOT}" },
+  codex: { file: "plugins/keep-going/hooks/hooks.json", pluginRoot: "$PLUGIN_ROOT", events: ["Stop"] },
+  claude: {
+    file: "plugins/keep-going/claude-hooks.json",
+    pluginRoot: "${CLAUDE_PLUGIN_ROOT}",
+    // A subagent that quits early is the same failure as a turn that does, and
+    // it is the one this hook was named for.
+    events: ["Stop", "SubagentStop"],
+  },
 };
 
 export function hookFile(runner) {
-  const { pluginRoot } = HOOK_FILES[runner];
-  const config = {
-    hooks: {
-      Stop: [
+  const { pluginRoot, events } = HOOK_FILES[runner];
+  const entry = [
+    {
+      hooks: [
         {
-          hooks: [
-            {
-              type: "command",
-              command: `node "${pluginRoot}/scripts/keep-going.mjs" ${runner}`,
-              // The hook waits on a reviewer model call, so it has to outlast one.
-              timeout: 240,
-              statusMessage: "Deciding whether to keep going",
-            },
-          ],
+          type: "command",
+          command: `node "${pluginRoot}/scripts/keep-going.mjs" ${runner}`,
+          // The hook waits on a reviewer model call, so it has to outlast one.
+          timeout: 240,
+          statusMessage: "Deciding whether to keep going",
         },
       ],
     },
-  };
+  ];
+  const config = { hooks: Object.fromEntries(events.map((event) => [event, entry])) };
   return `${JSON.stringify(config, null, 2)}\n`;
 }
 

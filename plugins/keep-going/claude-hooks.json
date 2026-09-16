@@ -11,6 +11,18 @@
           }
         ]
       }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/keep-going.mjs\" claude",
+            "timeout": 240,
+            "statusMessage": "Deciding whether to keep going"
+          }
+        ]
+      }
     ]
   }
 }

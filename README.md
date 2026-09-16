@@ -9,6 +9,10 @@ yourself." This is that, on a hook.
 
 ## How it works
 
+On Claude Code it reviews subagents too, on the same terms: a subagent that
+quits with work left is the failure this hook is named for, and each one is
+capped on its own account rather than out of the turn that launched it.
+
 When the agent tries to end a turn, keep-going shows the last assistant message
 — redacted, truncated, and nothing else — to a small reviewer model, which
 answers with one of:

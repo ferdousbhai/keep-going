@@ -446,7 +446,6 @@ async function runCodexModel({ prompt, timeoutMs }) {
   const outputPath = path.join(directory, "result.txt");
   try {
     const codex = process.env.KEEP_GOING_CODEX_BIN || "codex";
-    const model = process.env.KEEP_GOING_CODEX_MODEL || "gpt-5.6-luna";
     const args = [
       "exec",
       "--ephemeral",
@@ -461,14 +460,14 @@ async function runCodexModel({ prompt, timeoutMs }) {
       "read-only",
       "--cd",
       directory,
-      "--model",
-      model,
       "--config",
       'approval_policy="never"',
       "--output-last-message",
       outputPath,
       "-",
     ];
+    const codexModel = process.env.KEEP_GOING_CODEX_MODEL;
+    if (codexModel) args.push("--model", codexModel);
     assertExitOk(await runProcess(codex, args, prompt, timeoutMs), "codex exec");
     return await readFile(outputPath, "utf8");
   } finally {
@@ -480,7 +479,6 @@ async function runClaudeModel({ prompt, timeoutMs }) {
   const directory = await mkdtemp(path.join(tmpdir(), "claude-keep-going-"));
   try {
     const claude = process.env.KEEP_GOING_CLAUDE_BIN || "claude";
-    const model = process.env.KEEP_GOING_CLAUDE_MODEL || "sonnet";
     // No tools and no --json-schema: a plain-text verdict completes in one turn,
     // whereas the StructuredOutput tool call was fumbled often enough to exhaust
     // --max-turns.
@@ -496,11 +494,11 @@ async function runClaudeModel({ prompt, timeoutMs }) {
       "1",
       "--permission-mode",
       "dontAsk",
-      "--model",
-      model,
       "--output-format",
       "json",
     ];
+    const claudeModel = process.env.KEEP_GOING_CLAUDE_MODEL;
+    if (claudeModel) args.push("--model", claudeModel);
     const env = { ...process.env };
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_EFFORT_LEVEL;
@@ -670,7 +668,11 @@ async function handleStop(input, runner = "codex") {
     // unidentified, and then only to count: its content never reaches the
     // reviewer. Where it can be read it is exact and it replaces the tally,
     // here and in what the tally is left holding.
-    if (runtime.count && typeof input.transcript_path === "string" && input.transcript_path) {
+    // A subagent stop carries the parent's transcript, whose user messages
+    // belong to the parent's turn, and its own agent_transcript_path holds a
+    // task the owner never typed. agent_id already keys the tally, so there is
+    // nothing here a transcript could tell us.
+    if (!input.agent_id && runtime.count && typeof input.transcript_path === "string" && input.transcript_path) {
       try {
         continuations = await countContinuations(input, runner);
         countedBy = "transcript";
