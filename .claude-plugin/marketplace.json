@@ -1,0 +1,26 @@
+{
+  "name": "keep-going",
+  "description": "A Stop hook that tells the agent to keep going when work remains.",
+  "owner": {
+    "name": "Ferdous Bhai",
+    "url": "https://github.com/ferdousbhai"
+  },
+  "plugins": [
+    {
+      "name": "keep-going",
+      "source": "./plugins/keep-going",
+      "displayName": "Keep Going",
+      "description": "Tell the agent to keep going when it tries to stop with work left.",
+      "version": "0.4.0",
+      "author": {
+        "name": "Ferdous Bhai",
+        "url": "https://github.com/ferdousbhai"
+      },
+      "homepage": "https://github.com/ferdousbhai/keep-going",
+      "repository": "https://github.com/ferdousbhai/keep-going",
+      "license": "MIT",
+      "category": "Productivity",
+      "keywords": ["hooks", "stop", "continuity", "encouragement"]
+    }
+  ]
+}

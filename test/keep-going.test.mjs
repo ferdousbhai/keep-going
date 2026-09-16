@@ -528,17 +528,33 @@ test("the hook never asks for a register it does not keep itself", () => {
   }
 });
 
-test("the Codex plugin manifest declares the package version", async () => {
+test("every plugin manifest declares the package version", async () => {
   // v0.1.1 shipped a manifest still declaring 0.1.0, so the marketplace
   // reported the wrong version for the whole release. Nothing referenced both
   // files, so the drift was invisible until someone read them side by side.
+  // There are three manifests to keep in step now, one per install route.
   const read = async (relative) =>
     JSON.parse(await readFile(new URL(relative, import.meta.url), "utf8"));
-  const [pkg, plugin] = await Promise.all([
+  const [pkg, codex, claude, marketplace] = await Promise.all([
     read("../package.json"),
     read("../plugins/keep-going/.codex-plugin/plugin.json"),
+    read("../plugins/keep-going/.claude-plugin/plugin.json"),
+    read("../.claude-plugin/marketplace.json"),
   ]);
-  assert.equal(plugin.version, pkg.version);
+  assert.equal(codex.version, pkg.version);
+  assert.equal(claude.version, pkg.version);
+  assert.deepEqual(
+    marketplace.plugins.map((entry) => entry.version),
+    marketplace.plugins.map(() => pkg.version),
+  );
+
+  // Each host reads its own manifest, so the Claude hook has to name the Claude
+  // runner: the Codex file next to it spells the same script with a different
+  // trailing argument, and a copy-paste between them fails open on every stop.
+  const hooks = await read(`../plugins/keep-going/${claude.hooks}`);
+  const [{ command }] = hooks.hooks.Stop[0].hooks;
+  assert.match(command, /\$\{CLAUDE_PLUGIN_ROOT\}/);
+  assert.match(command, /keep-going\.mjs" claude$/);
 });
 
 test("the shipped plugin bundles no runtime dependency", async () => {

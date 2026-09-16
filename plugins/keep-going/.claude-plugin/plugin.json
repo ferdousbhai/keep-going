@@ -1,0 +1,15 @@
+{
+  "name": "keep-going",
+  "displayName": "Keep Going",
+  "version": "0.4.0",
+  "description": "Classifies the last assistant message as CONTINUE, JUDGE, or STOP, then answers a premature stop with a few words from the reviewer instead of letting the turn end.",
+  "author": {
+    "name": "Ferdous Bhai",
+    "url": "https://github.com/ferdousbhai"
+  },
+  "homepage": "https://github.com/ferdousbhai/keep-going",
+  "repository": "https://github.com/ferdousbhai/keep-going",
+  "license": "MIT",
+  "keywords": ["hooks", "stop", "continuity", "encouragement"],
+  "hooks": "./hooks/claude.json"
+}

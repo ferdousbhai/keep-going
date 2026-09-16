@@ -34,14 +34,26 @@ also needs `ghostd hook-smol-complete`).
 
 ```bash
 # Codex — then start a new session
-codex plugin marketplace add ferdousbhai/keep-going --ref v0.4.0
+codex plugin marketplace add ferdousbhai/keep-going
 codex plugin add keep-going@keep-going
 
-# Claude Code, Ghost, or both: --claude, --ghost, --all
-npx --yes github:ferdousbhai/keep-going#v0.4.0 --claude
+# Claude Code
+claude plugin marketplace add ferdousbhai/keep-going
+claude plugin install keep-going@keep-going
+
+# Ghost, or Claude Code without the plugin: --claude, --ghost, --all
+npx --yes github:ferdousbhai/keep-going --ghost
 ```
 
-Uninstall: the same `npx` command with `--uninstall`.
+One route per host: the plugin and the `npx` installer each register their own
+Stop hook, and a host with both runs the reviewer twice on every stop.
+
+These track `main`, gated by `npm run check`. To pin instead, add a tag —
+`--ref v0.4.0` for Codex, `#v0.4.0` for `npx`; the Claude plugin moves only when
+you run `claude plugin update`.
+
+Uninstall: `claude plugin uninstall keep-going`, or the same `npx` command with
+`--uninstall`.
 
 ## Environment variables
 
