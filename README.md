@@ -1,7 +1,7 @@
 # keep going
 
-A Stop hook for Codex, Claude Code, and Ghost that tells the agent to keep going
-when work remains.
+A Stop hook for Codex, Claude Code, Ghost, and Grok that tells the agent to keep
+going when work remains.
 
 Jarred Sumner's input, through a day and a half of Claude subagents chasing the
 Riemann hypothesis, was mostly variants of "keep going" and "believe in
@@ -64,7 +64,7 @@ One route per host: the plugin and the `npx` installer each register their own
 Stop hook, and a host with both runs the reviewer twice on every stop.
 
 These track `main`, gated by `npm run check`. To pin instead, add a tag —
-`--ref v0.4.0` for Codex, `#v0.4.0` for `npx`; the Claude plugin moves only when
+`--ref v0.6.0` for Codex, `#v0.6.0` for `npx`; the Claude plugin moves only when
 you run `claude plugin update`.
 
 `npx --yes github:ferdousbhai/keep-going --status` prints where keep-going is
@@ -81,8 +81,10 @@ Uninstall: `claude plugin uninstall keep-going`, or the same `npx` command with
 | `KEEP_GOING_CODEX_BIN` | `codex` |
 | `KEEP_GOING_CLAUDE_BIN` | `claude` |
 | `KEEP_GOING_GHOST_BIN` | `ghostd` |
+| `KEEP_GOING_GROK_BIN` | `grok` |
 | `KEEP_GOING_CODEX_MODEL` | `gpt-5.6-luna` |
 | `KEEP_GOING_CLAUDE_MODEL` | `sonnet` |
+| `KEEP_GOING_GROK_MODEL` | unset; grok is run without `--model`, so it picks |
 | `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, saying which mechanism capped the turn |
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
