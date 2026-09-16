@@ -47,11 +47,16 @@ const RUNTIMES = {
 // Validate the reviewer's tiny provider-independent protocol before translating
 // it to the host-specific Stop-hook JSON.
 const REVIEW_VERDICT_PATTERN = /^(CONTINUE|JUDGE|STOP)\b[\s:.\u2013\u2014-]*([\s\S]*)$/;
-// One sentence. A longer reply is dropped rather than truncated: the reviewer
-// never sees the transcript, so a rambling line is guesswork, not context.
-const NUDGE_LIMIT = 200;
 
-const REVIEW_PROMPT = `Classify last_assistant_message:
+// A few words. The inspiration for this hook was a person typing "keep going"
+// and "believe in yourself" for a day and a half, so a paragraph is the wrong
+// register even when it is correct. A line over the limit is dropped rather
+// than truncated, and the fallbacks are the same handful of words, so a drop
+// costs tone, not much else.
+const NUDGE_LIMIT = 60;
+
+const REVIEW_PROMPT = `A coding agent just tried to end its turn. Its final message is
+last_assistant_message. Decide whether the turn is really over.
 
 CONTINUE — required work remains that the agent can perform now.
 JUDGE — it asks the user for input, but more reasoning or research should resolve it.
@@ -61,10 +66,15 @@ Prefer JUDGE over STOP when the request for input looks self-resolvable by the a
 Do not default to any outcome or invent unstated work.
 
 Reply with the verdict word alone on the first line: CONTINUE, JUDGE, or STOP.
-After CONTINUE or JUDGE, add one short line of encouragement addressed to the
-agent, grounded in what last_assistant_message was actually doing. Encourage
-only: name no new task, file, command, or requirement the message did not
-already state, and give no instruction of your own.`;
+For STOP, stop there. For CONTINUE or JUDGE, add one more line: it reaches the
+agent verbatim, as the whole reason its turn was not allowed to end.
+
+Use as few words as you can, under ${NUDGE_LIMIT} characters — "Keep going.",
+"Believe in yourself.", "Don't ask yet — you can work this out." Speak to the
+agent. Name no task, file, command, or requirement its message did not already
+state. A longer line is discarded for a generic one.
+
+After CONTINUE, push it onward. After JUDGE, tell it not to ask the user yet.`;
 
 function redactSensitive(value) {
   return value
@@ -520,26 +530,29 @@ const ENCOURAGEMENTS = [
   "There is still work left here. Keep going.",
 ];
 
+// Near the cap the reviewer is told to write a different line, rather than
+// having one appended to the line it wrote: hook-side facts reach it the one
+// way NUDGE_LIMIT already does, and the message stays within the budget.
 const LAST_STRETCH_NOTE =
-  "This turn is near its continuation limit, so land what is already in flight rather than starting something new.";
+  "This turn is near its limit: tell the agent to land what is in flight rather than start anything new.";
+
+function reviewPrompt(continuations) {
+  const index = Number.isInteger(continuations) && continuations > 0 ? continuations : 0;
+  if (index < CONTINUATION_CAP - LAST_STRETCH) return REVIEW_PROMPT;
+  return `${REVIEW_PROMPT}\n\n${LAST_STRETCH_NOTE}`;
+}
 
 function encouragement(continuations, nudge) {
   const index = Number.isInteger(continuations) && continuations > 0 ? continuations : 0;
-  const line = nudge || ENCOURAGEMENTS[index % ENCOURAGEMENTS.length];
-  // Only this side knows the cap, so the closing note is never the model's.
-  return index >= CONTINUATION_CAP - LAST_STRETCH ? `${line} ${LAST_STRETCH_NOTE}` : line;
+  return nudge || ENCOURAGEMENTS[index % ENCOURAGEMENTS.length];
 }
 
+// The reviewer writes the whole line for both blocking verdicts. A fixed
+// preamble on JUDGE could only repeat one guess about why the agent stopped,
+// and the reviewer is the half that actually read the message.
 function hookOutputForVerdict(verdict, continuations = 0, nudge = "") {
-  if (verdict === "CONTINUE") {
+  if (verdict === "CONTINUE" || verdict === "JUDGE") {
     return { decision: "block", reason: encouragement(continuations, nudge) };
-  }
-  if (verdict === "JUDGE") {
-    // The instruction stays ours; the reviewer only contributes the nudge.
-    return {
-      decision: "block",
-      reason: `Do not ask the user yet. Apply more reasoning or research to get yourself unstuck; only stop if genuinely blocked. ${encouragement(continuations, nudge)}`,
-    };
   }
   return {};
 }
@@ -591,7 +604,7 @@ async function handleStop(input, runner = "codex") {
 
     review = parseReviewVerdict(
       await runtime.run({
-        prompt: `${REVIEW_PROMPT}\n\n${JSON.stringify({ last_assistant_message: lastAssistantMessage })}`,
+        prompt: `${reviewPrompt(continuations)}\n\n${JSON.stringify({ last_assistant_message: lastAssistantMessage })}`,
         timeoutMs: CLASSIFIER_TIMEOUT_MS,
         ghostHome: input.ghost_home,
       }),
@@ -625,9 +638,11 @@ if (import.meta.url === entry) await main();
 export {
   CONTINUATION_CAP,
   ENCOURAGEMENTS,
+  REVIEW_PROMPT,
   NUDGE_LIMIT,
   LAST_STRETCH,
   countContinuations,
+  reviewPrompt,
   handleStop,
   hookOutputForVerdict,
   parseReviewVerdict,

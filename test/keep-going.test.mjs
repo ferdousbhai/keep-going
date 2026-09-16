@@ -10,7 +10,9 @@ import {
   ENCOURAGEMENTS,
   LAST_STRETCH,
   NUDGE_LIMIT,
+  REVIEW_PROMPT,
   countContinuations,
+  reviewPrompt,
   handleStop,
   hookOutputForVerdict,
   parseReviewVerdict,
@@ -430,10 +432,7 @@ test("Ghost delegates classification to its smol-model bridge", { concurrency: f
   try {
     process.env.MOCK_REVIEW_RESPONSE = "JUDGE";
     const output = await handleStop(context.input, "ghost");
-    assert.deepEqual(output, {
-      decision: "block",
-      reason: `Do not ask the user yet. Apply more reasoning or research to get yourself unstuck; only stop if genuinely blocked. ${ENCOURAGEMENTS[0]}`,
-    });
+    assert.deepEqual(output, { decision: "block", reason: ENCOURAGEMENTS[0] });
     const [call] = await context.calls();
     assert.deepEqual(call.args, ["hook-smol-complete"]);
     assert.equal(call.input.ghost_home, context.input.ghost_home);
@@ -455,14 +454,18 @@ test("verdict parsing accepts only the exact review enum", () => {
 });
 
 test("the reviewer's own line is carried through, sanitised, or dropped", () => {
-  // The reviewer writes the encouragement; this side keeps the instruction, so
-  // a line that arrives unusable has to fall back rather than ship empty.
+  // The reviewer writes the whole blocking message, so a line that arrives
+  // unusable has to fall back rather than ship empty.
   const { verdict, nudge } = parseReviewVerdict(
     "CONTINUE\nThree files into the rename and the last one is small.",
   );
   assert.equal(verdict, "CONTINUE");
   assert.equal(nudge, "Three files into the rename and the last one is small.");
-  assert.deepEqual(hookOutputForVerdict(verdict, 0, nudge), { decision: "block", reason: nudge });
+  // Both blocking verdicts ship this line and nothing else: JUDGE's fixed
+  // preamble is gone, so the reviewer writes the whole message either way.
+  for (const blocking of ["CONTINUE", "JUDGE"]) {
+    assert.deepEqual(hookOutputForVerdict(blocking, 0, nudge), { decision: "block", reason: nudge });
+  }
 
   // Separators are stripped and the line is flattened, so a multi-line reply
   // cannot forge transcript structure in the message the agent receives.
@@ -495,15 +498,34 @@ test("the fallback line rotates and the last stretch asks for a landing", () => 
   assert.deepEqual(reasons, ENCOURAGEMENTS);
   assert.equal(new Set(reasons).size, ENCOURAGEMENTS.length);
 
-  const early = hookOutputForVerdict("CONTINUE", CONTINUATION_CAP - LAST_STRETCH - 1).reason;
-  const late = hookOutputForVerdict("CONTINUE", CONTINUATION_CAP - LAST_STRETCH).reason;
-  assert.doesNotMatch(early, /near its continuation limit/);
-  assert.match(late, /near its continuation limit/);
-  // The cap is knowable only here, so the closing note is never the model's.
-  assert.match(
+  // Only this side knows the cap, so it reaches the reviewer the way every
+  // other hook-side fact does: in the prompt, before the line is written.
+  assert.equal(reviewPrompt(CONTINUATION_CAP - LAST_STRETCH - 1), REVIEW_PROMPT);
+  assert.match(reviewPrompt(CONTINUATION_CAP - LAST_STRETCH), /near its limit/);
+  assert.match(reviewPrompt(CONTINUATION_CAP - 1), /land what is in flight/);
+  // The note changes the instruction, never the answer the reviewer gave.
+  assert.equal(
     hookOutputForVerdict("CONTINUE", CONTINUATION_CAP - 1, "Nearly done.").reason,
-    /^Nearly done\. This turn is near its continuation limit/,
+    "Nearly done.",
   );
+});
+
+test("the hook never asks for a register it does not keep itself", () => {
+  // The reviewer writes the whole blocking message against a budget this side
+  // enforces, so every line the hook itself supplies — the prompt's examples,
+  // the fallbacks, and the composed reason — has to fit that same budget.
+  for (const example of REVIEW_PROMPT.match(/"[^"]+"/g) ?? []) {
+    assert.ok(example.length - 2 <= NUDGE_LIMIT, example);
+  }
+  for (const line of ENCOURAGEMENTS) assert.ok(line.length <= NUDGE_LIMIT, line);
+  for (const verdict of ["CONTINUE", "JUDGE"]) {
+    const reason = hookOutputForVerdict(verdict, CONTINUATION_CAP - 1, "a".repeat(NUDGE_LIMIT)).reason;
+    assert.ok(reason.length <= NUDGE_LIMIT, reason);
+  }
+  // Each verdict the parser accepts has to be a verdict the prompt asks for.
+  for (const verdict of ["CONTINUE", "JUDGE", "STOP"]) {
+    assert.match(REVIEW_PROMPT, new RegExp(`^${verdict} \\u2014 `, "m"));
+  }
 });
 
 test("the Codex plugin manifest declares the package version", async () => {
