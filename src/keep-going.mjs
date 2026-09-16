@@ -44,9 +44,59 @@ const RUNTIMES = {
   },
 };
 
+// Everything that differs per verdict, keyed once: how the prompt defines it,
+// what the reviewer is told to write after it, and what the hook falls back to
+// when the reviewer's own line is unusable. RUNTIMES does this for hosts; the
+// verdict is the other axis this file turns on.
+const VERDICTS = {
+  CONTINUE: {
+    blocks: true,
+    describe: "required work remains that the agent can perform now.",
+    directive: "push it onward",
+    // Rotated rather than fixed: a hundred continuations carrying one identical
+    // sentence read to the agent like a stuck loop instead of a push.
+    fallbacks: [
+      "Keep going.",
+      "You've got this \u2014 keep going.",
+      "Believe in yourself. Keep going.",
+      "There is still work left here. Keep going.",
+    ],
+  },
+  JUDGE: {
+    blocks: true,
+    describe: "it asks the user for input, but more reasoning or research should resolve it.",
+    directive: "tell it not to ask the user yet",
+    // Not CONTINUE's lines. The whole of JUDGE is "do not ask yet", and a
+    // dropped reviewer line would otherwise answer a question the agent put to
+    // the user with "keep going" — which is no reason not to ask it again.
+    fallbacks: [
+      "Do not ask yet \u2014 work it out first.",
+      "You can answer this one yourself. Keep going.",
+      "Research it before handing it back. Keep going.",
+      "Settle this without the user. Keep going.",
+    ],
+  },
+  STOP: {
+    blocks: false,
+    describe: "work is complete, or progress genuinely requires the user or an external state change.",
+  },
+};
+
+const VERDICT_NAMES = Object.keys(VERDICTS);
+const BLOCKING_VERDICTS = VERDICT_NAMES.filter((name) => VERDICTS[name].blocks);
+const ENDING_VERDICTS = VERDICT_NAMES.filter((name) => !VERDICTS[name].blocks);
+
+function listVerdicts(names) {
+  if (names.length < 2) return names.join("");
+  if (names.length === 2) return names.join(" or ");
+  return `${names.slice(0, -1).join(", ")}, or ${names.at(-1)}`;
+}
+
 // Validate the reviewer's tiny provider-independent protocol before translating
 // it to the host-specific Stop-hook JSON.
-const REVIEW_VERDICT_PATTERN = /^(CONTINUE|JUDGE|STOP)\b[\s:.\u2013\u2014-]*([\s\S]*)$/;
+const REVIEW_VERDICT_PATTERN = new RegExp(
+  `^(${VERDICT_NAMES.join("|")})\\b[\\s:.\\u2013\\u2014-]*([\\s\\S]*)$`,
+);
 
 // A few words. The inspiration for this hook was a person typing "keep going"
 // and "believe in yourself" for a day and a half, so a paragraph is the wrong
@@ -58,23 +108,22 @@ const NUDGE_LIMIT = 60;
 const REVIEW_PROMPT = `A coding agent just tried to end its turn. Its final message is
 last_assistant_message. Decide whether the turn is really over.
 
-CONTINUE — required work remains that the agent can perform now.
-JUDGE — it asks the user for input, but more reasoning or research should resolve it.
-STOP — work is complete, or progress genuinely requires the user or an external state change.
+${VERDICT_NAMES.map((name) => `${name} — ${VERDICTS[name].describe}`).join("\n")}
 
 Prefer JUDGE over STOP when the request for input looks self-resolvable by the agent.
 Do not default to any outcome or invent unstated work.
 
-Reply with the verdict word alone on the first line: CONTINUE, JUDGE, or STOP.
-For STOP, stop there. For CONTINUE or JUDGE, add one more line: it reaches the
-agent verbatim, as the whole reason its turn was not allowed to end.
+Reply with the verdict word alone on the first line: ${listVerdicts(VERDICT_NAMES)}.
+For ${listVerdicts(ENDING_VERDICTS)}, stop there. For ${listVerdicts(BLOCKING_VERDICTS)}, add one more
+line: it reaches the agent verbatim, as the whole reason its turn was not
+allowed to end.
 
 Use as few words as you can, under ${NUDGE_LIMIT} characters — "Keep going.",
 "Believe in yourself.", "Don't ask yet — you can work this out." Speak to the
 agent. Name no task, file, command, or requirement its message did not already
 state. A longer line is discarded for a generic one.
 
-After CONTINUE, push it onward. After JUDGE, tell it not to ask the user yet.`;
+${BLOCKING_VERDICTS.map((name) => `After ${name}, ${VERDICTS[name].directive}.`).join(" ")}`;
 
 function redactSensitive(value) {
   return value
@@ -520,16 +569,6 @@ function parseReviewVerdict(text) {
   return { verdict: match[1], nudge: sanitizeNudge(match[2]) };
 }
 
-// The fallback when the reviewer supplies no usable line of its own. Rotated
-// rather than fixed: a hundred continuations carrying one identical sentence
-// read to the agent like a stuck loop instead of a push.
-const ENCOURAGEMENTS = [
-  "Keep going.",
-  "You've got this \u2014 keep going.",
-  "Believe in yourself. Keep going.",
-  "There is still work left here. Keep going.",
-];
-
 // Near the cap the reviewer is told to write a different line, rather than
 // having one appended to the line it wrote: hook-side facts reach it the one
 // way NUDGE_LIMIT already does, and the message stays within the budget.
@@ -542,19 +581,18 @@ function reviewPrompt(continuations) {
   return `${REVIEW_PROMPT}\n\n${LAST_STRETCH_NOTE}`;
 }
 
-function encouragement(continuations, nudge) {
+function encouragement(continuations, nudge, fallbacks) {
   const index = Number.isInteger(continuations) && continuations > 0 ? continuations : 0;
-  return nudge || ENCOURAGEMENTS[index % ENCOURAGEMENTS.length];
+  return nudge || fallbacks[index % fallbacks.length];
 }
 
-// The reviewer writes the whole line for both blocking verdicts. A fixed
-// preamble on JUDGE could only repeat one guess about why the agent stopped,
-// and the reviewer is the half that actually read the message.
+// The reviewer writes the whole line for every blocking verdict. A fixed
+// preamble could only repeat one guess about why the agent stopped, and the
+// reviewer is the half that actually read the message.
 function hookOutputForVerdict(verdict, continuations = 0, nudge = "") {
-  if (verdict === "CONTINUE" || verdict === "JUDGE") {
-    return { decision: "block", reason: encouragement(continuations, nudge) };
-  }
-  return {};
+  const spec = VERDICTS[verdict];
+  if (!spec?.blocks) return {};
+  return { decision: "block", reason: encouragement(continuations, nudge, spec.fallbacks) };
 }
 
 async function recordReviewAudit(input, runner, { verdict, reason, error }) {
@@ -637,8 +675,8 @@ if (import.meta.url === entry) await main();
 
 export {
   CONTINUATION_CAP,
-  ENCOURAGEMENTS,
   REVIEW_PROMPT,
+  VERDICTS,
   NUDGE_LIMIT,
   LAST_STRETCH,
   countContinuations,

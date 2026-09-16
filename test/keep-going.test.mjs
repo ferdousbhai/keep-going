@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 
 import {
   CONTINUATION_CAP,
-  ENCOURAGEMENTS,
+  VERDICTS,
   LAST_STRETCH,
   NUDGE_LIMIT,
   REVIEW_PROMPT,
@@ -363,7 +363,7 @@ test("last_assistant_message is reviewed when the transcript is unavailable", { 
   try {
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     const output = await handleStop({ ...context.input, transcript_path: null });
-    assert.deepEqual(output, { decision: "block", reason: ENCOURAGEMENTS[0] });
+    assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
     const [call] = await context.calls();
     assert.match(call.prompt, /"last_assistant_message":"Candidate final response\."/);
   } finally {
@@ -432,7 +432,7 @@ test("Ghost delegates classification to its smol-model bridge", { concurrency: f
   try {
     process.env.MOCK_REVIEW_RESPONSE = "JUDGE";
     const output = await handleStop(context.input, "ghost");
-    assert.deepEqual(output, { decision: "block", reason: ENCOURAGEMENTS[0] });
+    assert.deepEqual(output, { decision: "block", reason: VERDICTS.JUDGE.fallbacks[0] });
     const [call] = await context.calls();
     assert.deepEqual(call.args, ["hook-smol-complete"]);
     assert.equal(call.input.ghost_home, context.input.ghost_home);
@@ -485,18 +485,24 @@ test("the reviewer's own line is carried through, sanitised, or dropped", () => 
   assert.equal(parseReviewVerdict(`CONTINUE\n${long}`).nudge, "");
   assert.deepEqual(hookOutputForVerdict("CONTINUE", 0, ""), {
     decision: "block",
-    reason: ENCOURAGEMENTS[0],
+    reason: VERDICTS.CONTINUE.fallbacks[0],
   });
 });
 
 test("the fallback line rotates and the last stretch asks for a landing", () => {
   // One sentence repeated a hundred times reads as a loop, not a push.
   const reasons = Array.from(
-    { length: ENCOURAGEMENTS.length },
+    { length: VERDICTS.CONTINUE.fallbacks.length },
     (_, index) => hookOutputForVerdict("CONTINUE", index).reason,
   );
-  assert.deepEqual(reasons, ENCOURAGEMENTS);
-  assert.equal(new Set(reasons).size, ENCOURAGEMENTS.length);
+  assert.deepEqual(reasons, VERDICTS.CONTINUE.fallbacks);
+  assert.equal(new Set(reasons).size, VERDICTS.CONTINUE.fallbacks.length);
+
+  // A dropped JUDGE line must not degrade into CONTINUE: the whole of the
+  // verdict is "do not ask yet", and the agent has just asked the user.
+  const shared = VERDICTS.JUDGE.fallbacks.filter((line) => VERDICTS.CONTINUE.fallbacks.includes(line));
+  assert.deepEqual(shared, []);
+  assert.match(hookOutputForVerdict("JUDGE", 0, "").reason, /not ask|yourself|before/i);
 
   // Only this side knows the cap, so it reaches the reviewer the way every
   // other hook-side fact does: in the prompt, before the line is written.
@@ -517,14 +523,19 @@ test("the hook never asks for a register it does not keep itself", () => {
   for (const example of REVIEW_PROMPT.match(/"[^"]+"/g) ?? []) {
     assert.ok(example.length - 2 <= NUDGE_LIMIT, example);
   }
-  for (const line of ENCOURAGEMENTS) assert.ok(line.length <= NUDGE_LIMIT, line);
+  for (const spec of Object.values(VERDICTS)) {
+    for (const line of spec.fallbacks ?? []) assert.ok(line.length <= NUDGE_LIMIT, line);
+  }
   for (const verdict of ["CONTINUE", "JUDGE"]) {
     const reason = hookOutputForVerdict(verdict, CONTINUATION_CAP - 1, "a".repeat(NUDGE_LIMIT)).reason;
     assert.ok(reason.length <= NUDGE_LIMIT, reason);
   }
-  // Each verdict the parser accepts has to be a verdict the prompt asks for.
-  for (const verdict of ["CONTINUE", "JUDGE", "STOP"]) {
+  // Each verdict the parser accepts has to be a verdict the prompt asks for,
+  // and each blocking one has to tell the reviewer what to write after it.
+  for (const [verdict, spec] of Object.entries(VERDICTS)) {
     assert.match(REVIEW_PROMPT, new RegExp(`^${verdict} \\u2014 `, "m"));
+    assert.equal(parseReviewVerdict(verdict).verdict, verdict);
+    if (spec.blocks) assert.ok(REVIEW_PROMPT.includes(`After ${verdict}, ${spec.directive}.`));
   }
 });
 
@@ -667,7 +678,7 @@ test("Ghost counts the current owner turn from its Pi transcript", { concurrency
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     const output = await handleStop(input, "ghost");
     // The bare verdict carries no line, so the fallback rotates with the count.
-    assert.deepEqual(output, { decision: "block", reason: ENCOURAGEMENTS[1] });
+    assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[1] });
     const [call] = await context.calls();
     assert.match(call.input.prompt, /"last_assistant_message":"Pass 2\."/);
     assert.doesNotMatch(
