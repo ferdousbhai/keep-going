@@ -79,9 +79,9 @@ Install both and Grok runs the reviewer twice on every stop.
 One route per host: the plugin and the `npx` installer each register their own
 Stop hook, and a host with both runs the reviewer twice on every stop.
 
-These track `main`, gated by `npm run check`. To pin instead, add a tag —
-`--ref v0.6.0` for Codex, `#v0.6.0` for `npx`; the Claude plugin moves only when
-you run `claude plugin update`.
+These track `main`, gated by `npm run check`. To pin instead, add a git tag —
+`--ref v0.4.0` for Codex, `#v0.4.0` for `npx`; the Claude plugin moves only when
+you run `claude plugin update`. There is no npm package.
 
 Working on keep-going itself: `node scripts/install.mjs --claude --ghost --link`
 registers this checkout rather than copying it, so edits take effect with no

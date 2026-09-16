@@ -24,8 +24,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.mjs",
-    "check": "npm run build && npm test",
-    "prepublishOnly": "npm run check"
+    "check": "npm run build && npm test"
   },
   "devDependencies": {
     "esbuild": "0.25.9"
@@ -33,7 +32,5 @@
   "engines": {
     "node": ">=22"
   },
-  "publishConfig": {
-    "access": "public"
-  }
+  "private": true
 }
