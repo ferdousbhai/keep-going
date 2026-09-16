@@ -16,16 +16,37 @@ const CONTINUATION_CAP = 100;
 // Continuations before the cap where the nudge stops inviting new work.
 const LAST_STRETCH = 10;
 
+// Everything that differs per host, keyed once: the inputs it must supply, the
+// directories its transcripts may live in, how its continuations are counted,
+// and how its reviewer is run. Function declarations hoist, so the counters and
+// runners below are already bound when this is evaluated.
 const RUNTIMES = {
-  codex: { provider: "codex", model: "gpt-5.6-luna", modelEnv: "KEEP_GOING_CODEX_MODEL" },
-  claude: { provider: "claude", model: "sonnet", modelEnv: "KEEP_GOING_CLAUDE_MODEL" },
-  ghost: { provider: "ghost" },
+  codex: {
+    requires: ["turn_id", "session_id"],
+    roots: () => {
+      const home = process.env.CODEX_HOME || path.join(homedir(), ".codex");
+      return [path.join(home, "sessions"), path.join(home, "archived_sessions")];
+    },
+    count: codexContinuations,
+    run: runCodexModel,
+  },
+  claude: {
+    requires: ["session_id"],
+    roots: () => [path.join(process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), ".claude"), "projects")],
+    count: claudeContinuations,
+    run: runClaudeModel,
+  },
+  ghost: {
+    requires: ["session_id"],
+    roots: (input) => [input.ghost_home],
+    count: ghostContinuations,
+    run: runGhostModel,
+  },
 };
 
 // Validate the reviewer's tiny provider-independent protocol before translating
 // it to the host-specific Stop-hook JSON.
-const REVIEW_VERDICTS = new Set(["CONTINUE", "JUDGE", "STOP"]);
-const REVIEW_VERDICT_PATTERN = new RegExp(`^(${[...REVIEW_VERDICTS].join("|")})\\b([\\s\\S]*)$`);
+const REVIEW_VERDICT_PATTERN = /^(CONTINUE|JUDGE|STOP)\b[\s:.\u2013\u2014-]*([\s\S]*)$/;
 // One sentence. A longer reply is dropped rather than truncated: the reviewer
 // never sees the transcript, so a rambling line is guesswork, not context.
 const NUDGE_LIMIT = 200;
@@ -59,7 +80,7 @@ function redactSensitive(value) {
     );
 }
 
-function compactText(value, limit = 6000) {
+function compactText(value, limit) {
   if (typeof value !== "string") return "";
   const redacted = redactSensitive(value);
   if (redacted.length <= limit) return redacted;
@@ -68,11 +89,15 @@ function compactText(value, limit = 6000) {
   return `${redacted.slice(0, head)}\n...[truncated]...\n${redacted.slice(-tail)}`;
 }
 
-function processFailureDetail(result) {
-  return compactText(
+// Every reviewer is a child process that either exits 0 or explains itself on
+// one of its two streams.
+function assertExitOk(result, label) {
+  if (result.code === 0) return result;
+  const detail = compactText(
     [result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join("\n"),
     1200,
   );
+  throw new Error(`${label} exited ${result.code ?? result.signal ?? "unknown"}${detail ? `: ${detail}` : ""}`);
 }
 
 function messageText(payload) {
@@ -133,19 +158,14 @@ function turnStartIndex(items, ownerPrompt, ownerText) {
 // between owner prompts, so every one of them counts.
 const HOOK_PROMPT_PATTERN = /^\s*(?:Stop hook feedback\b|<hook_prompt\b)/;
 
-async function allowedTranscriptPath(transcriptPath, runner = "codex", roots) {
+async function allowedTranscriptPath(input, runner) {
+  const transcriptPath = input.transcript_path;
   if (typeof transcriptPath !== "string" || !transcriptPath) {
     throw new Error("Stop input is missing transcript_path");
   }
   const candidate = await realpath(transcriptPath);
-  const allowedRoots = roots ?? (runner === "claude"
-    ? [path.join(process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), ".claude"), "projects")]
-    : [
-        path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "sessions"),
-        path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "archived_sessions"),
-      ]);
 
-  for (const root of allowedRoots) {
+  for (const root of RUNTIMES[runner].roots(input)) {
     if (typeof root !== "string" || !root) continue;
     try {
       const resolvedRoot = await realpath(root);
@@ -158,7 +178,7 @@ async function allowedTranscriptPath(transcriptPath, runner = "codex", roots) {
 }
 
 async function codexContinuations(input) {
-  const transcriptPath = await allowedTranscriptPath(input.transcript_path, "codex");
+  const transcriptPath = await allowedTranscriptPath(input, "codex");
   let count = 0;
   for await (const record of jsonLines(transcriptPath)) {
     const payload = record?.payload;
@@ -191,8 +211,8 @@ function claudeUserMessage(record) {
   };
 }
 
-async function claudeContinuations(input, options = {}) {
-  const transcriptPath = options.transcriptPath ?? await allowedTranscriptPath(input.transcript_path, "claude");
+async function claudeContinuations(input, ownerPromptText = null) {
+  const transcriptPath = await allowedTranscriptPath(input, "claude");
   const messages = [];
   for await (const record of jsonLines(transcriptPath)) {
     const message = claudeUserMessage(record);
@@ -203,12 +223,15 @@ async function claudeContinuations(input, options = {}) {
   // re-prompts with plain user messages (ghost's Claude Code runtime) supplies
   // the owner prompt so those continuations stay inside the turn — and every
   // user message after it counts as a continuation.
-  const ownerPrompt = typeof options.ownerPrompt === "string" ? options.ownerPrompt.trim() : null;
+  const ownerPrompt = typeof ownerPromptText === "string" ? ownerPromptText.trim() : null;
   const turnStart = turnStartIndex(messages, ownerPrompt, (item) => (item.genuine ? item.text : null));
   if (turnStart < 0) return 0;
-  const inTurn = messages.slice(turnStart + 1);
-  if (ownerPrompt) return inTurn.length;
-  return inTurn.filter((item) => HOOK_PROMPT_PATTERN.test(item.text)).length;
+  if (ownerPrompt) return messages.length - turnStart - 1;
+  let count = 0;
+  for (let index = turnStart + 1; index < messages.length; index += 1) {
+    if (HOOK_PROMPT_PATTERN.test(messages[index].text)) count += 1;
+  }
+  return count;
 }
 
 // Pi session files are trees: every entry carries id/parentId and the live
@@ -267,17 +290,14 @@ async function ghostContinuations(input) {
   }
   if (typeof input.transcript_path !== "string" || !input.transcript_path) return 0;
   if (input.conversation_runtime === "claude-code") {
-    const transcriptPath = await allowedTranscriptPath(input.transcript_path, "claude");
-    return claudeContinuations(input, { transcriptPath, ownerPrompt: input.owner_prompt });
+    return claudeContinuations(input, input.owner_prompt);
   }
-  const transcriptPath = await allowedTranscriptPath(input.transcript_path, "ghost", [input.ghost_home]);
+  const transcriptPath = await allowedTranscriptPath(input, "ghost");
   return piContinuations(input, transcriptPath);
 }
 
 async function countContinuations(input, runner = "codex") {
-  if (runner === "claude") return claudeContinuations(input);
-  if (runner === "ghost") return ghostContinuations(input);
-  return codexContinuations(input);
+  return RUNTIMES[runner].count(input);
 }
 
 function stopCandidateText(input) {
@@ -285,28 +305,30 @@ function stopCandidateText(input) {
   return messageText(input.last_assistant_message);
 }
 
+// setEncoding("utf8") guarantees a chunk never splits a code point, so summing
+// per-chunk lengths is exact and avoids remeasuring the whole stream each time.
+function streamCollector(limit, overflowMessage) {
+  const parts = [];
+  let bytes = 0;
+  return {
+    push(chunk) {
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > limit) throw new Error(overflowMessage);
+      parts.push(chunk);
+    },
+    text: () => parts.join(""),
+  };
+}
+
 async function readStdin() {
-  let value = "";
+  const collector = streamCollector(MAX_STDIN_BYTES, "Stop hook input exceeds 1 MB");
   process.stdin.setEncoding("utf8");
-  for await (const chunk of process.stdin) {
-    value += chunk;
-    if (Buffer.byteLength(value) > MAX_STDIN_BYTES) {
-      throw new Error("Stop hook input exceeds 1 MB");
-    }
-  }
-  const parsed = JSON.parse(value);
+  for await (const chunk of process.stdin) collector.push(chunk);
+  const parsed = JSON.parse(collector.text());
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Stop hook input must be a JSON object");
   }
   return parsed;
-}
-
-function appendLimited(current, chunk) {
-  const next = current + chunk;
-  if (Buffer.byteLength(next) > MODEL_OUTPUT_LIMIT) {
-    throw new Error("child process output exceeded 2 MB");
-  }
-  return next;
 }
 
 function runProcess(command, args, input, timeoutMs, env = process.env, cwd) {
@@ -316,12 +338,7 @@ function runProcess(command, args, input, timeoutMs, env = process.env, cwd) {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    let stdout = "";
-    let stderr = "";
     let settled = false;
-
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
 
     const fail = (error) => {
       if (settled) return;
@@ -347,35 +364,35 @@ function runProcess(command, args, input, timeoutMs, env = process.env, cwd) {
       clearTimeout(timer);
       reject(error);
     });
-    child.stdout.on("data", (chunk) => {
-      try {
-        stdout = appendLimited(stdout, chunk);
-      } catch (error) {
-        fail(error);
-      }
+    const [out, err] = [child.stdout, child.stderr].map((stream) => {
+      const collector = streamCollector(MODEL_OUTPUT_LIMIT, "child process output exceeded 2 MB");
+      stream.setEncoding("utf8");
+      stream.on("data", (chunk) => {
+        try {
+          collector.push(chunk);
+        } catch (error) {
+          fail(error);
+        }
+      });
+      return collector;
     });
-    child.stderr.on("data", (chunk) => {
-      try {
-        stderr = appendLimited(stderr, chunk);
-      } catch (error) {
-        fail(error);
-      }
-    });
+
     child.on("close", (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ code, signal, stdout, stderr });
+      resolve({ code, signal, stdout: out.text(), stderr: err.text() });
     });
     child.stdin.end(input);
   });
 }
 
-async function runCodexModel({ model, prompt, timeoutMs }) {
+async function runCodexModel({ prompt, timeoutMs }) {
   const directory = await mkdtemp(path.join(tmpdir(), "codex-keep-going-"));
   const outputPath = path.join(directory, "result.txt");
   try {
     const codex = process.env.KEEP_GOING_CODEX_BIN || "codex";
+    const model = process.env.KEEP_GOING_CODEX_MODEL || "gpt-5.6-luna";
     const args = [
       "exec",
       "--ephemeral",
@@ -398,21 +415,18 @@ async function runCodexModel({ model, prompt, timeoutMs }) {
       outputPath,
       "-",
     ];
-    const result = await runProcess(codex, args, prompt, timeoutMs);
-    if (result.code !== 0) {
-      const detail = processFailureDetail(result);
-      throw new Error(`codex exec exited ${result.code ?? result.signal ?? "unknown"}${detail ? `: ${detail}` : ""}`);
-    }
+    assertExitOk(await runProcess(codex, args, prompt, timeoutMs), "codex exec");
     return await readFile(outputPath, "utf8");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 }
 
-async function runClaudeModel({ model, prompt, timeoutMs }) {
+async function runClaudeModel({ prompt, timeoutMs }) {
   const directory = await mkdtemp(path.join(tmpdir(), "claude-keep-going-"));
   try {
     const claude = process.env.KEEP_GOING_CLAUDE_BIN || "claude";
+    const model = process.env.KEEP_GOING_CLAUDE_MODEL || "sonnet";
     // No tools and no --json-schema: a plain-text verdict completes in one turn,
     // whereas the StructuredOutput tool call was fumbled often enough to exhaust
     // --max-turns.
@@ -437,11 +451,10 @@ async function runClaudeModel({ model, prompt, timeoutMs }) {
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_EFFORT_LEVEL;
     delete env.CLAUDE_CODE_ENTRYPOINT;
-    const result = await runProcess(claude, args, prompt, timeoutMs, env, directory);
-    if (result.code !== 0) {
-      const detail = processFailureDetail(result);
-      throw new Error(`claude exited ${result.code ?? result.signal ?? "unknown"}${detail ? `: ${detail}` : ""}`);
-    }
+    const result = assertExitOk(
+      await runProcess(claude, args, prompt, timeoutMs, env, directory),
+      "claude",
+    );
     let parsed;
     for (const line of result.stdout.trim().split("\n").reverse()) {
       try {
@@ -467,25 +480,18 @@ async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
     throw new Error("Ghost stop input is missing ghost_home");
   }
   const ghostd = process.env.KEEP_GOING_GHOST_BIN || "ghostd";
-  const result = await runProcess(
-    ghostd,
-    ["hook-smol-complete"],
-    JSON.stringify({ ghost_home: ghostHome, prompt }),
-    timeoutMs,
+  const result = assertExitOk(
+    await runProcess(
+      ghostd,
+      ["hook-smol-complete"],
+      JSON.stringify({ ghost_home: ghostHome, prompt }),
+      timeoutMs,
+    ),
+    "ghostd",
   );
-  if (result.code !== 0) {
-    const detail = processFailureDetail(result);
-    throw new Error(`ghostd exited ${result.code ?? result.signal ?? "unknown"}${detail ? `: ${detail}` : ""}`);
-  }
   const envelope = JSON.parse(result.stdout);
   if (typeof envelope?.text !== "string") throw new Error("ghostd returned no completion text");
   return envelope.text;
-}
-
-async function runReviewModel(options) {
-  if (options.provider === "claude") return runClaudeModel(options);
-  if (options.provider === "ghost") return runGhostModel(options);
-  return runCodexModel(options);
 }
 
 // The reviewer's own words carry into the agent's next turn, so they are
@@ -501,7 +507,7 @@ function parseReviewVerdict(text) {
   if (!match) {
     throw new Error("Reviewer output must begin with CONTINUE, JUDGE, or STOP");
   }
-  return { verdict: match[1], nudge: sanitizeNudge(match[2].replace(/^[\s:.\u2013\u2014-]+/, "")) };
+  return { verdict: match[1], nudge: sanitizeNudge(match[2]) };
 }
 
 // The fallback when the reviewer supplies no usable line of its own. Rotated
@@ -538,8 +544,7 @@ function hookOutputForVerdict(verdict, continuations = 0, nudge = "") {
   return {};
 }
 
-
-async function recordReviewAudit(input, runner, { verdict, reason, error } = {}) {
+async function recordReviewAudit(input, runner, { verdict, reason, error }) {
   const auditPath = process.env.KEEP_GOING_AUDIT_LOG;
   if (!auditPath) return;
   const entry = {
@@ -561,11 +566,10 @@ async function recordReviewAudit(input, runner, { verdict, reason, error } = {})
 async function handleStop(input, runner = "codex") {
   const runtime = RUNTIMES[runner];
   if (!runtime) throw new Error(`Unsupported keep-going runtime: ${runner}`);
-  if (runner === "codex" && (typeof input.turn_id !== "string" || !input.turn_id)) {
-    throw new Error("Stop input is missing turn_id");
-  }
-  if (typeof input.session_id !== "string" || !input.session_id) {
-    throw new Error("Stop input is missing session_id");
+  for (const key of runtime.requires) {
+    if (typeof input[key] !== "string" || !input[key]) {
+      throw new Error(`Stop input is missing ${key}`);
+    }
   }
   const lastAssistantMessage = compactText(stopCandidateText(input), 12_000);
   if (!lastAssistantMessage) return {};
@@ -586,12 +590,10 @@ async function handleStop(input, runner = "codex") {
     }
 
     review = parseReviewVerdict(
-      await runReviewModel({
-        provider: runtime.provider,
-        model: (runtime.modelEnv ? process.env[runtime.modelEnv] : undefined) || runtime.model,
+      await runtime.run({
         prompt: `${REVIEW_PROMPT}\n\n${JSON.stringify({ last_assistant_message: lastAssistantMessage })}`,
         timeoutMs: CLASSIFIER_TIMEOUT_MS,
-        ghostHome: runner === "ghost" ? input.ghost_home : undefined,
+        ghostHome: input.ghost_home,
       }),
     );
   } catch (error) {
@@ -625,7 +627,6 @@ export {
   ENCOURAGEMENTS,
   NUDGE_LIMIT,
   LAST_STRETCH,
-  REVIEW_PROMPT,
   countContinuations,
   handleStop,
   hookOutputForVerdict,

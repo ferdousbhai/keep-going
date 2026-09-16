@@ -16,7 +16,6 @@ await build({
   format: "esm",
   target: "node22",
   minify: true,
-  sourcemap: false,
   legalComments: "none",
 });
 await chmod(output, 0o755);

@@ -35,11 +35,23 @@ Usage:
 Codex installs through the repository marketplace; see README.md.`;
 }
 
+// The hosts this installer writes to, and where each keeps its hook config.
+// Codex installs through the repository marketplace instead.
+const TARGETS = {
+  claude: {
+    event: "Stop",
+    settings: ({ userHome }) =>
+      path.join(process.env.CLAUDE_CONFIG_DIR || path.join(userHome, ".claude"), "settings.json"),
+  },
+  ghost: {
+    event: "session_stop",
+    settings: ({ configHome }) => path.join(configHome, "ghost", "hooks.json"),
+  },
+};
+
 function selectedRuntimes(args) {
-  const runtimes = [];
-  if (args.includes("--all") || args.includes("--claude")) runtimes.push("claude");
-  if (args.includes("--all") || args.includes("--ghost")) runtimes.push("ghost");
-  return runtimes;
+  const all = args.includes("--all");
+  return Object.keys(TARGETS).filter((name) => all || args.includes(`--${name}`));
 }
 
 function shellQuote(value) {
@@ -103,7 +115,7 @@ function removeInstalledHooks(groups, hookFiles, runner) {
   return kept;
 }
 
-function updateHookConfig(config, event, hookFile, runner, uninstall, legacyHookFiles = []) {
+function updateHookConfig(config, event, hookFile, runner, uninstall, legacyHookFiles) {
   const hooks = isJsonObject(config.hooks) ? { ...config.hooks } : {};
   // Earlier releases installed under different names. Strip those registrations
   // as well, or an upgrade leaves one beside the new one and the reviewer runs
@@ -149,10 +161,8 @@ async function main() {
   }
 
   for (const runner of runtimes) {
-    const settingsFile = runner === "claude"
-      ? path.join(process.env.CLAUDE_CONFIG_DIR || path.join(userHome, ".claude"), "settings.json")
-      : path.join(configHome, "ghost", "hooks.json");
-    const event = runner === "claude" ? "Stop" : "session_stop";
+    const { event, settings } = TARGETS[runner];
+    const settingsFile = settings({ userHome, configHome });
     const config = await readJson(settingsFile, uninstall ? null : {});
     if (config === null) {
       process.stdout.write(`Removed ${runner} hook in ${settingsFile}\n`);

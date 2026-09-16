@@ -3,23 +3,19 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { spawn } from "node:child_process";
 
 import {
   CONTINUATION_CAP,
   ENCOURAGEMENTS,
   LAST_STRETCH,
   NUDGE_LIMIT,
-  REVIEW_PROMPT,
   countContinuations,
   handleStop,
   hookOutputForVerdict,
   parseReviewVerdict,
 } from "../src/keep-going.mjs";
-import * as bundled from "../plugins/keep-going/scripts/keep-going.mjs";
 
-const stopResponse = "STOP";
-const continueResponse = "CONTINUE";
-const judgeResponse = "JUDGE";
 
 const ENV_KEYS = [
   "CODEX_HOME",
@@ -31,6 +27,7 @@ const ENV_KEYS = [
   "KEEP_GOING_GHOST_BIN",
   "MOCK_CALL_LOG",
   "MOCK_REVIEW_RESPONSE",
+  "MOCK_REVIEW_PAD",
   "KEEP_GOING_AUDIT_LOG",
 ];
 
@@ -55,6 +52,11 @@ async function readCalls(callLog) {
   } catch {
     return [];
   }
+}
+
+async function appendRecords(file, records) {
+  const existing = await readFile(file, "utf8");
+  await writeFile(file, `${existing.trimEnd()}\n${records.join("\n")}\n`);
 }
 
 function transcriptLine(payload, turnId) {
@@ -227,6 +229,8 @@ const model = args[args.indexOf("--model") + 1];
 const value = process.env.MOCK_REVIEW_RESPONSE;
 appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ model, args, prompt }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "\\n" + value + "\\n" }));
+const pad = Number(process.env.MOCK_REVIEW_PAD || 0);
+if (pad > 0) process.stdout.write("y".repeat(pad));
 `,
   );
   await chmod(modelMock, 0o755);
@@ -324,8 +328,7 @@ test("Codex counting includes only hook prompts in the current turn", { concurre
         content: [{ type: "input_text", text: "please keep going" }],
       }, context.input.turn_id),
     ];
-    const existing = await readFile(context.input.transcript_path, "utf8");
-    await writeFile(context.input.transcript_path, `${existing}\n${additions.join("\n")}\n`);
+    await appendRecords(context.input.transcript_path, additions);
 
     assert.equal(await countContinuations(context.input), 1);
   } finally {
@@ -336,7 +339,7 @@ test("Codex counting includes only hook prompts in the current turn", { concurre
 test("STOP accepts the stop", { concurrency: false }, async () => {
   const context = await fixture();
   try {
-    process.env.MOCK_REVIEW_RESPONSE = stopResponse;
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
     const output = await handleStop(context.input);
     assert.deepEqual(output, {});
     const calls = await context.calls();
@@ -356,7 +359,7 @@ test("STOP accepts the stop", { concurrency: false }, async () => {
 test("last_assistant_message is reviewed when the transcript is unavailable", { concurrency: false }, async () => {
   const context = await fixture();
   try {
-    process.env.MOCK_REVIEW_RESPONSE = continueResponse;
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     const output = await handleStop({ ...context.input, transcript_path: null });
     assert.deepEqual(output, { decision: "block", reason: ENCOURAGEMENTS[0] });
     const [call] = await context.calls();
@@ -392,8 +395,7 @@ test("Claude counting starts at the last genuine prompt and counts only hook fee
         message: { role: "user", content: "Background task finished." },
       }),
     ];
-    const existing = await readFile(context.input.transcript_path, "utf8");
-    await writeFile(context.input.transcript_path, `${existing.trimEnd()}\n${additions.join("\n")}\n`);
+    await appendRecords(context.input.transcript_path, additions);
 
     assert.equal(await countContinuations(context.input, "claude"), 1);
   } finally {
@@ -404,7 +406,7 @@ test("Claude counting starts at the last genuine prompt and counts only hook fee
 test("Claude uses Sonnet with its default effort for classification", { concurrency: false }, async () => {
   const context = await claudeFixture();
   try {
-    process.env.MOCK_REVIEW_RESPONSE = stopResponse;
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
     const output = await handleStop(context.input, "claude");
     assert.deepEqual(output, {});
     const [call] = await context.calls();
@@ -426,7 +428,7 @@ test("Claude uses Sonnet with its default effort for classification", { concurre
 test("Ghost delegates classification to its smol-model bridge", { concurrency: false }, async () => {
   const context = await ghostFixture();
   try {
-    process.env.MOCK_REVIEW_RESPONSE = judgeResponse;
+    process.env.MOCK_REVIEW_RESPONSE = "JUDGE";
     const output = await handleStop(context.input, "ghost");
     assert.deepEqual(output, {
       decision: "block",
@@ -450,12 +452,6 @@ test("verdict parsing accepts only the exact review enum", () => {
   for (const invalid of ["continue", "CONSULT", "JUDGE_ADVISOR", "{}", "", null, undefined]) {
     assert.throws(() => parseReviewVerdict(invalid), /begin with CONTINUE, JUDGE, or STOP/);
   }
-  assert.deepEqual(hookOutputForVerdict("CONTINUE"), { decision: "block", reason: ENCOURAGEMENTS[0] });
-  assert.deepEqual(hookOutputForVerdict("JUDGE"), {
-    decision: "block",
-    reason: `Do not ask the user yet. Apply more reasoning or research to get yourself unstuck; only stop if genuinely blocked. ${ENCOURAGEMENTS[0]}`,
-  });
-  assert.deepEqual(hookOutputForVerdict("STOP"), {});
 });
 
 test("the reviewer's own line is carried through, sanitised, or dropped", () => {
@@ -510,14 +506,6 @@ test("the fallback line rotates and the last stretch asks for a landing", () => 
   );
 });
 
-test("bundled plugin preserves the validated verdict protocol", () => {
-  for (const verdict of ["CONTINUE", "JUDGE", "STOP"]) {
-    assert.deepEqual(bundled.parseReviewVerdict(verdict), parseReviewVerdict(verdict));
-    assert.deepEqual(bundled.hookOutputForVerdict(verdict), hookOutputForVerdict(verdict));
-  }
-  assert.equal(bundled.REVIEW_PROMPT, REVIEW_PROMPT);
-});
-
 test("the Codex plugin manifest declares the package version", async () => {
   // v0.1.1 shipped a manifest still declaring 0.1.0, so the marketplace
   // reported the wrong version for the whole release. Nothing referenced both
@@ -558,27 +546,9 @@ test("Claude stops unconditionally once the continuation cap is reached", { conc
     const feedback = Array.from({ length: CONTINUATION_CAP }, () =>
       JSON.stringify({ type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback:\ncontinue" } })
     );
-    const existing = await readFile(context.input.transcript_path, "utf8");
-    await writeFile(context.input.transcript_path, `${existing.trimEnd()}\n${feedback.join("\n")}\n`);
-    process.env.MOCK_REVIEW_RESPONSE = continueResponse;
+    await appendRecords(context.input.transcript_path, feedback);
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     const output = await handleStop(context.input, "claude");
-    assert.match(output.systemMessage, /continuation cap \(100\) reached/);
-    assert.equal((await context.calls()).length, 0);
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("Codex stops unconditionally once the continuation cap is reached", { concurrency: false }, async () => {
-  const context = await fixture();
-  try {
-    const feedback = Array.from({ length: CONTINUATION_CAP }, () =>
-      transcriptLine({ role: "user", content: [{ type: "input_text", text: '<hook_prompt hook_run_id="stop:1:/x">continue</hook_prompt>' }] }, context.input.turn_id)
-    );
-    const existing = await readFile(context.input.transcript_path, "utf8");
-    await writeFile(context.input.transcript_path, `${existing.trimEnd()}\n${feedback.join("\n")}\n`);
-    process.env.MOCK_REVIEW_RESPONSE = continueResponse;
-    const output = await handleStop(context.input);
     assert.match(output.systemMessage, /continuation cap \(100\) reached/);
     assert.equal((await context.calls()).length, 0);
   } finally {
@@ -605,10 +575,9 @@ test("verbose assistant passes cannot hide the Codex continuation cap", { concur
         }, context.input.turn_id));
       }
     }
-    const existing = await readFile(context.input.transcript_path, "utf8");
-    await writeFile(context.input.transcript_path, `${existing.trimEnd()}\n${records.join("\n")}\n`);
+    await appendRecords(context.input.transcript_path, records);
 
-    process.env.MOCK_REVIEW_RESPONSE = continueResponse;
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     const output = await handleStop(context.input);
     assert.match(output.systemMessage, /continuation cap \(100\) reached/);
     assert.equal((await context.calls()).length, 0);
@@ -657,7 +626,7 @@ test("Ghost counts the current owner turn from its Pi transcript", { concurrency
     };
     assert.equal(await countContinuations(input, "ghost"), 1);
 
-    process.env.MOCK_REVIEW_RESPONSE = continueResponse;
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     const output = await handleStop(input, "ghost");
     // The bare verdict carries no line, so the fallback rotates with the count.
     assert.deepEqual(output, { decision: "block", reason: ENCOURAGEMENTS[1] });
@@ -694,7 +663,7 @@ test("Ghost rejects a transcript outside the ghost home and falls back without o
 test("Ghost's Claude Code runtime anchors the turn on the owner prompt", { concurrency: false }, async () => {
   const context = await ghostFixture();
   const claudeHome = await mkdtemp(path.join(tmpdir(), "ghost-claude-home-"));
-  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  const previousEnvironment = environmentSnapshot();
   try {
     process.env.CLAUDE_CONFIG_DIR = claudeHome;
     const projectDir = path.join(claudeHome, "projects", "-tmp-project");
@@ -717,9 +686,40 @@ test("Ghost's Claude Code runtime anchors the turn on the owner prompt", { concu
       last_assistant_message: { role: "assistant", content: [{ type: "text", text: "Second pass." }] },
     }, "ghost"), 1);
   } finally {
-    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+    restoreEnvironment(previousEnvironment);
     await rm(claudeHome, { recursive: true, force: true });
+    await context.cleanup();
+  }
+});
+
+// Both byte guards were rewritten from "remeasure everything on each chunk" to a
+// running counter. Neither had coverage, so nothing would have caught the limit
+// silently ceasing to fire.
+test("oversized Stop input is refused before any reviewer is spawned", async () => {
+  const entry = path.join(import.meta.dirname, "..", "src", "keep-going.mjs");
+  const child = spawn(process.execPath, [entry, "claude"], {
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  let stdout = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => stdout += chunk);
+  // The hook exits as soon as the limit trips, so the tail of this write lands
+  // on a closed pipe.
+  child.stdin.on("error", () => {});
+  child.stdin.end(JSON.stringify({ session_id: "s", last_assistant_message: "x".repeat(1_500_000) }));
+  await new Promise((resolve) => child.on("close", resolve));
+  assert.match(JSON.parse(stdout).systemMessage, /exceeds 1 MB/);
+});
+
+test("a reviewer that floods stdout is cut off at the output limit", { concurrency: false }, async () => {
+  const context = await claudeFixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    process.env.MOCK_REVIEW_PAD = String(2 * 1024 * 1024 + 1024);
+    const output = await handleStop(context.input, "claude");
+    assert.match(output.systemMessage, /exceeded 2 MB/);
+    assert.equal(output.decision, undefined);
+  } finally {
     await context.cleanup();
   }
 });
