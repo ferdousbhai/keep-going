@@ -119,6 +119,53 @@ test("installer adds, updates, and removes Claude Code, Ghost, and Grok hooks", 
   }
 });
 
+test("status reports every host, including the two it does not write", async () => {
+  // Grok dispatching Claude's settings is what made a hook that was listed as
+  // enabled do nothing at all for a day, so the report has to distinguish
+  // "covered by another host's file" from both "registered" and "absent".
+  const root = await mkdtemp(path.join(tmpdir(), "keep-going-status-"));
+  const home = path.join(root, "home");
+  const codexHome = path.join(root, "codex");
+  const env = {
+    KEEP_GOING_HOME: home,
+    XDG_DATA_HOME: path.join(root, "data"),
+    XDG_CONFIG_HOME: path.join(root, "config"),
+    CLAUDE_CONFIG_DIR: path.join(root, "claude"),
+    CODEX_HOME: codexHome,
+    GROK_HOME: path.join(home, ".grok"),
+  };
+  try {
+    const bare = await runInstaller(["--status"], env);
+    assert.equal(bare.code, 0, bare.stderr);
+    assert.match(bare.stdout, /claude\s+not registered/);
+    assert.match(bare.stdout, /codex\s+not registered/);
+
+    assert.equal((await runInstaller(["--claude"], env)).code, 0);
+    const covered = await runInstaller(["--status"], env);
+    assert.match(covered.stdout, /claude\s+registered/);
+    assert.match(covered.stdout, /grok\s+covered\s+by Claude's settings/);
+    assert.doesNotMatch(covered.stdout, /reviews every stop twice/);
+
+    assert.equal((await runInstaller(["--grok"], env)).code, 0);
+    const both = await runInstaller(["--status"], env);
+    assert.match(both.stdout, /grok\s+registered/);
+    assert.match(both.stdout, /! grok reads Claude's settings too/);
+
+    // Codex is registered in its own config, and a disabled plugin feature is
+    // the difference between installed and actually loading.
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(
+      path.join(codexHome, "config.toml"),
+      '[features]\nplugins = false\n\n[plugins."keep-going@keep-going"]\nenabled = true\n',
+    );
+    const codex = await runInstaller(["--status"], env);
+    assert.match(codex.stdout, /codex\s+registered/);
+    assert.match(codex.stdout, /! codex has \[features\] plugins disabled/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("installer requires an explicit target", async () => {
   const result = await runInstaller([], {});
   assert.equal(result.code, 1);

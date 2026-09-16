@@ -31,6 +31,7 @@ Usage:
   keep-going --ghost
   keep-going --grok
   keep-going --all
+  keep-going --status
   keep-going --uninstall --claude|--ghost|--grok|--all
 
 Codex installs through the repository marketplace; see README.md.`;
@@ -58,6 +59,67 @@ const TARGETS = {
       path.join(process.env.GROK_HOME || path.join(userHome, ".grok"), "hooks", "keep-going.json"),
   },
 };
+
+// Any keep-going registration, not just one this installer wrote: a hook wired
+// by hand to a working tree counts, and so does a stale one left at a path the
+// installer no longer uses. Matching the script name rather than a known path
+// is the point.
+function registrationsIn(config, event) {
+  const groups = isJsonObject(config.hooks) ? config.hooks[event] : undefined;
+  if (!Array.isArray(groups)) return [];
+  return groups
+    .flatMap((group) => (Array.isArray(group?.hooks) ? group.hooks : []))
+    .map((hook) => (typeof hook?.command === "string" ? hook.command : ""))
+    .filter((command) => command.includes("keep-going.mjs"))
+    .map((command) => ({ command, runner: command.trimEnd().split(/\s+/).at(-1) }));
+}
+
+async function reportStatus(paths) {
+  const rows = [];
+  const warnings = [];
+  const found = {};
+  for (const [runner, { event, settings }] of Object.entries(TARGETS)) {
+    const file = settings(paths);
+    const config = await readJson(file, null);
+    const hooks = config === null ? [] : registrationsIn(config, event);
+    found[runner] = hooks;
+    const wrong = hooks.find((hook) => hook.runner !== runner);
+    rows.push([
+      runner,
+      hooks.length === 0 ? "not registered" : hooks.length > 1 ? `${hooks.length} registrations` : "registered",
+      `${event} in ${file}`,
+    ]);
+    if (hooks.length > 1) warnings.push(`${runner} reviews every stop ${hooks.length} times`);
+    if (wrong) warnings.push(`${runner} is registered to run the ${wrong.runner} runtime`);
+  }
+
+  // Grok dispatches what it finds in Claude's settings, which is both why it
+  // needs no hook of its own and why two hooks are one too many. Reporting the
+  // file alone would call a covered Grok unregistered.
+  if (found.claude?.length && found.grok?.length) {
+    warnings.push("grok reads Claude's settings too, so it reviews every stop twice; drop the --grok hook");
+  } else if (found.claude?.length && !found.grok?.length) {
+    const grok = rows.find((row) => row[0] === "grok");
+    grok[1] = "covered";
+    grok[2] = "by Claude's settings, reviewed by claude";
+  }
+
+  // Codex is the one host this installer does not write to; leaving it out
+  // would read as "not installed" rather than "installed elsewhere".
+  const codexConfig = path.join(process.env.CODEX_HOME || path.join(paths.userHome, ".codex"), "config.toml");
+  const codex = await readFile(codexConfig, "utf8").catch(() => "");
+  const enabled = /\[plugins\."keep-going@[^"]+"\]\s*\nenabled\s*=\s*true/.test(codex);
+  rows.push(["codex", enabled ? "registered" : "not registered", `plugin in ${codexConfig}`]);
+  if (enabled && !/\bplugins\s*=\s*true/.test(codex)) {
+    warnings.push("codex has [features] plugins disabled, so its plugin never loads");
+  }
+
+  const width = Math.max(...rows.map((row) => row[1].length));
+  return [
+    ...rows.map(([host, state, where]) => `  ${host.padEnd(7)}${state.padEnd(width + 2)}${where}`),
+    ...warnings.map((warning) => `  ! ${warning}`),
+  ].join("\n");
+}
 
 function selectedRuntimes(args) {
   const all = args.includes("--all");
@@ -151,6 +213,13 @@ async function main() {
     process.stdout.write(`${usage()}\n`);
     return;
   }
+  const userHomeEarly = process.env.KEEP_GOING_HOME || homedir();
+  if (args.includes("--status")) {
+    const configHomeEarly = process.env.XDG_CONFIG_HOME || path.join(userHomeEarly, ".config");
+    process.stdout.write(`${await reportStatus({ userHome: userHomeEarly, configHome: configHomeEarly })}\n`);
+    return;
+  }
+
   const runtimes = selectedRuntimes(args);
   if (runtimes.length === 0) {
     throw new Error(`Select ${new Intl.ListFormat("en", { type: "disjunction" }).format([...Object.keys(TARGETS).map((name) => `--${name}`), "--all"])}.\n\n${usage()}`);

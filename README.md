@@ -67,6 +67,10 @@ These track `main`, gated by `npm run check`. To pin instead, add a tag —
 `--ref v0.4.0` for Codex, `#v0.4.0` for `npx`; the Claude plugin moves only when
 you run `claude plugin update`.
 
+`npx --yes github:ferdousbhai/keep-going --status` prints where keep-going is
+registered on this machine, for all four hosts, and warns when one of them is
+wired to review a stop twice.
+
 Uninstall: `claude plugin uninstall keep-going`, or the same `npx` command with
 `--uninstall`.
 
