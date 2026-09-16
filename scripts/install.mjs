@@ -41,12 +41,12 @@ Codex installs through the repository marketplace; see README.md.`;
 // Codex installs through the repository marketplace instead.
 const TARGETS = {
   claude: {
-    event: "Stop",
+    events: ["Stop"],
     settings: ({ userHome }) =>
       path.join(process.env.CLAUDE_CONFIG_DIR || path.join(userHome, ".claude"), "settings.json"),
   },
   ghost: {
-    event: "session_stop",
+    events: ["session_stop"],
     settings: ({ configHome }) => path.join(configHome, "ghost", "hooks.json"),
   },
   // Grok's Claude compatibility layer reads ~/.claude/settings.json and lists
@@ -54,7 +54,7 @@ const TARGETS = {
   // in Grok's own directory are dispatched, so that is where this one goes,
   // and a Claude install alone buys nothing under Grok.
   grok: {
-    event: "Stop",
+    events: ["Stop"],
     settings: ({ userHome }) =>
       path.join(process.env.GROK_HOME || path.join(userHome, ".grok"), "hooks", "keep-going.json"),
   },
@@ -78,18 +78,20 @@ async function reportStatus(paths) {
   const rows = [];
   const warnings = [];
   const found = {};
-  for (const [runner, { event, settings }] of Object.entries(TARGETS)) {
+  for (const [runner, { events, settings }] of Object.entries(TARGETS)) {
     const file = settings(paths);
     const config = await readJson(file, null);
-    const hooks = config === null ? [] : registrationsIn(config, event);
+    const hooks = config === null ? [] : events.flatMap((event) => registrationsIn(config, event));
     found[runner] = hooks;
     const wrong = hooks.find((hook) => hook.runner !== runner);
     rows.push([
       runner,
       hooks.length === 0 ? "not registered" : hooks.length > 1 ? `${hooks.length} registrations` : "registered",
-      `${event} in ${file}`,
+      `${events.join("+")} in ${file}`,
     ]);
-    if (hooks.length > 1) warnings.push(`${runner} reviews every stop ${hooks.length} times`);
+    if (hooks.length > events.length) {
+      warnings.push(`${runner} has ${hooks.length} registrations for ${events.length} event(s) and reviews stops more than once`);
+    }
     if (wrong) warnings.push(`${runner} is registered to run the ${wrong.runner} runtime`);
   }
 
@@ -187,23 +189,25 @@ function removeInstalledHooks(groups, hookFiles, runner) {
   return kept;
 }
 
-function updateHookConfig(config, event, hookFile, runner, uninstall, legacyHookFiles) {
+function updateHookConfig(config, events, hookFile, runner, uninstall, legacyHookFiles) {
   const hooks = isJsonObject(config.hooks) ? { ...config.hooks } : {};
-  // Earlier releases installed under different names. Strip those registrations
-  // as well, or an upgrade leaves one beside the new one and the reviewer runs
-  // twice on every stop.
-  const groups = removeInstalledHooks(hooks[event], [hookFile, ...legacyHookFiles], runner);
-  if (!uninstall) {
-    groups.push({
-      hooks: [{
-        type: "command",
-        command: installedCommand(hookFile, runner),
-        timeout: 240,
-        statusMessage: STATUS_MESSAGE,
-      }],
-    });
+  for (const event of events) {
+    // Earlier releases installed under different names. Strip those
+    // registrations as well, or an upgrade leaves one beside the new one and
+    // the reviewer runs twice on every stop.
+    const groups = removeInstalledHooks(hooks[event], [hookFile, ...legacyHookFiles], runner);
+    if (!uninstall) {
+      groups.push({
+        hooks: [{
+          type: "command",
+          command: installedCommand(hookFile, runner),
+          timeout: 240,
+          statusMessage: STATUS_MESSAGE,
+        }],
+      });
+    }
+    hooks[event] = groups;
   }
-  hooks[event] = groups;
   return { ...config, hooks };
 }
 
@@ -242,7 +246,7 @@ async function main() {
   }
 
   for (const runner of runtimes) {
-    const { event, settings } = TARGETS[runner];
+    const { events, settings } = TARGETS[runner];
     const settingsFile = settings({ userHome, configHome });
     const config = await readJson(settingsFile, uninstall ? null : {});
     if (config === null) {
@@ -251,7 +255,7 @@ async function main() {
     }
     await writeJsonAtomic(
       settingsFile,
-      updateHookConfig(config, event, hookFile, runner, uninstall, legacyHookFiles),
+      updateHookConfig(config, events, hookFile, runner, uninstall, legacyHookFiles),
     );
     process.stdout.write(`${uninstall ? "Removed" : "Installed"} ${runner} hook in ${settingsFile}\n`);
   }

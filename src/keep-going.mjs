@@ -280,13 +280,19 @@ const tallyFile = (input, runner) =>
 // next, so that a new key is a new turn. Codex sends a turn id and Ghost the
 // owner's prompt, digested because a file on disk has no business holding what
 // the user typed. Claude sends neither, and so has one key per session.
+//
+// A subagent stop carries the *parent* session id, so agent_id comes first:
+// without it a subagent's continuations are spent out of the turn that
+// launched it, and enough subagents would cap a turn that had barely started.
 function turnKey(input) {
   const ownerPrompt = typeof input.owner_prompt === "string" ? input.owner_prompt.trim() : "";
-  const turn = typeof input.turn_id === "string" && input.turn_id
-    ? input.turn_id
-    : ownerPrompt
-      ? createHash("sha256").update(ownerPrompt).digest("hex").slice(0, 16)
-      : "";
+  const turn = typeof input.agent_id === "string" && input.agent_id
+    ? input.agent_id
+    : typeof input.turn_id === "string" && input.turn_id
+      ? input.turn_id
+      : ownerPrompt
+        ? createHash("sha256").update(ownerPrompt).digest("hex").slice(0, 16)
+        : "";
   return `${input.session_id}\u0000${turn}`;
 }
 
