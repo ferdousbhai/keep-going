@@ -1,21 +1,21 @@
 {
-  "name": "@ferdousbhai/unblock",
-  "version": "0.3.0",
-  "description": "A portable Stop-hook reviewer for Codex, Claude Code, and Ghost.",
+  "name": "@ferdousbhai/keep-going",
+  "version": "0.4.0",
+  "description": "A Stop hook that tells Codex, Claude Code, and Ghost to keep going when work remains.",
   "type": "module",
   "license": "MIT",
   "author": "Ferdous Bhai",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ferdousbhai/unblock.git"
+    "url": "git+https://github.com/ferdousbhai/keep-going.git"
   },
-  "homepage": "https://github.com/ferdousbhai/unblock#readme",
-  "bugs": "https://github.com/ferdousbhai/unblock/issues",
+  "homepage": "https://github.com/ferdousbhai/keep-going#readme",
+  "bugs": "https://github.com/ferdousbhai/keep-going/issues",
   "bin": {
-    "unblock": "scripts/install.mjs"
+    "keep-going": "scripts/install.mjs"
   },
   "files": [
-    "plugins/unblock",
+    "plugins/keep-going",
     "scripts/install.mjs",
     "LICENSE",
     "README.md"

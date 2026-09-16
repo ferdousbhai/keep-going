@@ -1,0 +1,32 @@
+{
+  "name": "keep-going",
+  "version": "0.4.0",
+  "description": "Tell the agent to keep going when it tries to stop with work left.",
+  "author": {
+    "name": "Ferdous Bhai",
+    "url": "https://github.com/ferdousbhai"
+  },
+  "homepage": "https://github.com/ferdousbhai/keep-going",
+  "repository": "https://github.com/ferdousbhai/keep-going",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "hooks",
+    "stop",
+    "continuity",
+    "encouragement"
+  ],
+  "interface": {
+    "displayName": "Keep Going",
+    "shortDescription": "Nudge unfinished Codex turns onward.",
+    "longDescription": "Classifies the last assistant message as CONTINUE, JUDGE, or STOP, then answers a premature stop with a line of encouragement instead of letting the turn end.",
+    "developerName": "Ferdous Bhai",
+    "category": "Productivity",
+    "capabilities": [
+      "Lifecycle hooks"
+    ],
+    "defaultPrompt": [
+      "Explain how Keep Going decides whether to continue."
+    ]
+  }
+}

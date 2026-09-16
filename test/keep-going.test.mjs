@@ -6,13 +6,16 @@ import test from "node:test";
 
 import {
   CONTINUATION_CAP,
+  ENCOURAGEMENTS,
+  LAST_STRETCH,
+  NUDGE_LIMIT,
   REVIEW_PROMPT,
   countContinuations,
   handleStop,
   hookOutputForVerdict,
   parseReviewVerdict,
-} from "../src/unblock.mjs";
-import * as bundled from "../plugins/unblock/scripts/unblock.mjs";
+} from "../src/keep-going.mjs";
+import * as bundled from "../plugins/keep-going/scripts/keep-going.mjs";
 
 const stopResponse = "STOP";
 const continueResponse = "CONTINUE";
@@ -21,17 +24,14 @@ const judgeResponse = "JUDGE";
 const ENV_KEYS = [
   "CODEX_HOME",
   "CLAUDE_CONFIG_DIR",
-  "CODEX_STOP_REVIEW_CLAUDE_BIN",
-  "CODEX_STOP_REVIEW_CODEX_BIN",
-  "CODEX_STOP_REVIEW_GHOST_BIN",
-  "UNBLOCK_CLAUDE_BIN",
-  "UNBLOCK_CLAUDE_MODEL",
-  "UNBLOCK_CODEX_BIN",
-  "UNBLOCK_CODEX_MODEL",
-  "UNBLOCK_GHOST_BIN",
+  "KEEP_GOING_CLAUDE_BIN",
+  "KEEP_GOING_CLAUDE_MODEL",
+  "KEEP_GOING_CODEX_BIN",
+  "KEEP_GOING_CODEX_MODEL",
+  "KEEP_GOING_GHOST_BIN",
   "MOCK_CALL_LOG",
   "MOCK_REVIEW_RESPONSE",
-  "UNBLOCK_AUDIT_LOG",
+  "KEEP_GOING_AUDIT_LOG",
 ];
 
 function environmentSnapshot() {
@@ -69,7 +69,7 @@ function transcriptLine(payload, turnId) {
 }
 
 async function fixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "unblock-test-"));
+  const root = await mkdtemp(path.join(tmpdir(), "keep-going-test-"));
   const codexHome = path.join(root, "codex");
   const sessions = path.join(codexHome, "sessions", "2026", "08", "26");
   const transcript = path.join(sessions, "rollout.jsonl");
@@ -144,10 +144,10 @@ writeFileSync(output, value);
 
   const previous = environmentSnapshot();
   process.env.CODEX_HOME = codexHome;
-  process.env.UNBLOCK_CODEX_BIN = modelMock;
-  process.env.UNBLOCK_CODEX_MODEL = "gpt-5.6-luna";
+  process.env.KEEP_GOING_CODEX_BIN = modelMock;
+  process.env.KEEP_GOING_CODEX_MODEL = "gpt-5.6-luna";
   process.env.MOCK_CALL_LOG = callLog;
-  process.env.UNBLOCK_AUDIT_LOG = path.join(root, "audit.jsonl");
+  process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
 
   return {
     input: {
@@ -166,7 +166,7 @@ writeFileSync(output, value);
 }
 
 async function claudeFixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "claude-unblock-test-"));
+  const root = await mkdtemp(path.join(tmpdir(), "claude-keep-going-test-"));
   const claudeHome = path.join(root, "claude");
   const projects = path.join(claudeHome, "projects", "-tmp-project");
   const transcript = path.join(projects, "session-test.jsonl");
@@ -233,10 +233,10 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
 
   const previous = environmentSnapshot();
   process.env.CLAUDE_CONFIG_DIR = claudeHome;
-  process.env.UNBLOCK_CLAUDE_BIN = modelMock;
-  process.env.UNBLOCK_CLAUDE_MODEL = "sonnet";
+  process.env.KEEP_GOING_CLAUDE_BIN = modelMock;
+  process.env.KEEP_GOING_CLAUDE_MODEL = "sonnet";
   process.env.MOCK_CALL_LOG = callLog;
-  process.env.UNBLOCK_AUDIT_LOG = path.join(root, "audit.jsonl");
+  process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
 
   return {
     input: {
@@ -256,7 +256,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
 }
 
 async function ghostFixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "ghost-unblock-test-"));
+  const root = await mkdtemp(path.join(tmpdir(), "ghost-keep-going-test-"));
   const modelMock = path.join(root, "mock-ghostd.mjs");
   const callLog = path.join(root, "calls.jsonl");
   const ghostHome = path.join(root, "ghosts", "casper");
@@ -275,9 +275,9 @@ process.stdout.write(JSON.stringify({ text: process.env.MOCK_REVIEW_RESPONSE }))
   await chmod(modelMock, 0o755);
 
   const previous = environmentSnapshot();
-  process.env.UNBLOCK_GHOST_BIN = modelMock;
+  process.env.KEEP_GOING_GHOST_BIN = modelMock;
   process.env.MOCK_CALL_LOG = callLog;
-  process.env.UNBLOCK_AUDIT_LOG = path.join(root, "audit.jsonl");
+  process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
 
   return {
     input: {
@@ -345,7 +345,7 @@ test("STOP accepts the stop", { concurrency: false }, async () => {
     assert.ok(!calls[0].args.includes("--output-schema"));
     assert.match(calls[0].prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.doesNotMatch(calls[0].prompt, /Build it now|supersecretvalue|tool_events|project_context/);
-    const audit = JSON.parse((await readFile(process.env.UNBLOCK_AUDIT_LOG, "utf8")).trim());
+    const audit = JSON.parse((await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8")).trim());
     assert.equal(audit.verdict, "STOP");
     assert.equal(audit.rationale, "");
   } finally {
@@ -358,7 +358,7 @@ test("last_assistant_message is reviewed when the transcript is unavailable", { 
   try {
     process.env.MOCK_REVIEW_RESPONSE = continueResponse;
     const output = await handleStop({ ...context.input, transcript_path: null });
-    assert.deepEqual(output, { decision: "block", reason: "Please continue." });
+    assert.deepEqual(output, { decision: "block", reason: ENCOURAGEMENTS[0] });
     const [call] = await context.calls();
     assert.match(call.prompt, /"last_assistant_message":"Candidate final response\."/);
   } finally {
@@ -371,7 +371,7 @@ test("invalid reviewer verdict fails open", { concurrency: false }, async () => 
   try {
     process.env.MOCK_REVIEW_RESPONSE = "JUDGE_ADVISOR";
     const output = await handleStop(context.input);
-    assert.match(output.systemMessage, /exactly CONTINUE, JUDGE, or STOP/);
+    assert.match(output.systemMessage, /begin with CONTINUE, JUDGE, or STOP/);
   } finally {
     await context.cleanup();
   }
@@ -415,7 +415,7 @@ test("Claude uses Sonnet with its default effort for classification", { concurre
     assert.equal(call.args[call.args.indexOf("--tools") + 1], "");
     assert.ok(!call.args.includes("--json-schema"));
     assert.equal(call.args[call.args.indexOf("--max-turns") + 1], "1");
-    assert.match(call.prompt, /Reply with exactly one word/);
+    assert.match(call.prompt, /Reply with the verdict word alone/);
     assert.match(call.prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.doesNotMatch(call.prompt, /Build it now|supersecretvalue|tool_events|project_context/);
   } finally {
@@ -430,12 +430,12 @@ test("Ghost delegates classification to its smol-model bridge", { concurrency: f
     const output = await handleStop(context.input, "ghost");
     assert.deepEqual(output, {
       decision: "block",
-      reason: "Do not ask the user yet. Apply more reasoning or research to unblock yourself; only stop if genuinely blocked.",
+      reason: `Do not ask the user yet. Apply more reasoning or research to get yourself unstuck; only stop if genuinely blocked. ${ENCOURAGEMENTS[0]}`,
     });
     const [call] = await context.calls();
     assert.deepEqual(call.args, ["hook-smol-complete"]);
     assert.equal(call.input.ghost_home, context.input.ghost_home);
-    assert.match(call.input.prompt, /Reply with exactly one word/);
+    assert.match(call.input.prompt, /Reply with the verdict word alone/);
     assert.match(call.input.prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.doesNotMatch(call.input.prompt, /Please finish the requested change/);
   } finally {
@@ -445,22 +445,74 @@ test("Ghost delegates classification to its smol-model bridge", { concurrency: f
 
 test("verdict parsing accepts only the exact review enum", () => {
   for (const verdict of ["CONTINUE", "JUDGE", "STOP"]) {
-    assert.equal(parseReviewVerdict(` ${verdict}\n`), verdict);
+    assert.deepEqual(parseReviewVerdict(` ${verdict}\n`), { verdict, nudge: "" });
   }
-  for (const invalid of ["continue", "CONSULT", "JUDGE_ADVISOR", "STOP now", "{}", "", null, undefined]) {
-    assert.throws(() => parseReviewVerdict(invalid), /exactly CONTINUE, JUDGE, or STOP/);
+  for (const invalid of ["continue", "CONSULT", "JUDGE_ADVISOR", "{}", "", null, undefined]) {
+    assert.throws(() => parseReviewVerdict(invalid), /begin with CONTINUE, JUDGE, or STOP/);
   }
-  assert.deepEqual(hookOutputForVerdict("CONTINUE"), { decision: "block", reason: "Please continue." });
+  assert.deepEqual(hookOutputForVerdict("CONTINUE"), { decision: "block", reason: ENCOURAGEMENTS[0] });
   assert.deepEqual(hookOutputForVerdict("JUDGE"), {
     decision: "block",
-    reason: "Do not ask the user yet. Apply more reasoning or research to unblock yourself; only stop if genuinely blocked.",
+    reason: `Do not ask the user yet. Apply more reasoning or research to get yourself unstuck; only stop if genuinely blocked. ${ENCOURAGEMENTS[0]}`,
   });
   assert.deepEqual(hookOutputForVerdict("STOP"), {});
 });
 
+test("the reviewer's own line is carried through, sanitised, or dropped", () => {
+  // The reviewer writes the encouragement; this side keeps the instruction, so
+  // a line that arrives unusable has to fall back rather than ship empty.
+  const { verdict, nudge } = parseReviewVerdict(
+    "CONTINUE\nThree files into the rename and the last one is small.",
+  );
+  assert.equal(verdict, "CONTINUE");
+  assert.equal(nudge, "Three files into the rename and the last one is small.");
+  assert.deepEqual(hookOutputForVerdict(verdict, 0, nudge), { decision: "block", reason: nudge });
+
+  // Separators are stripped and the line is flattened, so a multi-line reply
+  // cannot forge transcript structure in the message the agent receives.
+  assert.equal(parseReviewVerdict("CONTINUE \u2014 keep\n  at it").nudge, "keep at it");
+  assert.equal(parseReviewVerdict("CONTINUE: nearly there").nudge, "nearly there");
+
+  // Secrets the reviewer echoes back never reach the agent's next turn.
+  assert.match(
+    parseReviewVerdict(`CONTINUE\nYou already have token=${"s".repeat(20)} in hand.`).nudge,
+    /token=\[REDACTED\]/,
+  );
+
+  // A speech rather than a sentence is dropped whole: truncating would leave a
+  // broken clause, and the reviewer never saw the transcript to begin with.
+  const long = "go on and on ".repeat(30);
+  assert.ok(long.length > NUDGE_LIMIT);
+  assert.equal(parseReviewVerdict(`CONTINUE\n${long}`).nudge, "");
+  assert.deepEqual(hookOutputForVerdict("CONTINUE", 0, ""), {
+    decision: "block",
+    reason: ENCOURAGEMENTS[0],
+  });
+});
+
+test("the fallback line rotates and the last stretch asks for a landing", () => {
+  // One sentence repeated a hundred times reads as a loop, not a push.
+  const reasons = Array.from(
+    { length: ENCOURAGEMENTS.length },
+    (_, index) => hookOutputForVerdict("CONTINUE", index).reason,
+  );
+  assert.deepEqual(reasons, ENCOURAGEMENTS);
+  assert.equal(new Set(reasons).size, ENCOURAGEMENTS.length);
+
+  const early = hookOutputForVerdict("CONTINUE", CONTINUATION_CAP - LAST_STRETCH - 1).reason;
+  const late = hookOutputForVerdict("CONTINUE", CONTINUATION_CAP - LAST_STRETCH).reason;
+  assert.doesNotMatch(early, /near its continuation limit/);
+  assert.match(late, /near its continuation limit/);
+  // The cap is knowable only here, so the closing note is never the model's.
+  assert.match(
+    hookOutputForVerdict("CONTINUE", CONTINUATION_CAP - 1, "Nearly done.").reason,
+    /^Nearly done\. This turn is near its continuation limit/,
+  );
+});
+
 test("bundled plugin preserves the validated verdict protocol", () => {
   for (const verdict of ["CONTINUE", "JUDGE", "STOP"]) {
-    assert.equal(bundled.parseReviewVerdict(verdict), verdict);
+    assert.deepEqual(bundled.parseReviewVerdict(verdict), parseReviewVerdict(verdict));
     assert.deepEqual(bundled.hookOutputForVerdict(verdict), hookOutputForVerdict(verdict));
   }
   assert.equal(bundled.REVIEW_PROMPT, REVIEW_PROMPT);
@@ -474,7 +526,7 @@ test("the Codex plugin manifest declares the package version", async () => {
     JSON.parse(await readFile(new URL(relative, import.meta.url), "utf8"));
   const [pkg, plugin] = await Promise.all([
     read("../package.json"),
-    read("../plugins/unblock/.codex-plugin/plugin.json"),
+    read("../plugins/keep-going/.codex-plugin/plugin.json"),
   ]);
   assert.equal(plugin.version, pkg.version);
 });
@@ -488,7 +540,7 @@ test("the shipped plugin bundles no runtime dependency", async () => {
   );
   assert.deepEqual(manifest.dependencies ?? {}, {});
 
-  const bundlePath = new URL("../plugins/unblock/scripts/unblock.mjs", import.meta.url);
+  const bundlePath = new URL("../plugins/keep-going/scripts/keep-going.mjs", import.meta.url);
   const bundle = await stat(bundlePath);
   assert.ok(bundle.size < 16 * 1024, `expected bundle below 16 KiB, received ${bundle.size} bytes`);
 
@@ -502,7 +554,7 @@ test("the shipped plugin bundles no runtime dependency", async () => {
 test("Claude stops unconditionally once the continuation cap is reached", { concurrency: false }, async () => {
   const context = await claudeFixture();
   try {
-    assert.equal(CONTINUATION_CAP, 20);
+    assert.equal(CONTINUATION_CAP, 100);
     const feedback = Array.from({ length: CONTINUATION_CAP }, () =>
       JSON.stringify({ type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback:\ncontinue" } })
     );
@@ -510,7 +562,7 @@ test("Claude stops unconditionally once the continuation cap is reached", { conc
     await writeFile(context.input.transcript_path, `${existing.trimEnd()}\n${feedback.join("\n")}\n`);
     process.env.MOCK_REVIEW_RESPONSE = continueResponse;
     const output = await handleStop(context.input, "claude");
-    assert.match(output.systemMessage, /continuation cap \(20\) reached/);
+    assert.match(output.systemMessage, /continuation cap \(100\) reached/);
     assert.equal((await context.calls()).length, 0);
   } finally {
     await context.cleanup();
@@ -527,7 +579,7 @@ test("Codex stops unconditionally once the continuation cap is reached", { concu
     await writeFile(context.input.transcript_path, `${existing.trimEnd()}\n${feedback.join("\n")}\n`);
     process.env.MOCK_REVIEW_RESPONSE = continueResponse;
     const output = await handleStop(context.input);
-    assert.match(output.systemMessage, /continuation cap \(20\) reached/);
+    assert.match(output.systemMessage, /continuation cap \(100\) reached/);
     assert.equal((await context.calls()).length, 0);
   } finally {
     await context.cleanup();
@@ -558,7 +610,7 @@ test("verbose assistant passes cannot hide the Codex continuation cap", { concur
 
     process.env.MOCK_REVIEW_RESPONSE = continueResponse;
     const output = await handleStop(context.input);
-    assert.match(output.systemMessage, /continuation cap \(20\) reached/);
+    assert.match(output.systemMessage, /continuation cap \(100\) reached/);
     assert.equal((await context.calls()).length, 0);
   } finally {
     await context.cleanup();
@@ -607,7 +659,8 @@ test("Ghost counts the current owner turn from its Pi transcript", { concurrency
 
     process.env.MOCK_REVIEW_RESPONSE = continueResponse;
     const output = await handleStop(input, "ghost");
-    assert.deepEqual(output, { decision: "block", reason: "Please continue." });
+    // The bare verdict carries no line, so the fallback rotates with the count.
+    assert.deepEqual(output, { decision: "block", reason: ENCOURAGEMENTS[1] });
     const [call] = await context.calls();
     assert.match(call.input.prompt, /"last_assistant_message":"Pass 2\."/);
     assert.doesNotMatch(

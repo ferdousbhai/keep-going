@@ -1,14 +1,14 @@
 {
-  "name": "unblock",
+  "name": "keep-going",
   "interface": {
-    "displayName": "Unblock"
+    "displayName": "Keep Going"
   },
   "plugins": [
     {
-      "name": "unblock",
+      "name": "keep-going",
       "source": {
         "source": "local",
-        "path": "./plugins/unblock"
+        "path": "./plugins/keep-going"
       },
       "policy": {
         "installation": "AVAILABLE",

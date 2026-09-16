@@ -5,9 +5,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$PLUGIN_ROOT/scripts/unblock.mjs\" codex",
+            "command": "node \"$PLUGIN_ROOT/scripts/keep-going.mjs\" codex",
             "timeout": 240,
-            "statusMessage": "Reviewing whether work should continue"
+            "statusMessage": "Deciding whether to keep going"
           }
         ]
       }

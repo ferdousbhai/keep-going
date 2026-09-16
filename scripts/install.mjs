@@ -17,20 +17,20 @@ const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const BUNDLED_HOOK = path.join(
   PACKAGE_ROOT,
   "plugins",
-  "unblock",
+  "keep-going",
   "scripts",
-  "unblock.mjs",
+  "keep-going.mjs",
 );
-const STATUS_MESSAGE = "Reviewing whether work should continue";
+const STATUS_MESSAGE = "Deciding whether to keep going";
 
 function usage() {
-  return `Install Unblock for Claude Code and Ghost.
+  return `Install Keep Going for Claude Code and Ghost.
 
 Usage:
-  unblock --claude
-  unblock --ghost
-  unblock --all
-  unblock --uninstall --claude|--ghost|--all
+  keep-going --claude
+  keep-going --ghost
+  keep-going --all
+  keep-going --uninstall --claude|--ghost|--all
 
 Codex installs through the repository marketplace; see README.md.`;
 }
@@ -105,8 +105,9 @@ function removeInstalledHooks(groups, hookFiles, runner) {
 
 function updateHookConfig(config, event, hookFile, runner, uninstall, legacyHookFiles = []) {
   const hooks = isJsonObject(config.hooks) ? { ...config.hooks } : {};
-  // The pre-0.3.0 registration names the old path. Strip it as well, or an
-  // upgrade leaves it in place beside the new one and the reviewer runs twice.
+  // Earlier releases installed under different names. Strip those registrations
+  // as well, or an upgrade leaves one beside the new one and the reviewer runs
+  // twice on every stop.
   const groups = removeInstalledHooks(hooks[event], [hookFile, ...legacyHookFiles], runner);
   if (!uninstall) {
     groups.push({
@@ -132,11 +133,14 @@ async function main() {
   if (runtimes.length === 0) throw new Error(`Select --claude, --ghost, or --all.\n\n${usage()}`);
 
   const uninstall = args.includes("--uninstall");
-  const userHome = process.env.UNBLOCK_HOME || process.env.STOP_REVIEW_HOME || homedir();
+  const userHome = process.env.KEEP_GOING_HOME || homedir();
   const dataHome = process.env.XDG_DATA_HOME || path.join(userHome, ".local", "share");
   const configHome = process.env.XDG_CONFIG_HOME || path.join(userHome, ".config");
-  const hookFile = path.join(dataHome, "unblock", "unblock.mjs");
-  const legacyHookFiles = [path.join(dataHome, "stop-review", "stop-review.mjs")];
+  const hookFile = path.join(dataHome, "keep-going", "keep-going.mjs");
+  const legacyHookFiles = [
+    path.join(dataHome, "unblock", "unblock.mjs"),
+    path.join(dataHome, "stop-review", "stop-review.mjs"),
+  ];
 
   if (!uninstall) {
     await mkdir(path.dirname(hookFile), { recursive: true });
@@ -165,6 +169,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`unblock: ${error.message}\n`);
+  process.stderr.write(`keep-going: ${error.message}\n`);
   process.exitCode = 1;
 });

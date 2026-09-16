@@ -12,28 +12,38 @@ const MAX_STDIN_BYTES = 1024 * 1024;
 const MODEL_OUTPUT_LIMIT = 2 * 1024 * 1024;
 const CLASSIFIER_TIMEOUT_MS = 180_000;
 // Continuations per owner turn before the hook accepts the stop unconditionally.
-const CONTINUATION_CAP = 20;
+const CONTINUATION_CAP = 100;
+// Continuations before the cap where the nudge stops inviting new work.
+const LAST_STRETCH = 10;
 
 const RUNTIMES = {
-  codex: { provider: "codex", model: "gpt-5.6-luna", modelEnv: ["UNBLOCK_CODEX_MODEL", "STOP_REVIEW_CODEX_MODEL"] },
-  claude: { provider: "claude", model: "sonnet", modelEnv: ["UNBLOCK_CLAUDE_MODEL", "STOP_REVIEW_CLAUDE_MODEL"] },
+  codex: { provider: "codex", model: "gpt-5.6-luna", modelEnv: "KEEP_GOING_CODEX_MODEL" },
+  claude: { provider: "claude", model: "sonnet", modelEnv: "KEEP_GOING_CLAUDE_MODEL" },
   ghost: { provider: "ghost" },
 };
 
 // Validate the reviewer's tiny provider-independent protocol before translating
 // it to the host-specific Stop-hook JSON.
 const REVIEW_VERDICTS = new Set(["CONTINUE", "JUDGE", "STOP"]);
+const REVIEW_VERDICT_PATTERN = new RegExp(`^(${[...REVIEW_VERDICTS].join("|")})\\b([\\s\\S]*)$`);
+// One sentence. A longer reply is dropped rather than truncated: the reviewer
+// never sees the transcript, so a rambling line is guesswork, not context.
+const NUDGE_LIMIT = 200;
 
 const REVIEW_PROMPT = `Classify last_assistant_message:
 
 CONTINUE — required work remains that the agent can perform now.
-JUDGE — it asks the user for input, but more reasoning or researching should unblock it.
+JUDGE — it asks the user for input, but more reasoning or research should resolve it.
 STOP — work is complete, or progress genuinely requires the user or an external state change.
 
 Prefer JUDGE over STOP when the request for input looks self-resolvable by the agent.
 Do not default to any outcome or invent unstated work.
 
-Reply with exactly one word: CONTINUE, JUDGE, or STOP.`;
+Reply with the verdict word alone on the first line: CONTINUE, JUDGE, or STOP.
+After CONTINUE or JUDGE, add one short line of encouragement addressed to the
+agent, grounded in what last_assistant_message was actually doing. Encourage
+only: name no new task, file, command, or requirement the message did not
+already state, and give no instruction of your own.`;
 
 function redactSensitive(value) {
   return value
@@ -362,13 +372,10 @@ function runProcess(command, args, input, timeoutMs, env = process.env, cwd) {
 }
 
 async function runCodexModel({ model, prompt, timeoutMs }) {
-  const directory = await mkdtemp(path.join(tmpdir(), "codex-unblock-"));
+  const directory = await mkdtemp(path.join(tmpdir(), "codex-keep-going-"));
   const outputPath = path.join(directory, "result.txt");
   try {
-    const codex = process.env.UNBLOCK_CODEX_BIN ||
-      process.env.STOP_REVIEW_CODEX_BIN ||
-      process.env.CODEX_STOP_REVIEW_CODEX_BIN ||
-      "codex";
+    const codex = process.env.KEEP_GOING_CODEX_BIN || "codex";
     const args = [
       "exec",
       "--ephemeral",
@@ -403,12 +410,9 @@ async function runCodexModel({ model, prompt, timeoutMs }) {
 }
 
 async function runClaudeModel({ model, prompt, timeoutMs }) {
-  const directory = await mkdtemp(path.join(tmpdir(), "claude-unblock-"));
+  const directory = await mkdtemp(path.join(tmpdir(), "claude-keep-going-"));
   try {
-    const claude = process.env.UNBLOCK_CLAUDE_BIN ||
-      process.env.STOP_REVIEW_CLAUDE_BIN ||
-      process.env.CODEX_STOP_REVIEW_CLAUDE_BIN ||
-      "claude";
+    const claude = process.env.KEEP_GOING_CLAUDE_BIN || "claude";
     // No tools and no --json-schema: a plain-text verdict completes in one turn,
     // whereas the StructuredOutput tool call was fumbled often enough to exhaust
     // --max-turns.
@@ -462,10 +466,7 @@ async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
   if (typeof ghostHome !== "string" || !ghostHome) {
     throw new Error("Ghost stop input is missing ghost_home");
   }
-  const ghostd = process.env.UNBLOCK_GHOST_BIN ||
-    process.env.STOP_REVIEW_GHOST_BIN ||
-    process.env.CODEX_STOP_REVIEW_GHOST_BIN ||
-    "ghostd";
+  const ghostd = process.env.KEEP_GOING_GHOST_BIN || "ghostd";
   const result = await runProcess(
     ghostd,
     ["hook-smol-complete"],
@@ -487,37 +488,59 @@ async function runReviewModel(options) {
   return runCodexModel(options);
 }
 
-function parseReviewVerdict(text) {
-  const verdict = String(text ?? "").trim();
-  if (!REVIEW_VERDICTS.has(verdict)) {
-    throw new Error("Reviewer output must be exactly CONTINUE, JUDGE, or STOP");
-  }
-  return verdict;
+// The reviewer's own words carry into the agent's next turn, so they are
+// redacted, flattened to one line, and dropped whole if they outgrow a sentence.
+function sanitizeNudge(value) {
+  const line = redactSensitive(String(value ?? "")).replace(/\s+/g, " ").trim();
+  if (!line || line.length > NUDGE_LIMIT) return "";
+  return line;
 }
 
-function hookOutputForVerdict(verdict) {
-  if (verdict === "CONTINUE") return { decision: "block", reason: "Please continue." };
+function parseReviewVerdict(text) {
+  const match = REVIEW_VERDICT_PATTERN.exec(String(text ?? "").trim());
+  if (!match) {
+    throw new Error("Reviewer output must begin with CONTINUE, JUDGE, or STOP");
+  }
+  return { verdict: match[1], nudge: sanitizeNudge(match[2].replace(/^[\s:.\u2013\u2014-]+/, "")) };
+}
+
+// The fallback when the reviewer supplies no usable line of its own. Rotated
+// rather than fixed: a hundred continuations carrying one identical sentence
+// read to the agent like a stuck loop instead of a push.
+const ENCOURAGEMENTS = [
+  "Keep going.",
+  "You've got this \u2014 keep going.",
+  "Believe in yourself. Keep going.",
+  "There is still work left here. Keep going.",
+];
+
+const LAST_STRETCH_NOTE =
+  "This turn is near its continuation limit, so land what is already in flight rather than starting something new.";
+
+function encouragement(continuations, nudge) {
+  const index = Number.isInteger(continuations) && continuations > 0 ? continuations : 0;
+  const line = nudge || ENCOURAGEMENTS[index % ENCOURAGEMENTS.length];
+  // Only this side knows the cap, so the closing note is never the model's.
+  return index >= CONTINUATION_CAP - LAST_STRETCH ? `${line} ${LAST_STRETCH_NOTE}` : line;
+}
+
+function hookOutputForVerdict(verdict, continuations = 0, nudge = "") {
+  if (verdict === "CONTINUE") {
+    return { decision: "block", reason: encouragement(continuations, nudge) };
+  }
   if (verdict === "JUDGE") {
+    // The instruction stays ours; the reviewer only contributes the nudge.
     return {
       decision: "block",
-      reason: "Do not ask the user yet. Apply more reasoning or research to unblock yourself; only stop if genuinely blocked.",
+      reason: `Do not ask the user yet. Apply more reasoning or research to get yourself unstuck; only stop if genuinely blocked. ${encouragement(continuations, nudge)}`,
     };
   }
   return {};
 }
-// The variables were UNBLOCK_* only from v0.3.0. STOP_REVIEW_* (and the older
-// CODEX_STOP_REVIEW_*) still resolve so an existing install keeps working.
-function firstEnv(names) {
-  for (const name of names ?? []) {
-    const value = process.env[name];
-    if (value) return value;
-  }
-  return undefined;
-}
 
 
-async function recordReviewAudit(input, runner, verdict, error) {
-  const auditPath = process.env.UNBLOCK_AUDIT_LOG || process.env.STOP_REVIEW_AUDIT_LOG;
+async function recordReviewAudit(input, runner, { verdict, reason, error } = {}) {
+  const auditPath = process.env.KEEP_GOING_AUDIT_LOG;
   if (!auditPath) return;
   const entry = {
     timestamp: new Date().toISOString(),
@@ -526,9 +549,7 @@ async function recordReviewAudit(input, runner, verdict, error) {
     turn_id: input?.turn_id ?? null,
     cwd: typeof input?.cwd === "string" ? input.cwd : null,
     verdict: error ? "ERROR" : verdict,
-    rationale: error
-      ? compactText(String(error), 2_000)
-      : hookOutputForVerdict(verdict).reason ?? "",
+    rationale: error ? compactText(String(error), 2_000) : reason ?? "",
   };
   try {
     await appendFile(auditPath, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
@@ -539,7 +560,7 @@ async function recordReviewAudit(input, runner, verdict, error) {
 
 async function handleStop(input, runner = "codex") {
   const runtime = RUNTIMES[runner];
-  if (!runtime) throw new Error(`Unsupported stop-review runtime: ${runner}`);
+  if (!runtime) throw new Error(`Unsupported keep-going runtime: ${runner}`);
   if (runner === "codex" && (typeof input.turn_id !== "string" || !input.turn_id)) {
     throw new Error("Stop input is missing turn_id");
   }
@@ -549,35 +570,38 @@ async function handleStop(input, runner = "codex") {
   const lastAssistantMessage = compactText(stopCandidateText(input), 12_000);
   if (!lastAssistantMessage) return {};
 
-  let verdict;
+  let review;
+  // Kept after the cap check: the nudge changes tone as the turn nears the cap.
+  let continuations = 0;
   try {
     // The transcript is used only to enforce the continuation cap. Its content
     // is never supplied to the reviewer.
     if (typeof input.transcript_path === "string" && input.transcript_path) {
-      const continuations = await countContinuations(input, runner);
+      continuations = await countContinuations(input, runner);
       if (continuations >= CONTINUATION_CAP) {
         return {
-          systemMessage: `Stop review: continuation cap (${CONTINUATION_CAP}) reached for this turn; accepting the stop.`,
+          systemMessage: `keep-going: continuation cap (${CONTINUATION_CAP}) reached for this turn; accepting the stop.`,
         };
       }
     }
 
-    verdict = parseReviewVerdict(
+    review = parseReviewVerdict(
       await runReviewModel({
         provider: runtime.provider,
-        model: firstEnv(runtime.modelEnv) || runtime.model,
+        model: (runtime.modelEnv ? process.env[runtime.modelEnv] : undefined) || runtime.model,
         prompt: `${REVIEW_PROMPT}\n\n${JSON.stringify({ last_assistant_message: lastAssistantMessage })}`,
         timeoutMs: CLASSIFIER_TIMEOUT_MS,
         ghostHome: runner === "ghost" ? input.ghost_home : undefined,
       }),
     );
   } catch (error) {
-    await recordReviewAudit(input, runner, undefined, error.message);
-    return { systemMessage: `Stop review was skipped: ${compactText(error.message, 500)}` };
+    await recordReviewAudit(input, runner, { error: error.message });
+    return { systemMessage: `keep-going was skipped: ${compactText(error.message, 500)}` };
   }
 
-  await recordReviewAudit(input, runner, verdict);
-  return hookOutputForVerdict(verdict);
+  const output = hookOutputForVerdict(review.verdict, continuations, review.nudge);
+  await recordReviewAudit(input, runner, { verdict: review.verdict, reason: output.reason });
+  return output;
 }
 
 async function main() {
@@ -588,7 +612,7 @@ async function main() {
     process.stdout.write(`${JSON.stringify(output)}\n`);
   } catch (error) {
     process.stdout.write(
-      `${JSON.stringify({ systemMessage: `Stop review failed open: ${compactText(error.message, 500)}` })}\n`,
+      `${JSON.stringify({ systemMessage: `keep-going failed open: ${compactText(error.message, 500)}` })}\n`,
     );
   }
 }
@@ -598,6 +622,9 @@ if (import.meta.url === entry) await main();
 
 export {
   CONTINUATION_CAP,
+  ENCOURAGEMENTS,
+  NUDGE_LIMIT,
+  LAST_STRETCH,
   REVIEW_PROMPT,
   countContinuations,
   handleStop,
