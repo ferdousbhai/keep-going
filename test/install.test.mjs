@@ -119,6 +119,50 @@ test("installer adds, updates, and removes Claude Code, Ghost, and Grok hooks", 
   }
 });
 
+test("--link registers the checkout, and switching modes replaces rather than adds", async () => {
+  // Wiring a hook at a working tree by hand is what a maintainer wants and how
+  // this machine drifted: the hand-written entry missed an event the installer
+  // would have added. Linking is the same thing, managed.
+  const root = await mkdtemp(path.join(tmpdir(), "keep-going-link-"));
+  const claudeHome = path.join(root, "claude");
+  const dataHome = path.join(root, "data");
+  const env = {
+    KEEP_GOING_HOME: path.join(root, "home"),
+    XDG_DATA_HOME: dataHome,
+    XDG_CONFIG_HOME: path.join(root, "config"),
+    CLAUDE_CONFIG_DIR: claudeHome,
+  };
+  const bundled = path.join(process.cwd(), "plugins", "keep-going", "scripts", "keep-going.mjs");
+  const copied = path.join(dataHome, "keep-going", "keep-going.mjs");
+  const commands = async () => {
+    const config = JSON.parse(await readFile(path.join(claudeHome, "settings.json"), "utf8"));
+    return Object.values(config.hooks).flatMap((groups) =>
+      groups.flatMap((group) => group.hooks.map((hook) => hook.command)));
+  };
+  try {
+    assert.equal((await runInstaller(["--claude", "--link"], env)).code, 0);
+    const linked = await commands();
+    assert.equal(linked.length, 2, JSON.stringify(linked));
+    assert.ok(linked.every((command) => command.includes(bundled)));
+    await assert.rejects(access(copied), "linking must not leave a copy behind");
+
+    // Switching to a copied install strips the linked registration.
+    assert.equal((await runInstaller(["--claude"], env)).code, 0);
+    const copiedCommands = await commands();
+    assert.equal(copiedCommands.length, 2, JSON.stringify(copiedCommands));
+    assert.ok(copiedCommands.every((command) => command.includes(copied)));
+    await access(copied);
+
+    // And back again, still two.
+    assert.equal((await runInstaller(["--claude", "--link"], env)).code, 0);
+    const relinked = await commands();
+    assert.equal(relinked.length, 2, JSON.stringify(relinked));
+    assert.ok(relinked.every((command) => command.includes(bundled)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("status reports every host, including the two it does not write", async () => {
   // Grok dispatching Claude's settings is what made a hook that was listed as
   // enabled do nothing at all for a day, so the report has to distinguish

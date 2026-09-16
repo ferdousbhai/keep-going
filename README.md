@@ -71,6 +71,11 @@ These track `main`, gated by `npm run check`. To pin instead, add a tag —
 `--ref v0.6.0` for Codex, `#v0.6.0` for `npx`; the Claude plugin moves only when
 you run `claude plugin update`.
 
+Working on keep-going itself: `node scripts/install.mjs --claude --ghost --link`
+registers this checkout rather than copying it, so edits take effect with no
+reinstall. Switching between `--link` and a copy replaces the registration
+instead of adding a second one.
+
 `npx --yes github:ferdousbhai/keep-going --status` prints where keep-going is
 registered on this machine, for all four hosts, and warns when one of them is
 wired to review a stop twice.

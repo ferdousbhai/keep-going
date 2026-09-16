@@ -31,8 +31,13 @@ Usage:
   keep-going --ghost
   keep-going --grok
   keep-going --all
+  keep-going --claude --link
   keep-going --status
   keep-going --uninstall --claude|--ghost|--grok|--all
+
+--link registers this checkout's hook instead of copying it, so edits to the
+working tree take effect with no reinstall. Switching between --link and a
+copy replaces the old registration rather than adding to it.
 
 Codex installs through the repository marketplace; see README.md.`;
 }
@@ -245,13 +250,20 @@ async function main() {
   const userHome = process.env.KEEP_GOING_HOME || homedir();
   const dataHome = process.env.XDG_DATA_HOME || path.join(userHome, ".local", "share");
   const configHome = process.env.XDG_CONFIG_HOME || path.join(userHome, ".config");
-  const hookFile = path.join(dataHome, "keep-going", "keep-going.mjs");
+  // A checkout registered with --link runs whatever it currently holds, which
+  // is what anyone developing the hook wants and what a user should never get
+  // by accident. The mode not chosen is stripped, so switching between them
+  // replaces the registration instead of leaving both to review every stop.
+  const link = args.includes("--link");
+  const copiedHook = path.join(dataHome, "keep-going", "keep-going.mjs");
+  const hookFile = link ? BUNDLED_HOOK : copiedHook;
   const legacyHookFiles = [
+    link ? copiedHook : BUNDLED_HOOK,
     path.join(dataHome, "unblock", "unblock.mjs"),
     path.join(dataHome, "stop-review", "stop-review.mjs"),
   ];
 
-  if (!uninstall) {
+  if (!uninstall && !link) {
     await mkdir(path.dirname(hookFile), { recursive: true });
     await copyFile(BUNDLED_HOOK, hookFile);
     await chmod(hookFile, 0o755);
@@ -272,7 +284,9 @@ async function main() {
     process.stdout.write(`${uninstall ? "Removed" : "Installed"} ${runner} hook in ${settingsFile}\n`);
   }
 
-  if (!uninstall) process.stdout.write(`Reviewer installed at ${hookFile}\n`);
+  if (!uninstall) {
+    process.stdout.write(`Reviewer ${link ? "linked from" : "installed at"} ${hookFile}\n`);
+  }
 }
 
 main().catch((error) => {
