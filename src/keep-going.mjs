@@ -85,12 +85,7 @@ const VERDICTS = {
 const VERDICT_NAMES = Object.keys(VERDICTS);
 const BLOCKING_VERDICTS = VERDICT_NAMES.filter((name) => VERDICTS[name].blocks);
 const ENDING_VERDICTS = VERDICT_NAMES.filter((name) => !VERDICTS[name].blocks);
-
-function listVerdicts(names) {
-  if (names.length < 2) return names.join("");
-  if (names.length === 2) return names.join(" or ");
-  return `${names.slice(0, -1).join(", ")}, or ${names.at(-1)}`;
-}
+const listVerdicts = (names) => new Intl.ListFormat("en", { type: "disjunction" }).format(names);
 
 // Validate the reviewer's tiny provider-independent protocol before translating
 // it to the host-specific Stop-hook JSON.
@@ -408,13 +403,17 @@ async function writeTally(tally) {
 // A turn ends when this hook lets a stop through, so clearing on STOP is what
 // makes the tally mean "continuations in the current turn" without ever
 // knowing what the owner typed.
-async function recordTurnState(sessionId, blocked) {
+async function recordTurnState(sessionId, blocked, exact = null) {
   if (typeof sessionId !== "string" || !sessionId) return;
   const tally = await readTally();
-  if (blocked) {
-    tally[sessionId] = { count: (tally[sessionId]?.count ?? 0) + 1, updated: Date.now() };
-  } else {
+  if (!blocked) {
     delete tally[sessionId];
+  } else {
+    // Where the transcript was readable it is the truth, so the tally is set
+    // from it rather than incremented past its own stale value — otherwise the
+    // number the hook falls back to is one it has been drifting all turn.
+    const from = exact ?? tally[sessionId]?.count ?? 0;
+    tally[sessionId] = { count: from + 1, updated: Date.now() };
   }
   await writeTally(tally);
 }
@@ -624,7 +623,7 @@ function sanitizeNudge(value) {
 function parseReviewVerdict(text) {
   const match = REVIEW_VERDICT_PATTERN.exec(String(text ?? "").trim());
   if (!match) {
-    throw new Error("Reviewer output must begin with CONTINUE, JUDGE, or STOP");
+    throw new Error(`Reviewer output must begin with ${listVerdicts(VERDICT_NAMES)}`);
   }
   return { verdict: match[1], nudge: sanitizeNudge(match[2]) };
 }
@@ -636,26 +635,21 @@ const LAST_STRETCH_NOTE =
   "This turn is near its limit: tell the agent to land what is in flight rather than start anything new.";
 
 function reviewPrompt(continuations) {
-  const index = Number.isInteger(continuations) && continuations > 0 ? continuations : 0;
-  if (index < CONTINUATION_CAP - LAST_STRETCH) return REVIEW_PROMPT;
+  if (continuations < CONTINUATION_CAP - LAST_STRETCH) return REVIEW_PROMPT;
   return `${REVIEW_PROMPT}\n\n${LAST_STRETCH_NOTE}`;
-}
-
-function encouragement(continuations, nudge, fallbacks) {
-  const index = Number.isInteger(continuations) && continuations > 0 ? continuations : 0;
-  return nudge || fallbacks[index % fallbacks.length];
 }
 
 // The reviewer writes the whole line for every blocking verdict. A fixed
 // preamble could only repeat one guess about why the agent stopped, and the
-// reviewer is the half that actually read the message.
+// reviewer is the half that actually read the message. The fallback rotates so
+// a hundred continuations do not carry one identical sentence.
 function hookOutputForVerdict(verdict, continuations = 0, nudge = "") {
   const spec = VERDICTS[verdict];
   if (!spec?.blocks) return {};
-  return { decision: "block", reason: encouragement(continuations, nudge, spec.fallbacks) };
+  return { decision: "block", reason: nudge || spec.fallbacks[continuations % spec.fallbacks.length] };
 }
 
-async function recordReviewAudit(input, runner, { verdict, reason, error }) {
+async function recordReviewAudit(input, runner, { verdict, reason, error, countedBy }) {
   const auditPath = process.env.KEEP_GOING_AUDIT_LOG;
   if (!auditPath) return;
   const entry = {
@@ -666,6 +660,12 @@ async function recordReviewAudit(input, runner, { verdict, reason, error }) {
     cwd: typeof input?.cwd === "string" ? input.cwd : null,
     verdict: error ? "ERROR" : verdict,
     rationale: error ? compactText(String(error), 2_000) : reason ?? "",
+    // Which mechanism capped the turn, on every stop rather than only on the
+    // failure path. A host counted by the tally is a host without a RUNTIMES
+    // entry, and the fields it sent are what one would be written from —
+    // names only, since the values are the payload and one is the transcript.
+    counted_by: countedBy,
+    ...(countedBy === "tally" ? { stop_input_fields: Object.keys(input ?? {}).sort() } : {}),
   };
   try {
     await appendFile(auditPath, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
@@ -674,9 +674,9 @@ async function recordReviewAudit(input, runner, { verdict, reason, error }) {
   }
 }
 
-async function recordedContinuations(input) {
+async function recordedContinuations(sessionId) {
   const tally = await readTally();
-  return tally[input.session_id]?.count ?? 0;
+  return tally[sessionId]?.count ?? 0;
 }
 
 async function handleStop(input, runner = "codex") {
@@ -687,36 +687,40 @@ async function handleStop(input, runner = "codex") {
       throw new Error(`Stop input is missing ${key}`);
     }
   }
+  // Every exit below that lets the stop through ends the turn, and ending a
+  // turn is what clears the tally. Missing one is how the cap gets disarmed:
+  // the count survives into a turn that never earned it.
   const lastAssistantMessage = compactText(stopCandidateText(input), 12_000);
-  if (!lastAssistantMessage) return {};
+  if (!lastAssistantMessage) {
+    await recordTurnState(input.session_id, false);
+    return {};
+  }
 
   let review;
   // Kept after the cap check: the nudge changes tone as the turn nears the cap.
-  let continuations = await recordedContinuations(input);
+  let continuations = await recordedContinuations(input.session_id);
+  let countedBy = "tally";
   try {
     // The transcript is used only to enforce the continuation cap. Its content
-    // is never supplied to the reviewer. Where it can be read it is exact, and
-    // it replaces the hook's own tally rather than being compared to it.
+    // is never supplied to the reviewer. Where it can be read it is exact and
+    // it replaces the tally, here and in what the tally is left holding.
     if (typeof input.transcript_path === "string" && input.transcript_path) {
       try {
         continuations = await countContinuations(input, runner);
-      } catch (error) {
+        countedBy = "transcript";
+      } catch {
         // A transcript in a shape or a place this runtime does not know is the
         // ordinary case on a host we have not taught it yet. The tally already
-        // caps the turn, so the review still happens — and the field names the
-        // host sent are logged, because they are what a new RUNTIMES entry is
-        // written from and there is no other way to see them. Names only: the
-        // values are the host's payload and some of them are the transcript.
-        await recordReviewAudit(input, runner, {
-          error: `falling back to the tally: ${error.message} (stop input fields: ${Object.keys(input).sort().join(", ")})`,
-        });
+        // caps the turn, so the review still happens and the audit row says so.
       }
     }
     if (continuations >= CONTINUATION_CAP) {
-      await recordTurnState(input.session_id, false);
-      return {
+      const capped = {
         systemMessage: `keep-going: continuation cap (${CONTINUATION_CAP}) reached for this turn; accepting the stop.`,
       };
+      await recordTurnState(input.session_id, false);
+      await recordReviewAudit(input, runner, { verdict: "CAP", reason: capped.systemMessage, countedBy });
+      return capped;
     }
 
     review = parseReviewVerdict(
@@ -727,13 +731,22 @@ async function handleStop(input, runner = "codex") {
       }),
     );
   } catch (error) {
-    await recordReviewAudit(input, runner, { error: error.message });
+    // Failing open lets the stop through, so it ends the turn like any other
+    // accepted stop. This is the path a reviewer timeout takes — the stuck
+    // case the cap exists for — and leaving the count behind would spend it
+    // against whatever the session does next.
+    await recordTurnState(input.session_id, false);
+    await recordReviewAudit(input, runner, { error: error.message, countedBy });
     return { systemMessage: `keep-going was skipped: ${compactText(error.message, 500)}` };
   }
 
   const output = hookOutputForVerdict(review.verdict, continuations, review.nudge);
-  await recordTurnState(input.session_id, output.decision === "block");
-  await recordReviewAudit(input, runner, { verdict: review.verdict, reason: output.reason });
+  await recordTurnState(
+    input.session_id,
+    output.decision === "block",
+    countedBy === "transcript" ? continuations : null,
+  );
+  await recordReviewAudit(input, runner, { verdict: review.verdict, reason: output.reason, countedBy });
   return output;
 }
 
@@ -754,6 +767,7 @@ const entry = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).hre
 if (import.meta.url === entry) await main();
 
 export {
+  BLOCKING_VERDICTS,
   CONTINUATION_CAP,
   REVIEW_PROMPT,
   VERDICTS,

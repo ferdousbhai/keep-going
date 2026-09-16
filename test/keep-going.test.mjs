@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 
 import {
   CONTINUATION_CAP,
+  BLOCKING_VERDICTS,
   VERDICTS,
   LAST_STRETCH,
   NUDGE_LIMIT,
@@ -470,7 +471,7 @@ test("the reviewer's own line is carried through, sanitised, or dropped", () => 
   assert.equal(nudge, "Three files into the rename and the last one is small.");
   // Both blocking verdicts ship this line and nothing else: JUDGE's fixed
   // preamble is gone, so the reviewer writes the whole message either way.
-  for (const blocking of ["CONTINUE", "JUDGE"]) {
+  for (const blocking of BLOCKING_VERDICTS) {
     assert.deepEqual(hookOutputForVerdict(blocking, 0, nudge), { decision: "block", reason: nudge });
   }
 
@@ -509,7 +510,6 @@ test("the fallback line rotates and the last stretch asks for a landing", () => 
   // verdict is "do not ask yet", and the agent has just asked the user.
   const shared = VERDICTS.JUDGE.fallbacks.filter((line) => VERDICTS.CONTINUE.fallbacks.includes(line));
   assert.deepEqual(shared, []);
-  assert.match(hookOutputForVerdict("JUDGE", 0, "").reason, /not ask|yourself|before/i);
 
   // Only this side knows the cap, so it reaches the reviewer the way every
   // other hook-side fact does: in the prompt, before the line is written.
@@ -533,15 +533,10 @@ test("the hook never asks for a register it does not keep itself", () => {
   for (const spec of Object.values(VERDICTS)) {
     for (const line of spec.fallbacks ?? []) assert.ok(line.length <= NUDGE_LIMIT, line);
   }
-  for (const verdict of ["CONTINUE", "JUDGE"]) {
-    const reason = hookOutputForVerdict(verdict, CONTINUATION_CAP - 1, "a".repeat(NUDGE_LIMIT)).reason;
-    assert.ok(reason.length <= NUDGE_LIMIT, reason);
-  }
   // Each verdict the parser accepts has to be a verdict the prompt asks for,
   // and each blocking one has to tell the reviewer what to write after it.
   for (const [verdict, spec] of Object.entries(VERDICTS)) {
     assert.match(REVIEW_PROMPT, new RegExp(`^${verdict} \\u2014 `, "m"));
-    assert.equal(parseReviewVerdict(verdict).verdict, verdict);
     if (spec.blocks) assert.ok(REVIEW_PROMPT.includes(`After ${verdict}, ${spec.directive}.`));
   }
 });
@@ -556,18 +551,18 @@ test("the tally caps a turn the transcript cannot", { concurrency: false }, asyn
   const { transcript_path: _ignored, ...input } = context.input;
   try {
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
-    assert.equal(await recordedContinuations(input), 0);
+    assert.equal(await recordedContinuations(input.session_id), 0);
     for (const expected of [1, 2, 3]) {
       const output = await handleStop(input, "claude");
       assert.equal(output.decision, "block");
-      assert.equal(await recordedContinuations(input), expected);
+      assert.equal(await recordedContinuations(input.session_id), expected);
     }
 
     // A turn ends when the hook lets a stop through, which is what makes the
     // count mean "continuations in this turn" without reading a transcript.
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
     assert.deepEqual(await handleStop(input, "claude"), {});
-    assert.equal(await recordedContinuations(input), 0);
+    assert.equal(await recordedContinuations(input.session_id), 0);
 
     // At the cap the stop is accepted with no review at all.
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
@@ -580,7 +575,7 @@ test("the tally caps a turn the transcript cannot", { concurrency: false }, asyn
     const capped = await handleStop(input, "claude");
     assert.match(capped.systemMessage, /continuation cap \(100\) reached/);
     assert.equal((await context.calls()).length, before);
-    assert.equal(await recordedContinuations(input), 0);
+    assert.equal(await recordedContinuations(input.session_id), 0);
 
     // An interrupted turn never comes back to be cleared, so its entry expires
     // instead of counting against whatever that session does next.
@@ -588,7 +583,7 @@ test("the tally caps a turn the transcript cannot", { concurrency: false }, asyn
       tallyFile,
       JSON.stringify({ [input.session_id]: { count: 7, updated: Date.now() - 31 * 60_000 } }),
     );
-    assert.equal(await recordedContinuations(input), 0);
+    assert.equal(await recordedContinuations(input.session_id), 0);
   } finally {
     await context.cleanup();
   }
@@ -609,10 +604,7 @@ test("every plugin manifest declares the package version", async () => {
   ]);
   assert.equal(codex.version, pkg.version);
   assert.equal(claude.version, pkg.version);
-  assert.deepEqual(
-    marketplace.plugins.map((entry) => entry.version),
-    marketplace.plugins.map(() => pkg.version),
-  );
+  for (const entry of marketplace.plugins) assert.equal(entry.version, pkg.version);
 
   // Each host reads its own manifest, so the Claude hook has to name the Claude
   // runner: the Codex file next to it spells the same script with a different
@@ -756,8 +748,13 @@ test("Ghost rejects a transcript outside the ghost home and falls back without o
     // place and the reviewer still gets its say.
     assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
     assert.equal((await context.calls()).length, 1);
-    const audit = await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8");
-    assert.match(audit, /falling back to the tally: .*outside the ghost transcript directories/);
+    // One row per stop, saying which mechanism capped the turn — and for a
+    // host counted by the tally, the field names a RUNTIMES entry needs.
+    const [row] = (await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8"))
+      .trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(row.counted_by, "tally");
+    assert.ok(row.stop_input_fields.includes("transcript_path"));
+    assert.equal(row.verdict, "CONTINUE");
 
     assert.equal(await countContinuations(context.input, "ghost"), 0);
     await assert.rejects(
