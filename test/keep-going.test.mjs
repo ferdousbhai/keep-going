@@ -678,6 +678,20 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", { co
   }
 });
 
+test("an empty last assistant message blocks once instead of accepting the stop", { concurrency: false }, async () => {
+  const context = await claudeFixture();
+  const input = { session_id: "session-empty", last_assistant_message: "" };
+  try {
+    const first = await handleStop(input, "claude");
+    assert.equal(first.decision, "block");
+    assert.match(first.reason, /did not see your last message/);
+    const second = await handleStop({ ...input, stop_hook_active: true }, "claude");
+    assert.deepEqual(second, {});
+  } finally {
+    await context.cleanup();
+  }
+});
+
 test("the tally caps a turn the transcript cannot", { concurrency: false }, async () => {
   // Grok Build loads this hook through its Claude compatibility layer, and its
   // transcripts are neither in Claude's directories nor in Claude's shape. The

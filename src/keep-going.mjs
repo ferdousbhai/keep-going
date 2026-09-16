@@ -668,8 +668,17 @@ async function handleStop(input, runner = "codex") {
   // the count survives into a turn that never earned it.
   const lastAssistantMessage = compactText(stopCandidateText(input), 12_000);
   if (!lastAssistantMessage) {
-    await recordTurnState(input, runner, false);
-    return {};
+    // Grok can fire Stop with no lastAssistantMessage. Accepting that stop
+    // disables the hook. Block once; if the next stop is still empty, let it end.
+    if (input.stop_hook_active || input.stopHookActive) {
+      await recordTurnState(input, runner, false);
+      return {};
+    }
+    await recordTurnState(input, runner, true);
+    return {
+      decision: "block",
+      reason: "The stop hook did not see your last message. If work remains, continue it; if you are done, say so in one sentence.",
+    };
   }
 
   let review;
