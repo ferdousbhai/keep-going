@@ -5,6 +5,9 @@
 // Adding SubagentStop took two edits in two commits before this existed.
 export const HOSTS = {
   codex: { events: ["Stop"] },
+  // A Stop registration is rewritten to SubagentStop only for hooks a session
+  // registers at runtime, so a settings.json Stop hook never sees a subagent:
+  // the event has to be asked for by name.
   claude: { events: ["Stop", "SubagentStop"] },
   ghost: { events: ["session_stop"] },
   grok: { events: ["Stop"] },

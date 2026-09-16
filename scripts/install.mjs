@@ -49,10 +49,6 @@ const claudeConfigDir = (userHome) => process.env.CLAUDE_CONFIG_DIR || path.join
 // Codex installs through the repository marketplace instead.
 const TARGETS = {
   claude: {
-    // A Stop registration is rewritten to SubagentStop only for hooks a session
-    // registers at runtime, so a settings.json Stop hook never sees a subagent
-    // and the event has to be asked for by name.
-    events: HOSTS.claude.events,
     settings: ({ userHome }) => path.join(claudeConfigDir(userHome), "settings.json"),
   },
   ghost: {
@@ -81,9 +77,9 @@ const OUR_SCRIPTS = ["keep-going.mjs", "unblock.mjs", "stop-review.mjs"];
 // hook under an older script name was filed as somebody else's. The runner is
 // read off the command rather than being part of the identity, because inside
 // a file this installer owns, any keep-going registration is one of ours.
-function ourRegistration(command) {
+function ourRunner(command) {
   if (typeof command !== "string" || !OUR_SCRIPTS.some((script) => command.includes(script))) return null;
-  return { command, runner: command.trimEnd().split(/\s+/).at(-1) };
+  return command.trimEnd().split(/\s+/).at(-1);
 }
 
 function registrationsIn(groups, event, where) {
@@ -92,13 +88,10 @@ function registrationsIn(groups, event, where) {
     .flatMap((group) => (Array.isArray(group?.hooks) ? group.hooks : []))
     .map((hook) => (typeof hook?.command === "string" ? hook.command : ""))
     .filter(Boolean)
-    .map((command) => ({
-      event,
-      where,
-      command,
-      ours: ourRegistration(command) !== null,
-      runner: command.trimEnd().split(/\s+/).at(-1),
-    }));
+    .map((command) => {
+      const runner = ourRunner(command);
+      return { event, where, command, ours: runner !== null, runner };
+    });
 }
 
 // Where a host looks for hooks. Mostly its own settings file — but Grok also
@@ -106,13 +99,16 @@ function registrationsIn(groups, event, where) {
 // dispatches this stop" is a list per host rather than one path, and
 // "covered by another host's file" stops being a special case.
 function settingsSource(runner) {
-  return async (paths) => {
+  const read = async (paths) => {
     const file = TARGETS[runner].settings(paths);
     const config = await readJson(file, null);
     if (config === null) return [];
     return HOSTS[runner].events.flatMap((event) =>
       registrationsIn(isJsonObject(config.hooks) ? config.hooks[event] : undefined, event, file));
   };
+  read.host = runner;
+  read.where = (paths) => TARGETS[runner].settings(paths);
+  return read;
 }
 
 // Claude Code plugins register hooks from their own install directory, which
@@ -142,8 +138,11 @@ async function claudePluginSource(paths) {
 
 // Codex installs through a marketplace, so its registration is a config entry
 // rather than a hook command; it reports as one registration all the same.
+const codexConfig = (paths) =>
+  path.join(process.env.CODEX_HOME || path.join(paths.userHome, ".codex"), "config.toml");
+
 async function codexSource(paths) {
-  const file = path.join(process.env.CODEX_HOME || path.join(paths.userHome, ".codex"), "config.toml");
+  const file = codexConfig(paths);
   const config = await readFile(file, "utf8").catch(() => "");
   if (!/\[plugins\."keep-going@[^"]+"\]\s*\nenabled\s*=\s*true/.test(config)) return [];
   // Only the [features] table decides this, and only when it says so: the key
@@ -156,6 +155,15 @@ async function codexSource(paths) {
   return [row];
 }
 
+claudePluginSource.host = "claude";
+claudePluginSource.where = (paths) => path.join(claudeConfigDir(paths.userHome), "plugins");
+codexSource.host = "codex";
+codexSource.where = (paths) => codexConfig(paths);
+
+// Who dispatches a host's stops. Mostly its own file; Grok also dispatches
+// Claude's, and Claude also dispatches its plugins'. A host whose list names
+// another host is covered by it, which is the one fact --all, the note it
+// prints, and the wrong-runtime warning all need.
 const SOURCES = {
   claude: [settingsSource("claude"), claudePluginSource],
   ghost: [settingsSource("ghost")],
@@ -181,7 +189,7 @@ async function reportStatus(paths) {
     rows.push([
       host,
       ...(ours.length === 0
-        ? ["not registered", `${events.join(", ")} in ${TARGETS[host]?.settings(paths) ?? "its own config"}`]
+        ? ["not registered", `${events.join(", ")} in ${SOURCES[host].find((source) => source.host === host).where(paths)}`]
         : [missing.length ? `missing ${missing.join(", ")}` : "registered", describeWhere(ours, host)]),
     ]);
 
@@ -192,8 +200,8 @@ async function reportStatus(paths) {
     if (missing.length && ours.length) {
       warnings.push(`${host} is not registered for ${missing.join(", ")}; re-run the installer to add it`);
     }
-    const wrong = ours.find((hook) => hook.runner !== host);
-    if (wrong && host !== "grok") warnings.push(`${host} is registered to run the ${wrong.runner} runtime`);
+    const wrong = ours.find((hook) => hook.runner !== host && hook.runner !== coveredBy(host));
+    if (wrong) warnings.push(`${host} is registered to run the ${wrong.runner} runtime`);
     for (const hook of ours) if (hook.note) warnings.push(`${host} ${hook.note}`);
     // Everything else on the same stop, named under the host that runs it.
     for (const hook of all.filter((hook) => !hook.ours)) {
@@ -208,17 +216,17 @@ async function reportStatus(paths) {
   ].join("\n");
 }
 
+const coveredBy = (host) => SOURCES[host].find((source) => source.host !== host)?.host ?? null;
+
 function selectedRuntimes(args, uninstall) {
   const all = args.includes("--all");
   const chosen = Object.keys(TARGETS).filter((name) => all || args.includes(`--${name}`));
-  // Grok dispatches what it finds in Claude's settings, so a machine with both
-  // registrations reviews every Grok stop twice — which --all used to produce
-  // and --status then reported as a fault. --all means every host that needs a
-  // hook of its own, and alongside Claude, Grok does not. Removal still means
-  // all of them: an --all uninstall has to reach a hook an --all install wrote
-  // before this, or it leaves one behind.
-  if (all && !uninstall && chosen.includes("claude")) return chosen.filter((name) => name !== "grok");
-  return chosen;
+  // A host another host already dispatches for needs no hook of its own, and
+  // registering both reviews every stop twice — which --all used to produce
+  // and --status then reported as a fault. Removal still means all of them: an
+  // --all uninstall has to reach a hook an older --all install wrote.
+  if (!all || uninstall) return chosen;
+  return chosen.filter((host) => !chosen.includes(coveredBy(host)));
 }
 
 function shellQuote(value) {
@@ -264,7 +272,7 @@ function installedCommand(hookFile, runner) {
 // only the exact paths it knew, so a hand-wired hook at another checkout was
 // reported as a duplicate the tool could not remove. Same predicate now.
 function isInstalledHook(hook) {
-  return ourRegistration(hook?.command) !== null;
+  return ourRunner(hook?.command) !== null;
 }
 
 function removeInstalledHooks(groups) {
@@ -337,8 +345,11 @@ async function main() {
     await chmod(hookFile, 0o755);
   }
 
-  if (!uninstall && runtimes.includes("grok") && runtimes.includes("claude")) {
-    process.stdout.write("note: Grok also dispatches Claude's settings, so it will review every stop twice\n");
+  for (const host of uninstall ? [] : runtimes) {
+    const coverer = coveredBy(host);
+    if (runtimes.includes(coverer)) {
+      process.stdout.write(`note: ${host} also dispatches ${coverer}'s hooks, so it will review every stop twice\n`);
+    }
   }
 
   for (const runner of runtimes) {

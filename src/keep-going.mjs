@@ -470,9 +470,9 @@ async function runCodexModel({ prompt, timeoutMs }) {
       'approval_policy="never"',
       "--output-last-message",
       outputPath,
+      ...modelArgs("KEEP_GOING_CODEX_MODEL"),
       "-",
     ];
-    args.push(...modelArgs("KEEP_GOING_CODEX_MODEL"));
     assertExitOk(await runProcess(codex, args, prompt, timeoutMs), "codex exec");
     return await readFile(outputPath, "utf8");
   } finally {
