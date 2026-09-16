@@ -1,6 +1,6 @@
 {
   "name": "@ferdousbhai/keep-going",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "A Stop hook that tells Codex, Claude Code, and Ghost to keep going when work remains.",
   "type": "module",
   "license": "MIT",
