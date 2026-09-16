@@ -11,5 +11,5 @@
   "repository": "https://github.com/ferdousbhai/keep-going",
   "license": "MIT",
   "keywords": ["hooks", "stop", "continuity", "encouragement"],
-  "hooks": "./hooks/claude.json"
+  "hooks": "./claude-hooks.json"
 }
