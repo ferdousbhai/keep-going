@@ -703,8 +703,13 @@ async function handleStop(input, runner = "codex") {
       } catch (error) {
         // A transcript in a shape or a place this runtime does not know is the
         // ordinary case on a host we have not taught it yet. The tally already
-        // caps the turn, so the review still happens.
-        await recordReviewAudit(input, runner, { error: `falling back to the tally: ${error.message}` });
+        // caps the turn, so the review still happens — and the field names the
+        // host sent are logged, because they are what a new RUNTIMES entry is
+        // written from and there is no other way to see them. Names only: the
+        // values are the host's payload and some of them are the transcript.
+        await recordReviewAudit(input, runner, {
+          error: `falling back to the tally: ${error.message} (stop input fields: ${Object.keys(input).sort().join(", ")})`,
+        });
       }
     }
     if (continuations >= CONTINUATION_CAP) {

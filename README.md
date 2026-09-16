@@ -71,7 +71,7 @@ Uninstall: `claude plugin uninstall keep-going`, or the same `npx` command with
 | `KEEP_GOING_GHOST_BIN` | `ghostd` |
 | `KEEP_GOING_CODEX_MODEL` | `gpt-5.6-luna` |
 | `KEEP_GOING_CLAUDE_MODEL` | `sonnet` |
-| `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision |
+| `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, and names the fields an unknown host sent |
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
 Ghost's reviewer model is ghostd's, not ours.
