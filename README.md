@@ -7,6 +7,12 @@ Jarred Sumner's input, through a day and a half of Claude subagents chasing the
 Riemann hypothesis, was mostly variants of "keep going" and "believe in
 yourself." This is that, on a hook.
 
+![Three stops, three verdicts: work left, a question it can answer itself, and
+a turn that is genuinely done](docs/keep-going.gif)
+
+Those three lines are real reviewer output, not mock-ups; `scripts/render-demo.py`
+redraws the image from them.
+
 ## How it works
 
 When the agent tries to end a turn, keep-going shows the last assistant message
