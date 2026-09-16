@@ -99,9 +99,17 @@ const listVerdicts = (names) => new Intl.ListFormat("en", { type: "disjunction" 
 
 // Validate the reviewer's tiny provider-independent protocol before translating
 // it to the host-specific Stop-hook JSON.
+const VERDICT_ALTERNATION = VERDICT_NAMES.join("|");
+const VERDICT_SEPARATOR = "[\\s:.\\u2013\\u2014-]*";
+// A verdict ends where a non-word character does, or where another verdict
+// begins. A small reviewer often answers twice — "CONTINUECONTINUE" — and
+// requiring a word boundary there threw away an answer it had actually given.
 const REVIEW_VERDICT_PATTERN = new RegExp(
-  `^(${VERDICT_NAMES.join("|")})\\b[\\s:.\\u2013\\u2014-]*([\\s\\S]*)$`,
+  `^(${VERDICT_ALTERNATION})(?=$|[^A-Za-z_]|${VERDICT_ALTERNATION})${VERDICT_SEPARATOR}([\\s\\S]*)$`,
 );
+// A repeat of the verdict is not a nudge. Left in, the agent is sent back with
+// "CONTINUE." as its encouragement.
+const VERDICT_ECHO = new RegExp(`^(?:${VERDICT_ALTERNATION})${VERDICT_SEPARATOR}`);
 
 // A few words. The inspiration for this hook was a person typing "keep going"
 // and "believe in yourself" for a day and a half, so a paragraph is the wrong
@@ -591,7 +599,9 @@ function parseReviewVerdict(text) {
   if (!match) {
     throw new Error(`Reviewer output must begin with ${listVerdicts(VERDICT_NAMES)}`);
   }
-  return { verdict: match[1], nudge: sanitizeNudge(match[2]) };
+  let rest = match[2];
+  while (VERDICT_ECHO.test(rest)) rest = rest.replace(VERDICT_ECHO, "");
+  return { verdict: match[1], nudge: sanitizeNudge(rest) };
 }
 
 // Near the cap the reviewer is told to write a different line, rather than

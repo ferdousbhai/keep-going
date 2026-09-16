@@ -481,6 +481,27 @@ test("verdict parsing accepts only the exact review enum", () => {
   }
 });
 
+test("a verdict answered twice is still one verdict", () => {
+  // Small reviewers repeat themselves. Measured on ghost's free-tier model,
+  // roughly one reply in seven came back doubled. Requiring a word boundary
+  // threw away an answer that had been given, and the separated form was worse
+  // than that: it parsed, and the agent was sent back with "CONTINUE." as its
+  // encouragement.
+  for (const doubled of ["CONTINUECONTINUE", "CONTINUE.CONTINUE.", "CONTINUE CONTINUE"]) {
+    assert.deepEqual(parseReviewVerdict(doubled), { verdict: "CONTINUE", nudge: "" });
+  }
+  assert.deepEqual(parseReviewVerdict("STOPSTOP"), { verdict: "STOP", nudge: "" });
+  // A real line still survives beside the verdict.
+  assert.deepEqual(parseReviewVerdict("CONTINUE Keep going."), {
+    verdict: "CONTINUE",
+    nudge: "Keep going.",
+  });
+  // Widening the boundary must not start accepting a longer word.
+  for (const invalid of ["CONTINUEX", "JUDGE_ADVISOR", "continue"]) {
+    assert.throws(() => parseReviewVerdict(invalid));
+  }
+});
+
 test("the reviewer's own line is carried through, sanitised, or dropped", () => {
   // The reviewer writes the whole blocking message, so a line that arrives
   // unusable has to fall back rather than ship empty.
