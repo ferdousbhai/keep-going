@@ -17,20 +17,20 @@ const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const BUNDLED_HOOK = path.join(
   PACKAGE_ROOT,
   "plugins",
-  "stop-review",
+  "unblock",
   "scripts",
-  "stop-review.mjs",
+  "unblock.mjs",
 );
 const STATUS_MESSAGE = "Reviewing whether work should continue";
 
 function usage() {
-  return `Install Stop Review for Claude Code and Ghost.
+  return `Install Unblock for Claude Code and Ghost.
 
 Usage:
-  stop-review --claude
-  stop-review --ghost
-  stop-review --all
-  stop-review --uninstall --claude|--ghost|--all
+  unblock --claude
+  unblock --ghost
+  unblock --all
+  unblock --uninstall --claude|--ghost|--all
 
 Codex installs through the repository marketplace; see README.md.`;
 }
@@ -87,7 +87,7 @@ function isInstalledHook(hook, hookFile, runner) {
     hook.command.trimEnd().endsWith(` ${runner}`);
 }
 
-function removeInstalledHooks(groups, hookFile, runner) {
+function removeInstalledHooks(groups, hookFiles, runner) {
   if (!Array.isArray(groups)) return [];
   const kept = [];
   for (const group of groups) {
@@ -95,15 +95,19 @@ function removeInstalledHooks(groups, hookFile, runner) {
       kept.push(group);
       continue;
     }
-    const hooks = group.hooks.filter((hook) => !isInstalledHook(hook, hookFile, runner));
+    const hooks = group.hooks.filter(
+      (hook) => !hookFiles.some((file) => isInstalledHook(hook, file, runner)),
+    );
     if (hooks.length > 0) kept.push({ ...group, hooks });
   }
   return kept;
 }
 
-function updateHookConfig(config, event, hookFile, runner, uninstall) {
+function updateHookConfig(config, event, hookFile, runner, uninstall, legacyHookFiles = []) {
   const hooks = isJsonObject(config.hooks) ? { ...config.hooks } : {};
-  const groups = removeInstalledHooks(hooks[event], hookFile, runner);
+  // The pre-0.3.0 registration names the old path. Strip it as well, or an
+  // upgrade leaves it in place beside the new one and the reviewer runs twice.
+  const groups = removeInstalledHooks(hooks[event], [hookFile, ...legacyHookFiles], runner);
   if (!uninstall) {
     groups.push({
       hooks: [{
@@ -128,10 +132,11 @@ async function main() {
   if (runtimes.length === 0) throw new Error(`Select --claude, --ghost, or --all.\n\n${usage()}`);
 
   const uninstall = args.includes("--uninstall");
-  const userHome = process.env.STOP_REVIEW_HOME || homedir();
+  const userHome = process.env.UNBLOCK_HOME || process.env.STOP_REVIEW_HOME || homedir();
   const dataHome = process.env.XDG_DATA_HOME || path.join(userHome, ".local", "share");
   const configHome = process.env.XDG_CONFIG_HOME || path.join(userHome, ".config");
-  const hookFile = path.join(dataHome, "stop-review", "stop-review.mjs");
+  const hookFile = path.join(dataHome, "unblock", "unblock.mjs");
+  const legacyHookFiles = [path.join(dataHome, "stop-review", "stop-review.mjs")];
 
   if (!uninstall) {
     await mkdir(path.dirname(hookFile), { recursive: true });
@@ -151,7 +156,7 @@ async function main() {
     }
     await writeJsonAtomic(
       settingsFile,
-      updateHookConfig(config, event, hookFile, runner, uninstall),
+      updateHookConfig(config, event, hookFile, runner, uninstall, legacyHookFiles),
     );
     process.stdout.write(`${uninstall ? "Removed" : "Installed"} ${runner} hook in ${settingsFile}\n`);
   }
@@ -160,6 +165,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`stop-review: ${error.message}\n`);
+  process.stderr.write(`unblock: ${error.message}\n`);
   process.exitCode = 1;
 });

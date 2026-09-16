@@ -6,10 +6,10 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const output = path.join(root, "plugins", "stop-review", "scripts", "stop-review.mjs");
+const output = path.join(root, "plugins", "unblock", "scripts", "unblock.mjs");
 
 await build({
-  entryPoints: [path.join(root, "src", "stop-review.mjs")],
+  entryPoints: [path.join(root, "src", "unblock.mjs")],
   outfile: output,
   bundle: true,
   platform: "node",

@@ -15,8 +15,8 @@ const CLASSIFIER_TIMEOUT_MS = 180_000;
 const CONTINUATION_CAP = 20;
 
 const RUNTIMES = {
-  codex: { provider: "codex", model: "gpt-5.6-luna", modelEnv: "STOP_REVIEW_CODEX_MODEL" },
-  claude: { provider: "claude", model: "sonnet", modelEnv: "STOP_REVIEW_CLAUDE_MODEL" },
+  codex: { provider: "codex", model: "gpt-5.6-luna", modelEnv: ["UNBLOCK_CODEX_MODEL", "STOP_REVIEW_CODEX_MODEL"] },
+  claude: { provider: "claude", model: "sonnet", modelEnv: ["UNBLOCK_CLAUDE_MODEL", "STOP_REVIEW_CLAUDE_MODEL"] },
   ghost: { provider: "ghost" },
 };
 
@@ -362,10 +362,11 @@ function runProcess(command, args, input, timeoutMs, env = process.env, cwd) {
 }
 
 async function runCodexModel({ model, prompt, timeoutMs }) {
-  const directory = await mkdtemp(path.join(tmpdir(), "codex-stop-review-"));
+  const directory = await mkdtemp(path.join(tmpdir(), "codex-unblock-"));
   const outputPath = path.join(directory, "result.txt");
   try {
-    const codex = process.env.STOP_REVIEW_CODEX_BIN ||
+    const codex = process.env.UNBLOCK_CODEX_BIN ||
+      process.env.STOP_REVIEW_CODEX_BIN ||
       process.env.CODEX_STOP_REVIEW_CODEX_BIN ||
       "codex";
     const args = [
@@ -402,9 +403,10 @@ async function runCodexModel({ model, prompt, timeoutMs }) {
 }
 
 async function runClaudeModel({ model, prompt, timeoutMs }) {
-  const directory = await mkdtemp(path.join(tmpdir(), "claude-stop-review-"));
+  const directory = await mkdtemp(path.join(tmpdir(), "claude-unblock-"));
   try {
-    const claude = process.env.STOP_REVIEW_CLAUDE_BIN ||
+    const claude = process.env.UNBLOCK_CLAUDE_BIN ||
+      process.env.STOP_REVIEW_CLAUDE_BIN ||
       process.env.CODEX_STOP_REVIEW_CLAUDE_BIN ||
       "claude";
     // No tools and no --json-schema: a plain-text verdict completes in one turn,
@@ -460,7 +462,8 @@ async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
   if (typeof ghostHome !== "string" || !ghostHome) {
     throw new Error("Ghost stop input is missing ghost_home");
   }
-  const ghostd = process.env.STOP_REVIEW_GHOST_BIN ||
+  const ghostd = process.env.UNBLOCK_GHOST_BIN ||
+    process.env.STOP_REVIEW_GHOST_BIN ||
     process.env.CODEX_STOP_REVIEW_GHOST_BIN ||
     "ghostd";
   const result = await runProcess(
@@ -502,9 +505,19 @@ function hookOutputForVerdict(verdict) {
   }
   return {};
 }
+// The variables were UNBLOCK_* only from v0.3.0. STOP_REVIEW_* (and the older
+// CODEX_STOP_REVIEW_*) still resolve so an existing install keeps working.
+function firstEnv(names) {
+  for (const name of names ?? []) {
+    const value = process.env[name];
+    if (value) return value;
+  }
+  return undefined;
+}
+
 
 async function recordReviewAudit(input, runner, verdict, error) {
-  const auditPath = process.env.STOP_REVIEW_AUDIT_LOG;
+  const auditPath = process.env.UNBLOCK_AUDIT_LOG || process.env.STOP_REVIEW_AUDIT_LOG;
   if (!auditPath) return;
   const entry = {
     timestamp: new Date().toISOString(),
@@ -552,7 +565,7 @@ async function handleStop(input, runner = "codex") {
     verdict = parseReviewVerdict(
       await runReviewModel({
         provider: runtime.provider,
-        model: runtime.modelEnv ? process.env[runtime.modelEnv] || runtime.model : runtime.model,
+        model: firstEnv(runtime.modelEnv) || runtime.model,
         prompt: `${REVIEW_PROMPT}\n\n${JSON.stringify({ last_assistant_message: lastAssistantMessage })}`,
         timeoutMs: CLASSIFIER_TIMEOUT_MS,
         ghostHome: runner === "ghost" ? input.ghost_home : undefined,

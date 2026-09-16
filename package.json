@@ -1,21 +1,21 @@
 {
-  "name": "@ferdousbhai/stop-review",
-  "version": "0.2.0",
+  "name": "@ferdousbhai/unblock",
+  "version": "0.3.0",
   "description": "A portable Stop-hook reviewer for Codex, Claude Code, and Ghost.",
   "type": "module",
   "license": "MIT",
   "author": "Ferdous Bhai",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ferdousbhai/stop-review.git"
+    "url": "git+https://github.com/ferdousbhai/unblock.git"
   },
-  "homepage": "https://github.com/ferdousbhai/stop-review#readme",
-  "bugs": "https://github.com/ferdousbhai/stop-review/issues",
+  "homepage": "https://github.com/ferdousbhai/unblock#readme",
+  "bugs": "https://github.com/ferdousbhai/unblock/issues",
   "bin": {
-    "stop-review": "scripts/install.mjs"
+    "unblock": "scripts/install.mjs"
   },
   "files": [
-    "plugins/stop-review",
+    "plugins/unblock",
     "scripts/install.mjs",
     "LICENSE",
     "README.md"

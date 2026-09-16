@@ -1,14 +1,14 @@
 {
-  "name": "stop-review",
+  "name": "unblock",
   "interface": {
-    "displayName": "Stop Review"
+    "displayName": "Unblock"
   },
   "plugins": [
     {
-      "name": "stop-review",
+      "name": "unblock",
       "source": {
         "source": "local",
-        "path": "./plugins/stop-review"
+        "path": "./plugins/unblock"
       },
       "policy": {
         "installation": "AVAILABLE",

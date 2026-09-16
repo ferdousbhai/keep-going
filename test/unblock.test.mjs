@@ -11,8 +11,8 @@ import {
   handleStop,
   hookOutputForVerdict,
   parseReviewVerdict,
-} from "../src/stop-review.mjs";
-import * as bundled from "../plugins/stop-review/scripts/stop-review.mjs";
+} from "../src/unblock.mjs";
+import * as bundled from "../plugins/unblock/scripts/unblock.mjs";
 
 const stopResponse = "STOP";
 const continueResponse = "CONTINUE";
@@ -24,14 +24,14 @@ const ENV_KEYS = [
   "CODEX_STOP_REVIEW_CLAUDE_BIN",
   "CODEX_STOP_REVIEW_CODEX_BIN",
   "CODEX_STOP_REVIEW_GHOST_BIN",
-  "STOP_REVIEW_CLAUDE_BIN",
-  "STOP_REVIEW_CLAUDE_MODEL",
-  "STOP_REVIEW_CODEX_BIN",
-  "STOP_REVIEW_CODEX_MODEL",
-  "STOP_REVIEW_GHOST_BIN",
+  "UNBLOCK_CLAUDE_BIN",
+  "UNBLOCK_CLAUDE_MODEL",
+  "UNBLOCK_CODEX_BIN",
+  "UNBLOCK_CODEX_MODEL",
+  "UNBLOCK_GHOST_BIN",
   "MOCK_CALL_LOG",
   "MOCK_REVIEW_RESPONSE",
-  "STOP_REVIEW_AUDIT_LOG",
+  "UNBLOCK_AUDIT_LOG",
 ];
 
 function environmentSnapshot() {
@@ -69,7 +69,7 @@ function transcriptLine(payload, turnId) {
 }
 
 async function fixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "stop-review-test-"));
+  const root = await mkdtemp(path.join(tmpdir(), "unblock-test-"));
   const codexHome = path.join(root, "codex");
   const sessions = path.join(codexHome, "sessions", "2026", "08", "26");
   const transcript = path.join(sessions, "rollout.jsonl");
@@ -144,10 +144,10 @@ writeFileSync(output, value);
 
   const previous = environmentSnapshot();
   process.env.CODEX_HOME = codexHome;
-  process.env.STOP_REVIEW_CODEX_BIN = modelMock;
-  process.env.STOP_REVIEW_CODEX_MODEL = "gpt-5.6-luna";
+  process.env.UNBLOCK_CODEX_BIN = modelMock;
+  process.env.UNBLOCK_CODEX_MODEL = "gpt-5.6-luna";
   process.env.MOCK_CALL_LOG = callLog;
-  process.env.STOP_REVIEW_AUDIT_LOG = path.join(root, "audit.jsonl");
+  process.env.UNBLOCK_AUDIT_LOG = path.join(root, "audit.jsonl");
 
   return {
     input: {
@@ -166,7 +166,7 @@ writeFileSync(output, value);
 }
 
 async function claudeFixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "claude-stop-review-test-"));
+  const root = await mkdtemp(path.join(tmpdir(), "claude-unblock-test-"));
   const claudeHome = path.join(root, "claude");
   const projects = path.join(claudeHome, "projects", "-tmp-project");
   const transcript = path.join(projects, "session-test.jsonl");
@@ -233,10 +233,10 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
 
   const previous = environmentSnapshot();
   process.env.CLAUDE_CONFIG_DIR = claudeHome;
-  process.env.STOP_REVIEW_CLAUDE_BIN = modelMock;
-  process.env.STOP_REVIEW_CLAUDE_MODEL = "sonnet";
+  process.env.UNBLOCK_CLAUDE_BIN = modelMock;
+  process.env.UNBLOCK_CLAUDE_MODEL = "sonnet";
   process.env.MOCK_CALL_LOG = callLog;
-  process.env.STOP_REVIEW_AUDIT_LOG = path.join(root, "audit.jsonl");
+  process.env.UNBLOCK_AUDIT_LOG = path.join(root, "audit.jsonl");
 
   return {
     input: {
@@ -256,7 +256,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
 }
 
 async function ghostFixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "ghost-stop-review-test-"));
+  const root = await mkdtemp(path.join(tmpdir(), "ghost-unblock-test-"));
   const modelMock = path.join(root, "mock-ghostd.mjs");
   const callLog = path.join(root, "calls.jsonl");
   const ghostHome = path.join(root, "ghosts", "casper");
@@ -275,9 +275,9 @@ process.stdout.write(JSON.stringify({ text: process.env.MOCK_REVIEW_RESPONSE }))
   await chmod(modelMock, 0o755);
 
   const previous = environmentSnapshot();
-  process.env.STOP_REVIEW_GHOST_BIN = modelMock;
+  process.env.UNBLOCK_GHOST_BIN = modelMock;
   process.env.MOCK_CALL_LOG = callLog;
-  process.env.STOP_REVIEW_AUDIT_LOG = path.join(root, "audit.jsonl");
+  process.env.UNBLOCK_AUDIT_LOG = path.join(root, "audit.jsonl");
 
   return {
     input: {
@@ -345,7 +345,7 @@ test("STOP accepts the stop", { concurrency: false }, async () => {
     assert.ok(!calls[0].args.includes("--output-schema"));
     assert.match(calls[0].prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.doesNotMatch(calls[0].prompt, /Build it now|supersecretvalue|tool_events|project_context/);
-    const audit = JSON.parse((await readFile(process.env.STOP_REVIEW_AUDIT_LOG, "utf8")).trim());
+    const audit = JSON.parse((await readFile(process.env.UNBLOCK_AUDIT_LOG, "utf8")).trim());
     assert.equal(audit.verdict, "STOP");
     assert.equal(audit.rationale, "");
   } finally {
@@ -474,7 +474,7 @@ test("the Codex plugin manifest declares the package version", async () => {
     JSON.parse(await readFile(new URL(relative, import.meta.url), "utf8"));
   const [pkg, plugin] = await Promise.all([
     read("../package.json"),
-    read("../plugins/stop-review/.codex-plugin/plugin.json"),
+    read("../plugins/unblock/.codex-plugin/plugin.json"),
   ]);
   assert.equal(plugin.version, pkg.version);
 });
@@ -488,7 +488,7 @@ test("the shipped plugin bundles no runtime dependency", async () => {
   );
   assert.deepEqual(manifest.dependencies ?? {}, {});
 
-  const bundlePath = new URL("../plugins/stop-review/scripts/stop-review.mjs", import.meta.url);
+  const bundlePath = new URL("../plugins/unblock/scripts/unblock.mjs", import.meta.url);
   const bundle = await stat(bundlePath);
   assert.ok(bundle.size < 16 * 1024, `expected bundle below 16 KiB, received ${bundle.size} bytes`);
 
