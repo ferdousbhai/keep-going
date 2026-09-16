@@ -24,8 +24,15 @@ count continuations, never shown to the reviewer. Any failure — missing binary
 timeout, unparseable verdict — accepts the stop.
 
 At most 100 continuations per owner turn. Past the cap the next stop is accepted
-without a review; over the last 10 the nudge asks the agent to land what is in
-flight rather than start something new. A new owner prompt starts a fresh count.
+without a review; over the last 10 the reviewer is asked for a line about
+landing what is in flight rather than starting something new. A new owner
+prompt starts a fresh count.
+
+Continuations are counted from the transcript where the host's format is known,
+and otherwise from a tally the hook keeps itself under
+`$XDG_STATE_HOME/keep-going`, cleared whenever a stop is allowed through. So the
+cap holds on a host whose transcript cannot be read — which is also why the hook
+does something useful there at all.
 
 ## Install
 

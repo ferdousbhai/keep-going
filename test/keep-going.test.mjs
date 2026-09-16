@@ -12,6 +12,7 @@ import {
   NUDGE_LIMIT,
   REVIEW_PROMPT,
   countContinuations,
+  recordedContinuations,
   reviewPrompt,
   handleStop,
   hookOutputForVerdict,
@@ -31,6 +32,9 @@ const ENV_KEYS = [
   "MOCK_REVIEW_RESPONSE",
   "MOCK_REVIEW_PAD",
   "KEEP_GOING_AUDIT_LOG",
+  // The hook keeps its continuation tally under this root; every fixture gets
+  // its own so a test run never reads or writes the developer's real one.
+  "XDG_STATE_HOME",
 ];
 
 function environmentSnapshot() {
@@ -152,6 +156,7 @@ writeFileSync(output, value);
   process.env.KEEP_GOING_CODEX_MODEL = "gpt-5.6-luna";
   process.env.MOCK_CALL_LOG = callLog;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
+  process.env.XDG_STATE_HOME = path.join(root, "state");
 
   return {
     input: {
@@ -243,6 +248,7 @@ if (pad > 0) process.stdout.write("y".repeat(pad));
   process.env.KEEP_GOING_CLAUDE_MODEL = "sonnet";
   process.env.MOCK_CALL_LOG = callLog;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
+  process.env.XDG_STATE_HOME = path.join(root, "state");
 
   return {
     input: {
@@ -284,6 +290,7 @@ process.stdout.write(JSON.stringify({ text: process.env.MOCK_REVIEW_RESPONSE }))
   process.env.KEEP_GOING_GHOST_BIN = modelMock;
   process.env.MOCK_CALL_LOG = callLog;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
+  process.env.XDG_STATE_HOME = path.join(root, "state");
 
   return {
     input: {
@@ -539,6 +546,54 @@ test("the hook never asks for a register it does not keep itself", () => {
   }
 });
 
+test("the tally caps a turn the transcript cannot", { concurrency: false }, async () => {
+  // Grok Build loads this hook through its Claude compatibility layer, and its
+  // transcripts are neither in Claude's directories nor in Claude's shape. The
+  // cap is the only thing between a stuck reviewer and a hundred turns of
+  // spend, so it cannot depend on parsing a format the host chose.
+  const context = await claudeFixture();
+  const tallyFile = path.join(process.env.XDG_STATE_HOME, "keep-going", "continuations.json");
+  const { transcript_path: _ignored, ...input } = context.input;
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    assert.equal(await recordedContinuations(input), 0);
+    for (const expected of [1, 2, 3]) {
+      const output = await handleStop(input, "claude");
+      assert.equal(output.decision, "block");
+      assert.equal(await recordedContinuations(input), expected);
+    }
+
+    // A turn ends when the hook lets a stop through, which is what makes the
+    // count mean "continuations in this turn" without reading a transcript.
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
+    assert.deepEqual(await handleStop(input, "claude"), {});
+    assert.equal(await recordedContinuations(input), 0);
+
+    // At the cap the stop is accepted with no review at all.
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    await mkdir(path.dirname(tallyFile), { recursive: true });
+    await writeFile(
+      tallyFile,
+      JSON.stringify({ [input.session_id]: { count: CONTINUATION_CAP, updated: Date.now() } }),
+    );
+    const before = (await context.calls()).length;
+    const capped = await handleStop(input, "claude");
+    assert.match(capped.systemMessage, /continuation cap \(100\) reached/);
+    assert.equal((await context.calls()).length, before);
+    assert.equal(await recordedContinuations(input), 0);
+
+    // An interrupted turn never comes back to be cleared, so its entry expires
+    // instead of counting against whatever that session does next.
+    await writeFile(
+      tallyFile,
+      JSON.stringify({ [input.session_id]: { count: 7, updated: Date.now() - 31 * 60_000 } }),
+    );
+    assert.equal(await recordedContinuations(input), 0);
+  } finally {
+    await context.cleanup();
+  }
+});
+
 test("every plugin manifest declares the package version", async () => {
   // v0.1.1 shipped a manifest still declaring 0.1.0, so the marketplace
   // reported the wrong version for the whole release. Nothing referenced both
@@ -695,9 +750,14 @@ test("Ghost rejects a transcript outside the ghost home and falls back without o
   try {
     const outside = path.join(path.dirname(context.input.ghost_home), "outside.jsonl");
     await writeFile(outside, "");
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     const output = await handleStop({ ...context.input, conversation_runtime: "pi", transcript_path: outside }, "ghost");
-    assert.match(output.systemMessage, /outside the ghost transcript directories/);
-    assert.equal((await context.calls()).length, 0);
+    // The path is refused, so nothing reads it; the tally caps the turn in its
+    // place and the reviewer still gets its say.
+    assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
+    assert.equal((await context.calls()).length, 1);
+    const audit = await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8");
+    assert.match(audit, /falling back to the tally: .*outside the ghost transcript directories/);
 
     assert.equal(await countContinuations(context.input, "ghost"), 0);
     await assert.rejects(

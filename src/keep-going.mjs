@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createReadStream } from "node:fs";
-import { appendFile, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -359,6 +359,66 @@ async function countContinuations(input, runner = "codex") {
   return RUNTIMES[runner].count(input);
 }
 
+// The cap is the only thing between a stuck reviewer and a hundred turns of
+// spend, and every count above reads a transcript in a format the host chose.
+// A host we cannot parse — or one that sends no transcript at all — left the
+// cap unenforceable, so the hook kept its own tally as well: blocks since this
+// session last ended a turn, which is what a continuation is. It needs nothing
+// from the host but the session id every runtime already requires.
+const TALLY_FILE = () =>
+  path.join(
+    process.env.XDG_STATE_HOME || path.join(homedir(), ".local", "state"),
+    "keep-going",
+    "continuations.json",
+  );
+// An interrupted turn never reaches the hook again to be cleared, so entries
+// expire rather than counting against whatever the session does next.
+const TALLY_IDLE_MS = 30 * 60_000;
+
+async function readTally() {
+  try {
+    const parsed = JSON.parse(await readFile(TALLY_FILE(), "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const fresh = {};
+    for (const [session, entry] of Object.entries(parsed)) {
+      if (Number.isInteger(entry?.count) && Date.now() - entry.updated < TALLY_IDLE_MS) {
+        fresh[session] = entry;
+      }
+    }
+    return fresh;
+  } catch {
+    // No tally yet, or one we cannot read: the floor starts at zero.
+    return {};
+  }
+}
+
+async function writeTally(tally) {
+  const file = TALLY_FILE();
+  const temporary = `${file}.${process.pid}.tmp`;
+  try {
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(temporary, JSON.stringify(tally), { encoding: "utf8", mode: 0o600 });
+    await rename(temporary, file);
+  } catch {
+    // Losing the tally costs accuracy on the next pass, never the decision.
+    await rm(temporary, { force: true }).catch(() => {});
+  }
+}
+
+// A turn ends when this hook lets a stop through, so clearing on STOP is what
+// makes the tally mean "continuations in the current turn" without ever
+// knowing what the owner typed.
+async function recordTurnState(sessionId, blocked) {
+  if (typeof sessionId !== "string" || !sessionId) return;
+  const tally = await readTally();
+  if (blocked) {
+    tally[sessionId] = { count: (tally[sessionId]?.count ?? 0) + 1, updated: Date.now() };
+  } else {
+    delete tally[sessionId];
+  }
+  await writeTally(tally);
+}
+
 function stopCandidateText(input) {
   if (typeof input.last_assistant_message === "string") return input.last_assistant_message;
   return messageText(input.last_assistant_message);
@@ -614,6 +674,11 @@ async function recordReviewAudit(input, runner, { verdict, reason, error }) {
   }
 }
 
+async function recordedContinuations(input) {
+  const tally = await readTally();
+  return tally[input.session_id]?.count ?? 0;
+}
+
 async function handleStop(input, runner = "codex") {
   const runtime = RUNTIMES[runner];
   if (!runtime) throw new Error(`Unsupported keep-going runtime: ${runner}`);
@@ -627,17 +692,26 @@ async function handleStop(input, runner = "codex") {
 
   let review;
   // Kept after the cap check: the nudge changes tone as the turn nears the cap.
-  let continuations = 0;
+  let continuations = await recordedContinuations(input);
   try {
     // The transcript is used only to enforce the continuation cap. Its content
-    // is never supplied to the reviewer.
+    // is never supplied to the reviewer. Where it can be read it is exact, and
+    // it replaces the hook's own tally rather than being compared to it.
     if (typeof input.transcript_path === "string" && input.transcript_path) {
-      continuations = await countContinuations(input, runner);
-      if (continuations >= CONTINUATION_CAP) {
-        return {
-          systemMessage: `keep-going: continuation cap (${CONTINUATION_CAP}) reached for this turn; accepting the stop.`,
-        };
+      try {
+        continuations = await countContinuations(input, runner);
+      } catch (error) {
+        // A transcript in a shape or a place this runtime does not know is the
+        // ordinary case on a host we have not taught it yet. The tally already
+        // caps the turn, so the review still happens.
+        await recordReviewAudit(input, runner, { error: `falling back to the tally: ${error.message}` });
       }
+    }
+    if (continuations >= CONTINUATION_CAP) {
+      await recordTurnState(input.session_id, false);
+      return {
+        systemMessage: `keep-going: continuation cap (${CONTINUATION_CAP}) reached for this turn; accepting the stop.`,
+      };
     }
 
     review = parseReviewVerdict(
@@ -653,6 +727,7 @@ async function handleStop(input, runner = "codex") {
   }
 
   const output = hookOutputForVerdict(review.verdict, continuations, review.nudge);
+  await recordTurnState(input.session_id, output.decision === "block");
   await recordReviewAudit(input, runner, { verdict: review.verdict, reason: output.reason });
   return output;
 }
@@ -680,6 +755,7 @@ export {
   NUDGE_LIMIT,
   LAST_STRETCH,
   countContinuations,
+  recordedContinuations,
   reviewPrompt,
   handleStop,
   hookOutputForVerdict,
