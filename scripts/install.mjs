@@ -56,7 +56,6 @@ const TARGETS = {
     settings: ({ userHome }) => path.join(claudeConfigDir(userHome), "settings.json"),
   },
   ghost: {
-    events: HOSTS.ghost.events,
     settings: ({ configHome }) => path.join(configHome, "ghost", "hooks.json"),
   },
   // Grok dispatches what it finds in ~/.claude/settings.json through its Claude
@@ -64,7 +63,6 @@ const TARGETS = {
   // claude, which a Grok-only machine may not have. This registration is for
   // that machine, and installing both makes Grok review every stop twice.
   grok: {
-    events: HOSTS.grok.events,
     settings: ({ userHome }) =>
       path.join(process.env.GROK_HOME || path.join(userHome, ".grok"), "hooks", "keep-going.json"),
   },
@@ -74,7 +72,19 @@ const TARGETS = {
 // by hand to a working tree counts, and so does a stale one left at a path the
 // installer no longer uses. Matching the script name rather than a known path
 // is the point.
-const OURS = /keep-going\.mjs["']?\s+\S+\s*$/;
+const OUR_SCRIPTS = ["keep-going.mjs", "unblock.mjs", "stop-review.mjs"];
+
+// One test for "this registration is ours", shared by the report and by the
+// installer that has to strip it. They were two expressions that agreed by
+// coincidence and then stopped: a hook left pointing at the wrong runner was
+// counted as a duplicate by one and preserved forever by the other, and a
+// hook under an older script name was filed as somebody else's. The runner is
+// read off the command rather than being part of the identity, because inside
+// a file this installer owns, any keep-going registration is one of ours.
+function ourRegistration(command) {
+  if (typeof command !== "string" || !OUR_SCRIPTS.some((script) => command.includes(script))) return null;
+  return { command, runner: command.trimEnd().split(/\s+/).at(-1) };
+}
 
 function registrationsIn(groups, event, where) {
   if (!Array.isArray(groups)) return [];
@@ -86,14 +96,10 @@ function registrationsIn(groups, event, where) {
       event,
       where,
       command,
-      ours: OURS.test(command),
+      ours: ourRegistration(command) !== null,
       runner: command.trimEnd().split(/\s+/).at(-1),
     }));
 }
-
-// The events that end a turn. A hook on one of these shares the stop with
-// ours, whoever wrote it, which is the only reason to report other people's.
-const STOP_EVENTS = new Set(["Stop", "SubagentStop", "session_stop"]);
 
 // Where a host looks for hooks. Mostly its own settings file — but Grok also
 // dispatches Claude's, and Claude also dispatches its plugins' — so "who
@@ -125,7 +131,9 @@ async function claudePluginSource(paths) {
       const config = await readJson(path.join(entry.installPath, declared), null);
       if (!isJsonObject(config?.hooks)) continue;
       for (const [event, groups] of Object.entries(config.hooks)) {
-        if (STOP_EVENTS.has(event)) found.push(...registrationsIn(groups, event, `plugin ${name}`));
+        // A plugin's hooks are Claude's, so Claude's events are the ones that
+        // share a stop with ours.
+        if (HOSTS.claude.events.includes(event)) found.push(...registrationsIn(groups, event, `plugin ${name}`));
       }
     }
   }
@@ -141,8 +149,11 @@ async function codexSource(paths) {
   // Only the [features] table decides this, and only when it says so: the key
   // is absent by default and the literal appears elsewhere in the file.
   const features = /^\[features\]$([\s\S]*?)(?=^\[|\Z)/m.exec(config)?.[1] ?? "";
-  const loads = !/^\s*plugins\s*=\s*false/m.test(features);
-  return [{ event: "Stop", where: `plugin in ${file}`, command: "", ours: true, runner: "codex", loads }];
+  const row = { event: "Stop", where: `plugin in ${file}`, ours: true, runner: "codex" };
+  if (/^\s*plugins\s*=\s*false/m.test(features)) {
+    row.note = "has [features] plugins disabled, so its plugin never loads";
+  }
+  return [row];
 }
 
 const SOURCES = {
@@ -152,6 +163,13 @@ const SOURCES = {
   codex: [codexSource],
 };
 
+// A host reached through another host's file runs that host's runtime, so the
+// runner is worth naming exactly when it is not the obvious one.
+function describeWhere(ours, host) {
+  return [...new Set(ours.map((hook) =>
+    hook.runner && hook.runner !== host ? `${hook.where} (reviewed by ${hook.runner})` : hook.where))].join(", ");
+}
+
 async function reportStatus(paths) {
   const rows = [];
   const warnings = [];
@@ -160,15 +178,11 @@ async function reportStatus(paths) {
     const ours = all.filter((hook) => hook.ours);
     const events = HOSTS[host].events;
     const missing = events.filter((event) => !ours.some((hook) => hook.event === event));
-    // A host reached through another host's file runs that host's runtime, so
-    // the runner is worth naming exactly when it is not the obvious one.
-    const where = [...new Set(ours.map((hook) =>
-      hook.runner && hook.runner !== host ? `${hook.where} (reviewed by ${hook.runner})` : hook.where))].join(", ");
-
     rows.push([
       host,
-      ours.length === 0 ? "not registered" : missing.length ? `missing ${missing.join(", ")}` : "registered",
-      ours.length === 0 ? `${events.join(", ")} in ${TARGETS[host]?.settings(paths) ?? "its own config"}` : where,
+      ...(ours.length === 0
+        ? ["not registered", `${events.join(", ")} in ${TARGETS[host]?.settings(paths) ?? "its own config"}`]
+        : [missing.length ? `missing ${missing.join(", ")}` : "registered", describeWhere(ours, host)]),
     ]);
 
     for (const event of events) {
@@ -178,11 +192,9 @@ async function reportStatus(paths) {
     if (missing.length && ours.length) {
       warnings.push(`${host} is not registered for ${missing.join(", ")}; re-run the installer to add it`);
     }
-    const wrong = ours.find((hook) => hook.runner !== host && hook.command);
+    const wrong = ours.find((hook) => hook.runner !== host);
     if (wrong && host !== "grok") warnings.push(`${host} is registered to run the ${wrong.runner} runtime`);
-    if (ours.some((hook) => hook.loads === false)) {
-      warnings.push(`${host} has [features] plugins disabled, so its plugin never loads`);
-    }
+    for (const hook of ours) if (hook.note) warnings.push(`${host} ${hook.note}`);
     // Everything else on the same stop, named under the host that runs it.
     for (const hook of all.filter((hook) => !hook.ours)) {
       rows.push([host, "also runs", `${hook.event} from ${hook.where}`]);
@@ -196,9 +208,17 @@ async function reportStatus(paths) {
   ].join("\n");
 }
 
-function selectedRuntimes(args) {
+function selectedRuntimes(args, uninstall) {
   const all = args.includes("--all");
-  return Object.keys(TARGETS).filter((name) => all || args.includes(`--${name}`));
+  const chosen = Object.keys(TARGETS).filter((name) => all || args.includes(`--${name}`));
+  // Grok dispatches what it finds in Claude's settings, so a machine with both
+  // registrations reviews every Grok stop twice — which --all used to produce
+  // and --status then reported as a fault. --all means every host that needs a
+  // hook of its own, and alongside Claude, Grok does not. Removal still means
+  // all of them: an --all uninstall has to reach a hook an --all install wrote
+  // before this, or it leaves one behind.
+  if (all && !uninstall && chosen.includes("claude")) return chosen.filter((name) => name !== "grok");
+  return chosen;
 }
 
 function shellQuote(value) {
@@ -243,13 +263,11 @@ function installedCommand(hookFile, runner) {
 // --status counts any command naming this hook; the installer used to strip
 // only the exact paths it knew, so a hand-wired hook at another checkout was
 // reported as a duplicate the tool could not remove. Same predicate now.
-function isInstalledHook(hook, scripts, runner) {
-  return typeof hook?.command === "string" &&
-    scripts.some((script) => hook.command.includes(script)) &&
-    hook.command.trimEnd().endsWith(` ${runner}`);
+function isInstalledHook(hook) {
+  return ourRegistration(hook?.command) !== null;
 }
 
-function removeInstalledHooks(groups, hookFiles, runner) {
+function removeInstalledHooks(groups) {
   if (!Array.isArray(groups)) return [];
   const kept = [];
   for (const group of groups) {
@@ -257,25 +275,25 @@ function removeInstalledHooks(groups, hookFiles, runner) {
       kept.push(group);
       continue;
     }
-    const hooks = group.hooks.filter((hook) => !isInstalledHook(hook, hookFiles, runner));
+    const hooks = group.hooks.filter((hook) => !isInstalledHook(hook));
     if (hooks.length > 0) kept.push({ ...group, hooks });
   }
   return kept;
 }
 
-function updateHookConfig(config, events, hookFile, runner, uninstall, knownScripts) {
+function updateHookConfig(config, events, hookFile, runner, uninstall) {
   const hooks = isJsonObject(config.hooks) ? { ...config.hooks } : {};
   for (const event of events) {
     // Earlier releases installed under different names, and a hand-wired hook
     // points wherever its author chose. Strip them all, or an upgrade leaves
     // one beside the new one and the reviewer runs twice on every stop.
-    const groups = removeInstalledHooks(hooks[event], knownScripts, runner);
+    const groups = removeInstalledHooks(hooks[event]);
     if (!uninstall) {
       groups.push({
         hooks: [{
           type: "command",
           command: installedCommand(hookFile, runner),
-          timeout: 240,
+          timeout: HOOK_TIMEOUT,
           statusMessage: STATUS_MESSAGE,
         }],
       });
@@ -299,12 +317,12 @@ async function main() {
     return;
   }
 
-  const runtimes = selectedRuntimes(args);
+  const uninstall = args.includes("--uninstall");
+  const runtimes = selectedRuntimes(args, uninstall);
   if (runtimes.length === 0) {
     throw new Error(`Select ${new Intl.ListFormat("en", { type: "disjunction" }).format([...Object.keys(TARGETS).map((name) => `--${name}`), "--all"])}.\n\n${usage()}`);
   }
 
-  const uninstall = args.includes("--uninstall");
   // A checkout registered with --link runs whatever it currently holds, which
   // is what anyone developing the hook wants and what a user should never get
   // by accident. Both spellings are always stripped, so switching between them
@@ -312,9 +330,6 @@ async function main() {
   const link = args.includes("--link");
   const copiedHook = path.join(dataHome, "keep-going", "keep-going.mjs");
   const hookFile = link ? BUNDLED_HOOK : copiedHook;
-  // Names rather than paths: one keep-going registration per host per event,
-  // wherever it points — a copy, this checkout, or another one entirely.
-  const knownScripts = ["keep-going.mjs", "unblock.mjs", "stop-review.mjs"];
 
   if (!uninstall && !link) {
     await mkdir(path.dirname(hookFile), { recursive: true });
@@ -322,8 +337,12 @@ async function main() {
     await chmod(hookFile, 0o755);
   }
 
+  if (!uninstall && runtimes.includes("grok") && runtimes.includes("claude")) {
+    process.stdout.write("note: Grok also dispatches Claude's settings, so it will review every stop twice\n");
+  }
+
   for (const runner of runtimes) {
-    const { events, settings } = TARGETS[runner];
+    const { settings } = TARGETS[runner];
     const settingsFile = settings({ userHome, configHome });
     const config = await readJson(settingsFile, uninstall ? null : {});
     if (config === null) {
@@ -332,7 +351,7 @@ async function main() {
     }
     await writeJsonAtomic(
       settingsFile,
-      updateHookConfig(config, events, hookFile, runner, uninstall, knownScripts),
+      updateHookConfig(config, HOSTS[runner].events, hookFile, runner, uninstall),
     );
     process.stdout.write(`${uninstall ? "Removed" : "Installed"} ${runner} hook in ${settingsFile}\n`);
   }
@@ -341,6 +360,12 @@ async function main() {
     process.stdout.write(`Reviewer ${link ? "linked from" : "installed at"} ${hookFile}\n`);
   }
 }
+
+// Piping this into head closes stdout early; a CLI reporting where it wrote
+// hooks should not answer that with a stack trace.
+process.stdout.on("error", (error) => {
+  if (error.code !== "EPIPE") throw error;
+});
 
 main().catch((error) => {
   process.stderr.write(`keep-going: ${error.message}\n`);

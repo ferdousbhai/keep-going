@@ -20,6 +20,9 @@ async function installHome(label) {
   };
   return {
     ...paths,
+    codexHome: path.join(root, "codex"),
+    grokHome: path.join(paths.home, ".grok"),
+    settings: path.join(paths.claudeHome, "settings.json"),
     env: {
       KEEP_GOING_HOME: paths.home,
       XDG_DATA_HOME: paths.dataHome,
@@ -93,8 +96,10 @@ test("installer adds, updates, and removes Claude Code, Ghost, and Grok hooks", 
       theme: "dark",
     }));
 
+    // Named explicitly rather than --all: --all leaves Grok to Claude's
+    // settings, and this test is about all three files being written.
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const result = await runInstaller(["--all"], env);
+      const result = await runInstaller(["--claude", "--ghost", "--grok"], env);
       assert.equal(result.code, 0, result.stderr);
     }
 
@@ -178,7 +183,7 @@ test("--link registers the checkout, and switching modes replaces rather than ad
   // this machine drifted: the hand-written entry missed an event the installer
   // would have added. Linking is the same thing, managed.
   const { claudeHome, dataHome, env, cleanup } = await installHome("link");
-  const bundled = path.join(process.cwd(), "plugins", "keep-going", "scripts", "keep-going.mjs");
+  const bundled = path.join(ROOT, "plugins", "keep-going", "scripts", "keep-going.mjs");
   const copied = path.join(dataHome, "keep-going", "keep-going.mjs");
   const commands = async () => {
     const config = JSON.parse(await readFile(path.join(claudeHome, "settings.json"), "utf8"));
@@ -204,6 +209,61 @@ test("--link registers the checkout, and switching modes replaces rather than ad
     const relinked = await commands();
     assert.equal(relinked.length, 2, JSON.stringify(relinked));
     assert.ok(relinked.every((command) => command.includes(bundled)));
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a registration naming the wrong runner is replaced, not preserved forever", async () => {
+  // --status counted this as a duplicate while the installer, which required
+  // the runner word to match, refused to strip it — so re-running the tool
+  // could never fix what the tool was reporting.
+  const { settings, claudeHome, env, cleanup } = await installHome("wrongrunner");
+  try {
+    await mkdir(claudeHome, { recursive: true });
+    await writeFile(settings, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: "command", command: "'/usr/bin/node' '/x/keep-going.mjs' ghost" }] }] },
+    }));
+
+    const before = await runInstaller(["--status"], env);
+    assert.match(before.stdout, /! claude is registered to run the ghost runtime/);
+
+    assert.equal((await runInstaller(["--claude"], env)).code, 0);
+    const stop = JSON.parse(await readFile(settings, "utf8")).hooks.Stop.flatMap((group) => group.hooks);
+    assert.equal(stop.length, 1, JSON.stringify(stop));
+    assert.match(stop[0].command, /keep-going\.mjs' claude$/);
+
+    const after = await runInstaller(["--status"], env);
+    assert.doesNotMatch(after.stdout, /ghost runtime/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("--all leaves Grok to Claude's registration, but --uninstall --all still clears it", async () => {
+  // Grok dispatches what it finds in Claude's settings, so installing both is
+  // two reviews of every Grok stop — which --all itself used to produce and
+  // --status then reported as a fault. Removal has to stay exhaustive, or an
+  // --all uninstall leaves behind what an older --all install wrote.
+  const { claudeHome, grokHome, env, cleanup } = await installHome("all");
+  const grokHook = path.join(grokHome, "hooks", "keep-going.json");
+  try {
+    assert.equal((await runInstaller(["--all"], env)).code, 0);
+    await access(path.join(claudeHome, "settings.json"));
+    await assert.rejects(access(grokHook), "--all must not register grok beside claude");
+
+    const status = await runInstaller(["--status"], env);
+    assert.match(status.stdout, /grok\s+registered\s+.*settings\.json \(reviewed by claude\)/);
+    assert.doesNotMatch(status.stdout, /! grok has/);
+
+    // Asking for both explicitly is allowed, and said out loud.
+    const both = await runInstaller(["--claude", "--grok"], env);
+    assert.match(both.stdout, /note: Grok also dispatches Claude's settings/);
+    await access(grokHook);
+
+    assert.equal((await runInstaller(["--uninstall", "--all"], env)).code, 0);
+    const grok = JSON.parse(await readFile(grokHook, "utf8"));
+    assert.deepEqual(grok.hooks.Stop, []);
   } finally {
     await cleanup();
   }
@@ -236,8 +296,8 @@ test("status reports every host, including the two it does not write", async () 
   // Grok dispatching Claude's settings is what made a hook that was listed as
   // enabled do nothing at all for a day, so the report has to distinguish
   // "covered by another host's file" from both "registered" and "absent".
-  const { root, env, cleanup } = await installHome("status");
-  const codexHome = path.join(root, "codex");
+  const { codexHome, env, cleanup } = await installHome("status");
+
   try {
     const bare = await runInstaller(["--status"], env);
     assert.equal(bare.code, 0, bare.stderr);
@@ -280,14 +340,9 @@ test("installer requires an explicit target", async () => {
 });
 
 test("uninstalling an absent hook does not create a settings file", async () => {
-  const { root, cleanup } = await installHome("uninstall");
-  const settings = path.join(root, "claude", "settings.json");
+  const { settings, env, cleanup } = await installHome("uninstall");
   try {
-    const result = await runInstaller(["--uninstall", "--claude"], {
-      KEEP_GOING_HOME: path.join(root, "home"),
-      XDG_DATA_HOME: path.join(root, "data"),
-      CLAUDE_CONFIG_DIR: path.dirname(settings),
-    });
+    const result = await runInstaller(["--uninstall", "--claude"], env);
     assert.equal(result.code, 0, result.stderr);
     await assert.rejects(access(settings), { code: "ENOENT" });
   } finally {

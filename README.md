@@ -58,6 +58,11 @@ claude plugin install keep-going@keep-going
 npx --yes github:ferdousbhai/keep-going --ghost   # --claude, --grok, --all
 ```
 
+`--all` covers every host that needs a hook of its own, which leaves Grok out
+when Claude is installed: Grok dispatches Claude's settings, so registering
+both reviews every Grok stop twice. Asking for `--grok` explicitly still does
+it, and says so.
+
 Grok Build needs `--grok` **only** if keep-going is not already in
 `~/.claude/settings.json`. Grok reads that file and dispatches what it finds
 there, so a Claude Code install already covers Grok — reviewed by `claude`,

@@ -666,15 +666,14 @@ async function handleStop(input, runner = "codex") {
   // Kept after the cap check: the nudge changes tone as the turn nears the cap.
   let continuations = await recordedContinuations(input, runner);
   let countedBy = "tally";
+  const named = payloadTurn(input);
   try {
     // A transcript is read only by a host whose payload leaves the turn
     // unidentified, and then only to count: its content never reaches the
-    // reviewer. Where it can be read it is exact and it replaces the tally,
-    // here and in what the tally is left holding.
-    // Only where the payload named no turn. A subagent names one, and its
-    // parent's transcript holds the parent's user messages anyway, so there is
-    // nothing a transcript could add that the tally does not already know.
-    if (!payloadTurn(input) && runtime.count && typeof input.transcript_path === "string" && input.transcript_path) {
+    // reviewer. Where it is read it is exact, so it replaces the tally both
+    // here and in what the tally is left holding. A subagent names its turn,
+    // and its parent's transcript holds the parent's messages regardless.
+    if (!named && runtime.count && typeof input.transcript_path === "string" && input.transcript_path) {
       try {
         continuations = await countContinuations(input, runner);
         countedBy = "transcript";
