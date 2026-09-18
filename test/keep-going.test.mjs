@@ -542,6 +542,18 @@ test("verdict parsing accepts only the exact review enum", () => {
   for (const invalid of ["continue", "CONSULT", "JUDGE_ADVISOR", "{}", "", null, undefined]) {
     assert.throws(() => parseReviewVerdict(invalid), /begin with CONTINUE, JUDGE, or STOP/);
   }
+  assert.deepEqual(
+    parseReviewVerdict("I'll check the session state.\nSTOP"),
+    { verdict: "STOP", nudge: "" },
+  );
+  assert.deepEqual(
+    parseReviewVerdict("A short look at the last message.\nCONTINUE\nKeep going."),
+    { verdict: "CONTINUE", nudge: "Keep going." },
+  );
+  assert.deepEqual(
+    parseReviewVerdict("I'll inspect the workspace and recent activity to see if the turn actually finished.STOP"),
+    { verdict: "STOP", nudge: "" },
+  );
 });
 
 test("a verdict answered twice is still one verdict", () => {
@@ -798,6 +810,10 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", { co
     assert.ok(call.args.includes("--verbatim"));
     assert.equal(call.args[call.args.indexOf("--tools") + 1], "");
     assert.equal(call.args[call.args.indexOf("--effort") + 1], "low");
+    assert.equal(
+      call.args[call.args.indexOf("--system-prompt-override") + 1],
+      "Reply with exactly one of CONTINUE, JUDGE, or STOP as the first line. No preamble, no analysis.",
+    );
     assert.equal(call.args[call.args.indexOf("--permission-mode") + 1], "dontAsk");
     assert.match(call.args[call.args.indexOf("--single") + 1], /Candidate final response\./);
     assert.equal(call.grokHookEvent, null);

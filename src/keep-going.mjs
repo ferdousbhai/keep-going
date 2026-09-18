@@ -598,6 +598,11 @@ async function runClaudeModel({ prompt, timeoutMs }) {
   });
 }
 
+// Grok's default system prompt is a coding agent. Without this, --single
+// writes analysis before STOP and the hook fails open.
+const GROK_CLASSIFIER_PROMPT =
+  `Reply with exactly one of ${listVerdicts(VERDICT_NAMES)} as the first line. No preamble, no analysis.`;
+
 function grokReviewerEnv(overlayHome) {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
@@ -664,6 +669,8 @@ async function runGrokModel({ prompt, timeoutMs }) {
       "",
       "--effort",
       "low",
+      "--system-prompt-override",
+      GROK_CLASSIFIER_PROMPT,
       "--cwd",
       directory,
       ...modelArgs("KEEP_GOING_GROK_MODEL"),
@@ -742,13 +749,36 @@ function sanitizeNudge(value) {
 }
 
 function parseReviewVerdict(text) {
-  const match = REVIEW_VERDICT_PATTERN.exec(String(text ?? "").trim());
+  const body = String(text ?? "").trim();
+  const match = REVIEW_VERDICT_PATTERN.exec(body)
+    ?? verdictAfterPreamble(body)
+    ?? trailingVerdict(body);
   if (!match) {
     throw new Error(`Reviewer output must begin with ${listVerdicts(VERDICT_NAMES)}`);
   }
   let rest = match[2];
   while (VERDICT_ECHO.test(rest)) rest = rest.replace(VERDICT_ECHO, "");
   return { verdict: match[1], nudge: sanitizeNudge(rest) };
+}
+
+// Grok's default agent writes a sentence before the verdict. The first line
+// that is a verdict is the answer; preamble is discarded.
+function verdictAfterPreamble(body) {
+  const lines = body.split(/\n/);
+  for (let i = 1; i < lines.length; i++) {
+    const rest = lines.slice(i).join("\n").trim();
+    const match = REVIEW_VERDICT_PATTERN.exec(rest);
+    if (match) return match;
+  }
+  return null;
+}
+
+// Same agent often glues the word on: "I'll inspect the workspace.STOP"
+function trailingVerdict(body) {
+  const match = new RegExp(
+    `(?:^|[^A-Za-z_])(${VERDICT_ALTERNATION})(?:${VERDICT_SEPARATOR})*$`,
+  ).exec(body);
+  return match ? [match[0], match[1], ""] : null;
 }
 
 // Near the cap the reviewer is told to write a different line, rather than
