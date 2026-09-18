@@ -73,22 +73,21 @@ npx --yes github:ferdousbhai/keep-going --ghost   # --claude, --grok, --all
 ```
 
 `--all` covers the CLI hooks managed by the `npx` installer, not Pi or the
-Codex plugin. It leaves Grok out when Claude is installed: Grok dispatches
-Claude's settings, so registering both reviews every Grok stop twice. Asking for `--grok` explicitly still does
-it, and says so.
+Codex plugin. It writes a native file per host, including Grok even when Claude
+is already installed.
 
-Grok Build needs `--grok` **only** if keep-going is not already in
-`~/.claude/settings.json`. Grok reads that file and dispatches what it finds
-there, so a Claude Code install already covers Grok — reviewed by `claude`,
-which a Grok-only machine may not have. `--grok` writes a hook to
-`~/.grok/hooks/keep-going.json` that is reviewed by `grok --single` instead.
-Install both and Grok runs the reviewer twice on every stop.
+Claude Code and Grok Build together: install both (`--all`, or `--claude --grok`).
+Grok still scans `~/.claude/settings.json`, but keep-going ignores that copy on
+Grok when `~/.grok/hooks/keep-going.json` is present, so the reviewer runs once,
+as `grok`. `--claude` alone still covers Grok through that scan (also reviewed
+by `grok`) if you have not written a native Grok hook — and is the only Grok
+coverage if you later turn Grok's Claude hook compat off, until you add `--grok`.
 
 One route per host: the plugin and the `npx` installer each register their own
 Stop hook, and a host with both runs the reviewer twice on every stop.
 
 These track `main`, gated by `npm run check`. To pin instead, add a git tag —
-`--ref v0.9.0` for Codex, `#v0.9.0` for `npx`, or `@v0.9.0` for Pi's Git source.
+`--ref v0.10.0` for Codex, `#v0.10.0` for `npx`, or `@v0.10.0` for Pi's Git source.
 The Claude plugin moves only when you run `claude plugin update`. There is no
 npm package.
 
@@ -164,7 +163,10 @@ JUDGE, STOP, invalid output, reviewer overrides, duplicate installs, and the cap
 keep-going does not select a small or low-cost model automatically. For CLI
 reviewers, unless a `KEEP_GOING_*_MODEL` override is set, it omits `--model` and
 lets the reviewer CLI choose. That need not be the session's active model,
-and the default can change with CLI versions or provider defaults.
+and the default can change with CLI versions or provider defaults. Where the
+host exposes it, reasoning is the lowest advertised level (`none` on Codex
+and Pi, `low` on Grok and Claude — Grok's CLI has no `none`). Reviewers are
+run without tools.
 
 The Codex reviewer runs with `--ignore-user-config`, so it does not inherit
 `model` or reasoning settings from `~/.codex/config.toml`. Set

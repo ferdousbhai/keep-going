@@ -100,6 +100,7 @@ test("Pi uses its active model and sends only the redacted final text", async (t
   assert.match(prompt, /token=\[REDACTED\]/);
   assert.doesNotMatch(prompt, /private-value|private owner request|private\/workspace/);
   assert.equal(options.maxTokens, 2048);
+  assert.equal(options.reasoning, false);
   assert.equal(f.sent.length, 0);
   const [row] = await f.audit();
   assert.equal(row.runner, "pi");

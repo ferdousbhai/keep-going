@@ -19,6 +19,8 @@ import {
   handleStop,
   hookOutputForVerdict,
   parseReviewVerdict,
+  resolveRunner,
+  yieldsToGrokNative,
 } from "../src/keep-going.mjs";
 import { HOOK_FILES, VERSIONED, hookFile, stampVersion } from "../scripts/build.mjs";
 
@@ -32,8 +34,11 @@ const ENV_KEYS = [
   "KEEP_GOING_CODEX_MODEL",
   "KEEP_GOING_GHOST_BIN",
   "KEEP_GOING_GROK_BIN",
+  "KEEP_GOING_GROK_MODEL",
   "KEEP_GOING_MUSE_BIN",
   "KEEP_GOING_MUSE_MODEL",
+  "GROK_HOOK_EVENT",
+  "GROK_HOME",
   "MOCK_CALL_LOG",
   "MOCK_REVIEW_RESPONSE",
   "MOCK_REVIEW_PAD",
@@ -44,7 +49,11 @@ const ENV_KEYS = [
 ];
 
 function environmentSnapshot() {
-  return Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  const snapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  // Grok's hook runner sets this; a test process started from a Grok session
+  // must not inherit it or every runner remaps to grok.
+  delete process.env.GROK_HOOK_EVENT;
+  return snapshot;
 }
 
 function restoreEnvironment(snapshot) {
@@ -352,7 +361,7 @@ test("STOP accepts the stop", { concurrency: false }, async () => {
     assert.deepEqual(output, {});
     const calls = await context.calls();
     assert.deepEqual(calls.map((item) => item.model), ["gpt-5.6-luna"]);
-    assert.ok(!calls[0].args.some((arg) => arg.includes("model_reasoning_effort")));
+    assert.ok(calls[0].args.includes('model_reasoning_effort="none"'));
     assert.ok(!calls[0].args.includes("--output-schema"));
     assert.match(calls[0].prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.doesNotMatch(calls[0].prompt, /Build it now|supersecretvalue|tool_events|project_context/);
@@ -438,7 +447,7 @@ test("Claude ignores orphan feedback and resets the streaming count for a new ow
   assert.equal(await claudeContinuations(context.input), 0);
 });
 
-test("Claude uses Sonnet with its default effort for classification", { concurrency: false }, async () => {
+test("Claude classifies with no tools and the lowest advertised effort", { concurrency: false }, async () => {
   const context = await claudeFixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
@@ -446,7 +455,7 @@ test("Claude uses Sonnet with its default effort for classification", { concurre
     assert.deepEqual(output, {});
     const [call] = await context.calls();
     assert.equal(call.model, "sonnet");
-    assert.ok(!call.args.includes("--effort"));
+    assert.equal(call.args[call.args.indexOf("--effort") + 1], "low");
     assert.ok(call.args.includes("--safe-mode"));
     assert.ok(call.args.includes("--no-session-persistence"));
     assert.equal(call.args[call.args.indexOf("--tools") + 1], "");
@@ -469,6 +478,7 @@ test("names no model unless one is configured", { concurrency: false }, async ()
     ["codex", fixture, "KEEP_GOING_CODEX_MODEL"],
     ["claude", claudeFixture, "KEEP_GOING_CLAUDE_MODEL"],
     ["muse", museFixture, "KEEP_GOING_MUSE_MODEL"],
+    ["grok", grokFixture, "KEEP_GOING_GROK_MODEL"],
   ]) {
     const context = await fixtureFor();
     try {
@@ -642,9 +652,15 @@ async function grokFixture() {
   await writeFile(
     modelMock,
     `#!/usr/bin/env node
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
+import path from "node:path";
 const args = process.argv.slice(2);
-appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ args }) + "\\n");
+appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({
+  args,
+  grokHookEvent: process.env.GROK_HOOK_EVENT ?? null,
+  grokHome: process.env.GROK_HOME ?? null,
+  overlayHasConfig: process.env.GROK_HOME ? existsSync(path.join(process.env.GROK_HOME, "config.toml")) : false,
+}) + "\\n");
 process.stdout.write(process.env.MOCK_REVIEW_RESPONSE + "\\n");
 `,
   );
@@ -655,6 +671,7 @@ process.stdout.write(process.env.MOCK_REVIEW_RESPONSE + "\\n");
   process.env.MOCK_CALL_LOG = callLog;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
   process.env.XDG_STATE_HOME = path.join(root, "state");
+  process.env.GROK_HOME = path.join(root, "grok-home");
 
   return {
     // The payload Grok's native Stop hook actually sends, spelling intact.
@@ -772,20 +789,94 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", { co
     const output = await handleStop(context.input, "grok");
     assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
 
-    // Reviewing Grok with Grok is only safe because --single dispatches no
-    // stop hook; anything that starts a full session would re-enter this one.
+    // The overlay is a fresh GROK_HOME so the reviewer does not inherit MCP,
+    // plugins, or the parent session's agent. --single still dispatches no
+    // stop hook, so it cannot re-enter this one.
     const [call] = await context.calls();
     assert.ok(call.args.includes("--single"));
     assert.ok(call.args.includes("--max-turns"));
+    assert.ok(call.args.includes("--verbatim"));
+    assert.equal(call.args[call.args.indexOf("--tools") + 1], "");
+    assert.equal(call.args[call.args.indexOf("--effort") + 1], "low");
+    assert.equal(call.args[call.args.indexOf("--permission-mode") + 1], "dontAsk");
     assert.match(call.args[call.args.indexOf("--single") + 1], /Candidate final response\./);
+    assert.equal(call.grokHookEvent, null);
+    assert.ok(call.grokHome.endsWith(`${path.sep}home`));
+    assert.notEqual(call.grokHome, process.env.GROK_HOME);
+    assert.equal(call.overlayHasConfig, true);
 
     // Grok sends no transcript this runtime can read, so the tally is the cap.
     const [row] = (await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8"))
       .trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(row.counted_by, "tally");
     assert.equal(await recordedContinuations(context.input, "grok"), 1);
+    assert.ok(!call.args.includes("--model"));
   } finally {
     await context.cleanup();
+  }
+});
+
+test("Grok-dispatched Claude settings are reviewed by grok, not claude", { concurrency: false }, async () => {
+  const context = await grokFixture();
+  const claudeBin = path.join(path.dirname(process.env.KEEP_GOING_GROK_BIN), "must-not-run-claude.mjs");
+  try {
+    await writeFile(claudeBin, "#!/usr/bin/env node\nprocess.exit(2);\n");
+    await chmod(claudeBin, 0o755);
+    process.env.KEEP_GOING_CLAUDE_BIN = claudeBin;
+    process.env.GROK_HOOK_EVENT = "stop";
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+
+    assert.equal(resolveRunner("claude"), "grok");
+    assert.equal(resolveRunner("codex"), "grok");
+    assert.equal(await yieldsToGrokNative("claude"), false);
+    const output = await handleStop(context.input, "claude");
+    assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
+
+    const [call] = await context.calls();
+    assert.ok(call.args.includes("--single"));
+    assert.ok(!call.args.includes("--print"));
+    assert.equal(call.grokHookEvent, null);
+    assert.ok(!call.args.includes("--model"));
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("a native Grok hook makes the Claude-settings copy yield", { concurrency: false }, async () => {
+  const context = await grokFixture();
+  try {
+    process.env.GROK_HOOK_EVENT = "stop";
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    const hookFile = path.join(process.env.GROK_HOME, "hooks", "keep-going.json");
+    await mkdir(path.dirname(hookFile), { recursive: true });
+    await writeFile(hookFile, JSON.stringify({
+      hooks: {
+        Stop: [{ hooks: [{ type: "command", command: "'/usr/bin/node' '/x/keep-going.mjs' grok" }] }],
+      },
+    }));
+
+    assert.equal(await yieldsToGrokNative("claude"), true);
+    assert.equal(await yieldsToGrokNative("grok"), false);
+    assert.deepEqual(await handleStop(context.input, "claude"), {});
+    assert.deepEqual(await context.calls(), []);
+
+    const native = await handleStop(context.input, "grok");
+    assert.deepEqual(native, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
+    assert.equal((await context.calls()).length, 1);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Claude Code is still reviewed by claude when Grok is not the host", { concurrency: false }, async () => {
+  const previous = process.env.GROK_HOOK_EVENT;
+  delete process.env.GROK_HOOK_EVENT;
+  try {
+    assert.equal(resolveRunner("claude"), "claude");
+    assert.equal(resolveRunner("codex"), "codex");
+  } finally {
+    if (previous === undefined) delete process.env.GROK_HOOK_EVENT;
+    else process.env.GROK_HOOK_EVENT = previous;
   }
 });
 

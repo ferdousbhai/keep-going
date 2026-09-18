@@ -55,10 +55,9 @@ const TARGETS = {
   // another tool may already claim — so the settings block is the install.
   muse: ({ configHome }) => path.join(configHome, "muse", "settings.json"),
   ghost: ({ configHome }) => path.join(configHome, "ghost", "hooks.json"),
-  // Grok dispatches what it finds in ~/.claude/settings.json through its Claude
-  // compatibility layer, so a Claude install already covers it — reviewed by
-  // claude, which a Grok-only machine may not have. This registration is for
-  // that machine, and installing both makes Grok review every stop twice.
+  // Grok also dispatches ~/.claude/settings.json. Dual install still writes this
+  // file so Grok has a native hook if that scan is off; the Claude-settings copy
+  // yields on Grok when this file is present, so the reviewer runs once.
   grok: ({ userHome }) =>
     path.join(process.env.GROK_HOME || path.join(userHome, ".grok"), "hooks", "keep-going.json"),
 };
@@ -171,11 +170,19 @@ const SOURCES = {
   codex: [codexSource],
 };
 
-// A host reached through another host's file runs that host's runtime, so the
-// runner is worth naming exactly when it is not the obvious one.
+// A host reached through another host's file usually runs that file's runtime,
+// so the runner is worth naming when it is not the host. Grok is the exception:
+// it dispatches Claude's settings but reviews with grok.
+function dispatchedRunner(host, runner) {
+  if (host === "grok" && runner === "claude") return "grok";
+  return runner;
+}
+
 function describeWhere(ours, host) {
-  return [...new Set(ours.map((hook) =>
-    hook.runner && hook.runner !== host ? `${hook.where} (reviewed by ${hook.runner})` : hook.where))].join(", ");
+  return [...new Set(ours.map((hook) => {
+    const reviewer = dispatchedRunner(host, hook.runner);
+    return reviewer && reviewer !== host ? `${hook.where} (reviewed by ${hook.runner})` : hook.where;
+  }))].join(", ");
 }
 
 async function reportStatus(paths) {
@@ -195,7 +202,16 @@ async function reportStatus(paths) {
 
     for (const event of events) {
       const on = ours.filter((hook) => hook.event === event);
-      if (on.length > 1) warnings.push(`${host} has ${on.length} hooks on ${event} and reviews it ${on.length} times`);
+      // Grok scanning Claude's file is expected when both are installed: that
+      // copy yields, so it is coverage, not a second review.
+      const reviewing = on.filter((hook) =>
+        !(host === "grok" && hook.runner === "claude" && on.some((other) => other.runner === "grok")));
+      if (reviewing.length > 1) {
+        warnings.push(`${host} has ${reviewing.length} hooks on ${event} and reviews it ${reviewing.length} times`);
+      }
+    }
+    if (host === "grok" && ours.some((hook) => hook.runner === "claude") && !ours.some((hook) => hook.runner === "grok")) {
+      warnings.push("grok is covered only through Claude's settings; --grok writes a native hook");
     }
     if (missing.length && ours.length) {
       warnings.push(`${host} is not registered for ${missing.join(", ")}; re-run the installer to add it`);
@@ -218,15 +234,13 @@ async function reportStatus(paths) {
 
 const coveredBy = (host) => SOURCES[host].find((source) => source.host !== host)?.host ?? null;
 
-function selectedRuntimes(args, uninstall) {
+function selectedRuntimes(args) {
   const all = args.includes("--all");
-  const chosen = Object.keys(TARGETS).filter((name) => all || args.includes(`--${name}`));
-  // A host another host already dispatches for needs no hook of its own, and
-  // registering both reviews every stop twice — which --all used to produce
-  // and --status then reported as a fault. Removal still means all of them: an
-  // --all uninstall has to reach a hook an older --all install wrote.
-  if (!all || uninstall) return chosen;
-  return chosen.filter((host) => !chosen.includes(coveredBy(host)));
+  // Grok scans Claude's settings, but dual users still get a native Grok hook:
+  // that file is what reviews on Grok, and it is the only coverage if the scan
+  // is off. --all used to skip grok to avoid a double review; the borrowed copy
+  // now yields instead.
+  return Object.keys(TARGETS).filter((name) => all || args.includes(`--${name}`));
 }
 
 function shellQuote(value) {
@@ -318,7 +332,7 @@ async function main() {
   }
 
   const uninstall = args.includes("--uninstall");
-  const runtimes = selectedRuntimes(args, uninstall);
+  const runtimes = selectedRuntimes(args);
   if (runtimes.length === 0) {
     throw new Error(`Select ${new Intl.ListFormat("en", { type: "disjunction" }).format([...Object.keys(TARGETS).map((name) => `--${name}`), "--all"])}.\n\n${usage()}`);
   }
@@ -340,7 +354,9 @@ async function main() {
   for (const host of uninstall ? [] : runtimes) {
     const coverer = coveredBy(host);
     if (runtimes.includes(coverer)) {
-      process.stdout.write(`note: ${host} also dispatches ${coverer}'s hooks, so it will review every stop twice\n`);
+      process.stdout.write(
+        `note: ${host} also dispatches ${coverer}'s hooks; ${host}'s own hook reviews, and the ${coverer} copy is ignored there\n`,
+      );
     }
   }
 

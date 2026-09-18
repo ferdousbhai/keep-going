@@ -62,11 +62,14 @@ const RUNTIMES = {
     run: runMuseModel,
   },
   // Grok dispatches hooks it finds in ~/.claude/settings.json as well as its
-  // own, so this runtime is reached only from ~/.grok/hooks/keep-going.json,
-  // which a machine without a Claude registration installs to be reviewed by
-  // grok rather than by claude. Its transcript is a log of session/update frames
-  // in which a blocked turn's nudge lands inside the agent's own reasoning,
-  // leaving no continuation to count; the tally counts them instead.
+  // own. A Claude install's command still ends in `claude`, so resolveRunner
+  // remaps to this runtime whenever GROK_HOOK_EVENT is set — unless a native
+  // Grok hook is present, in which case the Claude copy yields. Dual install
+  // writes ~/.grok/hooks/keep-going.json so Grok is covered even if that scan
+  // is off; grok picks its own default model.
+  // Its transcript is a log of session/update frames in which a blocked turn's
+  // nudge lands inside the agent's own reasoning, leaving no continuation to
+  // count; the tally counts them instead.
   grok: {
     requires: ["session_id"],
     state: xdgStateHome,
@@ -163,6 +166,44 @@ ${BLOCKING_VERDICTS.map((name) => `After ${name}, ${VERDICTS[name].directive}.`)
 function modelArgs(variable) {
   const model = process.env[variable];
   return model ? ["--model", model] : [];
+}
+
+// Grok dispatches ~/.claude/settings.json, so a Claude install's command still
+// ends in `claude`. The host actually running the agent is the reviewer:
+// GROK_HOOK_EVENT is set only by Grok's hook runner, never by Claude Code.
+function resolveRunner(requested) {
+  if (process.env.GROK_HOOK_EVENT) return "grok";
+  return requested;
+}
+
+function grokNativeHookFile() {
+  return path.join(process.env.GROK_HOME || path.join(homedir(), ".grok"), "hooks", "keep-going.json");
+}
+
+// Dual install writes Grok's own file and still leaves the Claude-settings copy
+// for Claude Code. Grok would dispatch both; the borrowed copy yields so the
+// native grok hook is the one review.
+async function grokNativeKeepGoingPresent() {
+  try {
+    const config = JSON.parse(await readFile(grokNativeHookFile(), "utf8"));
+    const groups = config?.hooks?.Stop;
+    if (!Array.isArray(groups)) return false;
+    return groups.some((group) =>
+      (Array.isArray(group?.hooks) ? group.hooks : []).some((hook) => {
+        const command = hook?.command;
+        if (typeof command !== "string") return false;
+        if (!/(?:keep-going|unblock|stop-review)\.mjs\b/.test(command)) return false;
+        return command.trimEnd().split(/\s+/).at(-1) === "grok";
+      }),
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function yieldsToGrokNative(requested) {
+  if (!process.env.GROK_HOOK_EVENT || requested === "grok") return false;
+  return grokNativeKeepGoingPresent();
 }
 
 function redactSensitive(value) {
@@ -495,6 +536,8 @@ async function runCodexModel({ prompt, timeoutMs }) {
       directory,
       "--config",
       'approval_policy="never"',
+      "--config",
+      'model_reasoning_effort="none"',
       "--output-last-message",
       outputPath,
       ...modelArgs("KEEP_GOING_CODEX_MODEL"),
@@ -510,12 +553,14 @@ async function runClaudeModel({ prompt, timeoutMs }) {
     const claude = process.env.KEEP_GOING_CLAUDE_BIN || "claude";
     // No tools and no --json-schema: a plain-text verdict completes in one turn,
     // whereas the StructuredOutput tool call was fumbled often enough to exhaust
-    // --max-turns.
+    // --max-turns. Claude's lowest advertised effort is low (it has no none).
     const args = [
       "--print",
       "--safe-mode",
       "--tools",
       "",
+      "--effort",
+      "low",
       "--no-session-persistence",
       "--no-chrome",
       "--disable-slash-commands",
@@ -553,11 +598,55 @@ async function runClaudeModel({ prompt, timeoutMs }) {
   });
 }
 
-// Grok's own headless mode is the reviewer, which also makes the recursion
-// impossible by construction: `grok --single` dispatches session_start hooks
-// and no stop hook, so the reviewer cannot trip the hook that spawned it.
+function grokReviewerEnv(overlayHome) {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("GROK_")) delete env[key];
+  }
+  env.GROK_HOME = overlayHome;
+  return env;
+}
+
+// Nested `grok --single` otherwise inherits the parent session's home: MCP
+// servers, plugins, high reasoning, and the coding agent. That is a full
+// turn, and it times out the classifier. The overlay carries auth only, so
+// grok picks its own default model with no tools and --effort low (the lowest
+// level this CLI advertises; it has no none). --single
+// still dispatches no stop hook, so the reviewer cannot trip the hook that
+// spawned it.
 async function runGrokModel({ prompt, timeoutMs }) {
   return inTemporaryDirectory("grok", async (directory) => {
+    const overlayHome = path.join(directory, "home");
+    await mkdir(path.join(overlayHome, "hooks"), { recursive: true });
+    const sourceHome = process.env.GROK_HOME || path.join(homedir(), ".grok");
+    try {
+      const auth = path.join(overlayHome, "auth.json");
+      await copyFile(path.join(sourceHome, "auth.json"), auth);
+      await chmod(auth, 0o600);
+    } catch {
+      // Same as Muse: a missing credential fails the review open below.
+    }
+    // Grok still scans ~/.claude and ~/.cursor when GROK_HOME has no config.
+    // That would re-enter this hook from inside the reviewer.
+    await writeFile(
+      path.join(overlayHome, "config.toml"),
+      [
+        "[compat.claude]",
+        "hooks = false",
+        "mcps = false",
+        "skills = false",
+        "agents = false",
+        "rules = false",
+        "[compat.cursor]",
+        "hooks = false",
+        "mcps = false",
+        "skills = false",
+        "agents = false",
+        "rules = false",
+        "",
+      ].join("\n"),
+      { encoding: "utf8", mode: 0o600 },
+    );
     const grok = process.env.KEEP_GOING_GROK_BIN || "grok";
     const args = [
       "--single",
@@ -569,12 +658,20 @@ async function runGrokModel({ prompt, timeoutMs }) {
       "--disable-web-search",
       "--no-subagents",
       "--no-plan",
+      "--no-auto-update",
+      "--verbatim",
+      "--permission-mode",
+      "dontAsk",
+      "--tools",
+      "",
+      "--effort",
+      "low",
       "--cwd",
       directory,
       ...modelArgs("KEEP_GOING_GROK_MODEL"),
     ];
     const result = assertExitOk(
-      await runProcess(grok, args, "", timeoutMs, process.env, directory),
+      await runProcess(grok, args, "", timeoutMs, grokReviewerEnv(overlayHome), directory),
       "grok",
     );
     return result.stdout;
@@ -710,6 +807,8 @@ async function recordedContinuations(input, runner) {
 }
 
 async function handleStop(input, runner = "codex", { runModel } = {}) {
+  if (await yieldsToGrokNative(runner)) return {};
+  runner = resolveRunner(runner);
   const runtime = RUNTIMES[runner];
   if (!runtime) throw new Error(`Unsupported keep-going runtime: ${runner}`);
   for (const key of runtime.requires) {
@@ -823,4 +922,6 @@ export {
   handleStop,
   hookOutputForVerdict,
   parseReviewVerdict,
+  resolveRunner,
+  yieldsToGrokNative,
 };

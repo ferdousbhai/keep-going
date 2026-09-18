@@ -56,7 +56,7 @@ export async function reviewWithPi(ctx, model, { prompt, timeoutMs }, signal) {
   const response = await abortable(() => ctx.modelRegistry.complete(
     model,
     { messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }] },
-    { signal: deadline, maxTokens: 2048, cacheRetention: "none" },
+    { signal: deadline, maxTokens: 2048, cacheRetention: "none", reasoning: false },
   ), deadline);
   deadline.throwIfAborted();
   if (response.stopReason !== "stop") {

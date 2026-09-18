@@ -100,8 +100,7 @@ test("installer adds, updates, and removes Claude Code, Ghost, and Grok hooks", 
       theme: "dark",
     }));
 
-    // Named explicitly rather than --all: --all leaves Grok to Claude's
-    // settings, and this test is about all three files being written.
+    // Named explicitly: this test is about all three files being written.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const result = await runInstaller(["--claude", "--ghost", "--grok"], env);
       assert.equal(result.code, 0, result.stderr);
@@ -299,37 +298,38 @@ test("a covered host is still checked against its own runner", async () => {
     const report = await runInstaller(["--status"], env);
     assert.match(report.stdout, /! grok is registered to run the ghost runtime/);
 
-    // While the claude runner reaching grok through Claude's file is expected.
+    // A claude command reaching grok through Claude's settings is expected;
+    // grok still reviews it, so status does not say "reviewed by claude".
     assert.equal((await runInstaller(["--claude"], env)).code, 0);
     assert.equal((await runInstaller(["--uninstall", "--grok"], env)).code, 0);
     const covered = await runInstaller(["--status"], env);
-    assert.match(covered.stdout, /grok\s+registered\s+.*\(reviewed by claude\)/);
+    assert.match(covered.stdout, /grok\s+registered\s+.*settings\.json/);
+    assert.doesNotMatch(covered.stdout, /reviewed by claude/);
     assert.doesNotMatch(covered.stdout, /grok is registered to run/);
   } finally {
     await cleanup();
   }
 });
 
-test("--all leaves Grok to Claude's registration, but --uninstall --all still clears it", async () => {
-  // Grok dispatches what it finds in Claude's settings, so installing both is
-  // two reviews of every Grok stop — which --all itself used to produce and
-  // --status then reported as a fault. Removal has to stay exhaustive, or an
-  // --all uninstall leaves behind what an older --all install wrote.
+test("--all writes a native Grok hook beside Claude, and --uninstall --all still clears it", async () => {
+  // Dual users need Grok's own file even though Grok also scans Claude's
+  // settings. The borrowed copy yields, so --status must not call that a
+  // double review. Removal has to stay exhaustive, or an --all uninstall
+  // leaves behind what an older --all install wrote.
   const { settings, grokHome, env, cleanup } = await installHome("all");
   const grokHook = path.join(grokHome, "hooks", "keep-going.json");
   try {
-    assert.equal((await runInstaller(["--all"], env)).code, 0);
+    const installed = await runInstaller(["--all"], env);
+    assert.equal(installed.code, 0, installed.stderr);
     await access(settings);
-    await assert.rejects(access(grokHook), "--all must not register grok beside claude");
+    await access(grokHook);
+    assert.match(installed.stdout, /note: grok also dispatches claude's hooks; grok's own hook reviews/);
 
     const status = await runInstaller(["--status"], env);
-    assert.match(status.stdout, /grok\s+registered\s+.*settings\.json \(reviewed by claude\)/);
+    assert.match(status.stdout, /grok\s+registered/);
+    assert.doesNotMatch(status.stdout, /reviewed by claude/);
     assert.doesNotMatch(status.stdout, /! grok has/);
-
-    // Asking for both explicitly is allowed, and said out loud.
-    const both = await runInstaller(["--claude", "--grok"], env);
-    assert.match(both.stdout, /note: grok also dispatches claude's hooks/);
-    await access(grokHook);
+    assert.doesNotMatch(status.stdout, /covered only through Claude's settings/);
 
     assert.equal((await runInstaller(["--uninstall", "--all"], env)).code, 0);
     const grok = JSON.parse(await readFile(grokHook, "utf8"));
@@ -378,15 +378,19 @@ test("status reports every host, including the two it does not write", async () 
     const covered = await runInstaller(["--status"], env);
     assert.match(covered.stdout, /claude\s+registered/);
     // Grok is reached through Claude's file, which is a source rather than a
-    // special case — and it says whose runtime answers for it.
-    assert.match(covered.stdout, /grok\s+registered\s+.*settings\.json \(reviewed by claude\)/);
-    assert.doesNotMatch(covered.stdout, /! grok has/);
+    // special case. The reviewer is still grok, so status does not claim
+    // claude answers for it — and it asks for a native hook.
+    assert.match(covered.stdout, /grok\s+registered\s+.*settings\.json/);
+    assert.doesNotMatch(covered.stdout, /reviewed by claude/);
+    assert.doesNotMatch(covered.stdout, /! grok has \d+ hooks/);
+    assert.match(covered.stdout, /covered only through Claude's settings/);
 
     assert.equal((await runInstaller(["--grok"], env)).code, 0);
     const both = await runInstaller(["--status"], env);
     assert.match(both.stdout, /grok\s+registered/);
-    // Two sources carrying our hook is two reviews, counted not special-cased.
-    assert.match(both.stdout, /! grok has 2 hooks on Stop and reviews it 2 times/);
+    // Native plus borrowed is one review: the Claude copy yields on Grok.
+    assert.doesNotMatch(both.stdout, /! grok has \d+ hooks/);
+    assert.doesNotMatch(both.stdout, /covered only through Claude's settings/);
 
     // Codex is registered in its own config, and a disabled plugin feature is
     // the difference between installed and actually loading.
