@@ -83,7 +83,7 @@ One route per host: the plugin and the `npx` installer each register their own
 Stop hook, and a host with both runs the reviewer twice on every stop.
 
 These track `main`, gated by `npm run check`. To pin instead, add a git tag —
-`--ref v0.7.0` for Codex, `#v0.7.0` for `npx`; the Claude plugin moves only when
+`--ref v0.8.0` for Codex, `#v0.8.0` for `npx`; the Claude plugin moves only when
 you run `claude plugin update`. There is no npm package.
 
 Working on keep-going itself: `node scripts/install.mjs --claude --ghost --link`
