@@ -10,7 +10,7 @@
       "name": "keep-going",
       "source": "./plugins/keep-going",
       "description": "Tell the agent to keep going when it tries to stop with work left.",
-      "version": "0.10.0",
+      "version": "0.10.1",
       "category": "Productivity"
     }
   ]

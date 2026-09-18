@@ -1,6 +1,6 @@
 {
   "name": "keep-going",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Tell the agent to keep going when it tries to stop with work left.",
   "author": {
     "name": "Ferdous Bhai",

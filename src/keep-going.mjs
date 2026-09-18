@@ -149,6 +149,9 @@ ${VERDICT_NAMES.map((name) => `${name} — ${VERDICTS[name].describe}`).join("\n
 Prefer JUDGE over STOP when the request for input looks self-resolvable by the agent.
 Do not default to any outcome or invent unstated work.
 
+When owner_prompt is present, it is the owner's request this turn. STOP if
+last_assistant_message already fulfills it.
+
 Reply with the verdict word alone on the first line: ${listVerdicts(VERDICT_NAMES)}.
 For ${listVerdicts(ENDING_VERDICTS)}, stop there. For ${listVerdicts(BLOCKING_VERDICTS)}, add one more
 line: it reaches the agent verbatim, as the whole reason its turn was not
@@ -551,9 +554,8 @@ async function runCodexModel({ prompt, timeoutMs }) {
 async function runClaudeModel({ prompt, timeoutMs }) {
   return inTemporaryDirectory("claude", async (directory) => {
     const claude = process.env.KEEP_GOING_CLAUDE_BIN || "claude";
-    // No tools and no --json-schema: a plain-text verdict completes in one turn,
-    // whereas the StructuredOutput tool call was fumbled often enough to exhaust
-    // --max-turns. Claude's lowest advertised effort is low (it has no none).
+    // No tools and no --json-schema: a plain-text verdict, not a StructuredOutput
+    // tool call. Claude's lowest advertised effort is low (it has no none).
     const args = [
       "--print",
       "--safe-mode",
@@ -564,8 +566,6 @@ async function runClaudeModel({ prompt, timeoutMs }) {
       "--no-session-persistence",
       "--no-chrome",
       "--disable-slash-commands",
-      "--max-turns",
-      "1",
       "--permission-mode",
       "dontAsk",
       "--output-format",
@@ -653,8 +653,6 @@ async function runGrokModel({ prompt, timeoutMs }) {
       prompt,
       "--output-format",
       "plain",
-      "--max-turns",
-      "1",
       "--disable-web-search",
       "--no-subagents",
       "--no-plan",
@@ -704,8 +702,6 @@ async function runMuseModel({ prompt, timeoutMs }) {
     const args = [
       "exec",
       "--no-session-log",
-      "--max-model-steps",
-      "1",
       "--disable-approval",
       "--disable-web-tools",
       "--no-foreign-personal-context",
@@ -865,9 +861,13 @@ async function handleStop(input, runner = "codex", { runModel } = {}) {
 
     const run = runModel ?? runtime.run;
     if (!run) throw new Error(`${runner} review requires its native extension`);
+    const ownerPrompt = typeof input.owner_prompt === "string" ? input.owner_prompt.trim() : "";
     review = parseReviewVerdict(
       await run({
-        prompt: `${reviewPrompt(continuations)}\n\n${JSON.stringify({ last_assistant_message: lastAssistantMessage })}`,
+        prompt: `${reviewPrompt(continuations)}\n\n${JSON.stringify({
+          last_assistant_message: lastAssistantMessage,
+          ...(ownerPrompt ? { owner_prompt: compactText(ownerPrompt, 12_000) } : {}),
+        })}`,
         timeoutMs: CLASSIFIER_TIMEOUT_MS,
         ghostHome: input.ghost_home,
       }),

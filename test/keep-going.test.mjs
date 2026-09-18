@@ -460,7 +460,7 @@ test("Claude classifies with no tools and the lowest advertised effort", { concu
     assert.ok(call.args.includes("--no-session-persistence"));
     assert.equal(call.args[call.args.indexOf("--tools") + 1], "");
     assert.ok(!call.args.includes("--json-schema"));
-    assert.equal(call.args[call.args.indexOf("--max-turns") + 1], "1");
+    assert.ok(!call.args.includes("--max-turns"));
     assert.match(call.prompt, /Reply with the verdict word alone/);
     assert.match(call.prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.doesNotMatch(call.prompt, /Build it now|supersecretvalue|tool_events|project_context/);
@@ -529,7 +529,7 @@ test("Ghost delegates classification to its smol-model bridge", { concurrency: f
     assert.equal(call.input.ghost_home, context.input.ghost_home);
     assert.match(call.input.prompt, /Reply with the verdict word alone/);
     assert.match(call.input.prompt, /"last_assistant_message":"Candidate final response\."/);
-    assert.doesNotMatch(call.input.prompt, /Please finish the requested change/);
+    assert.match(call.input.prompt, /"owner_prompt":"Please finish the requested change\."/);
   } finally {
     await context.cleanup();
   }
@@ -794,7 +794,7 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", { co
     // stop hook, so it cannot re-enter this one.
     const [call] = await context.calls();
     assert.ok(call.args.includes("--single"));
-    assert.ok(call.args.includes("--max-turns"));
+    assert.ok(!call.args.includes("--max-turns"));
     assert.ok(call.args.includes("--verbatim"));
     assert.equal(call.args[call.args.indexOf("--tools") + 1], "");
     assert.equal(call.args[call.args.indexOf("--effort") + 1], "low");
@@ -924,13 +924,13 @@ test("Muse is reviewed by muse exec in a hook-free overlay", { concurrency: fals
     // registration it was spawned from: the overlay carries auth but no hooks.
     assert.equal(call.args[0], "exec");
     assert.ok(call.args.includes("--prompt-file"));
-    assert.equal(call.args[call.args.indexOf("--max-model-steps") + 1], "1");
+    assert.ok(!call.args.includes("--max-model-steps"));
     assert.ok(call.configHome, "reviewer ran without a config overlay");
     assert.equal(call.overlayHasSettings, false);
     assert.equal(call.overlayHasAuth, true);
 
     // The reviewer sees the redacted final message and nothing else: no cwd,
-    // no owner prompt, no transcript content.
+    // no transcript content.
     assert.match(call.prompt, /Reply with the verdict word alone/);
     assert.doesNotMatch(call.prompt, /supersecretvalue/);
     assert.match(call.prompt, /token=\[REDACTED\]/);
@@ -1131,7 +1131,7 @@ test("Ghost opens no transcript of its own", { concurrency: false }, async () =>
       reason: VERDICTS.CONTINUE.fallbacks[0],
     });
     const [call] = await context.calls();
-    assert.doesNotMatch(call.input.prompt, /Please finish the requested change/);
+    assert.match(call.input.prompt, /Please finish the requested change/);
 
     // One row per stop, saying which mechanism capped the turn — and for a
     // host counted by the tally, the field names a RUNTIMES entry needs.
