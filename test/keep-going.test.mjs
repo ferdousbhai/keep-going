@@ -21,6 +21,7 @@ import {
   parseReviewVerdict,
   resolveRunner,
   yieldsToGrokNative,
+  lastMessageFulfillsOwnerPrompt,
 } from "../src/keep-going.mjs";
 import { HOOK_FILES, VERSIONED, hookFile, stampVersion } from "../scripts/build.mjs";
 
@@ -515,6 +516,54 @@ process.exitCode = 1;
     } finally {
       await context.cleanup();
     }
+  }
+});
+
+test("an exact required reply fulfills the owner prompt without a reviewer", () => {
+  assert.equal(
+    lastMessageFulfillsOwnerPrompt(
+      "Do not use tools or change any files. Reply with exactly this one line and nothing else: Ghost hook test ready.",
+      "Ghost hook test ready.",
+    ),
+    true,
+  );
+  assert.equal(
+    lastMessageFulfillsOwnerPrompt(
+      "Deployment verification for Ghost 0.4.0. Reply exactly: Ghost 0.4.0 ready.",
+      "Ghost 0.4.0 ready.",
+    ),
+    true,
+  );
+  assert.equal(
+    lastMessageFulfillsOwnerPrompt("Please finish the requested change.", "Candidate final response."),
+    false,
+  );
+});
+
+test("Ghost accepts a stop whose last message is the exact required reply", { concurrency: false }, async () => {
+  const context = await ghostFixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    const input = {
+      ...context.input,
+      owner_prompt: "Do not use tools. Reply with exactly this one line and nothing else: Ghost hook test ready.",
+      last_assistant_message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Ghost hook test ready." }],
+      },
+      messages: [{
+        role: "assistant",
+        content: [{ type: "text", text: "Ghost hook test ready." }],
+      }],
+    };
+    assert.deepEqual(await handleStop(input, "ghost"), {});
+    assert.deepEqual(await context.calls(), []);
+    const [row] = (await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8"))
+      .trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(row.verdict, "STOP");
+    assert.equal(row.counted_by, "owner_prompt");
+  } finally {
+    await context.cleanup();
   }
 });
 

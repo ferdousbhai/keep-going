@@ -432,6 +432,36 @@ function stopCandidateText(input) {
   return messageText(candidate);
 }
 
+function normalizeReply(text) {
+  return String(text)
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/[.!?]+$/g, "")
+    .trim();
+}
+
+function exactReplyCandidates(ownerPrompt) {
+  const prompt = ownerPrompt.trim();
+  const found = [];
+  for (const re of [/"([^"\n]+)"/g, /'([^'\n]+)'/g, /`([^`\n]+)`/g]) {
+    for (const match of prompt.matchAll(re)) found.push(match[1]);
+  }
+  const after = prompt.match(
+    /\b(?:reply(?:\s+with)?(?:\s+exactly)?|exactly(?:\s+this(?:\s+one)?\s+line(?:\s+and\s+nothing\s+else)?)?)\s*:\s*(.+)\s*$/i,
+  );
+  if (after) found.push(after[1]);
+  return [...new Set(found.map(normalizeReply).filter(Boolean))];
+}
+
+// Ghost's smol reviewer treats a one-line exact reply as unfinished. If the
+// owner asked for a specific line and the agent said that line, the turn is over.
+function lastMessageFulfillsOwnerPrompt(ownerPrompt, lastMessage) {
+  const last = normalizeReply(lastMessage);
+  if (!last) return false;
+  return exactReplyCandidates(ownerPrompt).some((wanted) => wanted === last);
+}
+
 // setEncoding("utf8") guarantees a chunk never splits a code point, so summing
 // per-chunk lengths is exact and avoids remeasuring the whole stream each time.
 function streamCollector(limit, overflowMessage) {
@@ -860,6 +890,17 @@ async function handleStop(input, runner = "codex", { runModel } = {}) {
     };
   }
 
+  const ownerPrompt = typeof input.owner_prompt === "string" ? input.owner_prompt.trim() : "";
+  if (ownerPrompt && lastMessageFulfillsOwnerPrompt(ownerPrompt, lastAssistantMessage)) {
+    await recordTurnState(input, runner, false);
+    await recordReviewAudit(input, runner, {
+      verdict: "STOP",
+      reason: "last message fulfills owner_prompt",
+      countedBy: "owner_prompt",
+    });
+    return {};
+  }
+
   let review;
   let continuations = await recordedContinuations(input, runner);
   let countedBy = runtime.state ? "tally" : "session";
@@ -891,7 +932,6 @@ async function handleStop(input, runner = "codex", { runModel } = {}) {
 
     const run = runModel ?? runtime.run;
     if (!run) throw new Error(`${runner} review requires its native extension`);
-    const ownerPrompt = typeof input.owner_prompt === "string" ? input.owner_prompt.trim() : "";
     review = parseReviewVerdict(
       await run({
         prompt: `${reviewPrompt(continuations)}\n\n${JSON.stringify({
@@ -954,4 +994,5 @@ export {
   parseReviewVerdict,
   resolveRunner,
   yieldsToGrokNative,
+  lastMessageFulfillsOwnerPrompt,
 };

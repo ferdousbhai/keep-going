@@ -87,7 +87,7 @@ One route per host: the plugin and the `npx` installer each register their own
 Stop hook, and a host with both runs the reviewer twice on every stop.
 
 These track `main`, gated by `npm run check`. To pin instead, add a git tag —
-`--ref v0.10.2` for Codex, `#v0.10.2` for `npx`, or `@v0.10.2` for Pi's Git source.
+`--ref v0.10.3` for Codex, `#v0.10.3` for `npx`, or `@v0.10.3` for Pi's Git source.
 The Claude plugin moves only when you run `claude plugin update`. There is no
 npm package.
 
