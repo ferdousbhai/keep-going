@@ -7,7 +7,7 @@ import { build } from "esbuild";
 
 import { HOSTS, hookEntry } from "./hosts.mjs";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const root = path.resolve(import.meta.dirname, "..");
 const bundle = path.join(root, "plugins", "keep-going", "scripts", "keep-going.mjs");
 
 // The manifests stay hand-written — description, keywords, category and the
@@ -25,11 +25,8 @@ export const VERSIONED = [
 const VERSION_FIELD = /("version"\s*:\s*)"[^"]*"/g;
 
 export function stampVersion(source, version) {
-  const stamped = source.replace(VERSION_FIELD, `$1"${version}"`);
-  if (stamped === source && !source.includes('"version"')) {
-    throw new Error("manifest declares no version to stamp");
-  }
-  return stamped;
+  if (source.search(VERSION_FIELD) < 0) throw new Error("manifest declares no version to stamp");
+  return source.replace(VERSION_FIELD, (_, prefix) => `${prefix}"${version}"`);
 }
 
 // Both hosts run the same bundle, and the two files differ only in the root
@@ -62,16 +59,18 @@ async function emit() {
 // The test imports the definitions above to prove the committed files still
 // match them, so building only happens when this file is the entrypoint.
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  await build({
-    entryPoints: [path.join(root, "src", "keep-going.mjs")],
-    outfile: bundle,
+  const options = {
     bundle: true,
     platform: "node",
     format: "esm",
     target: "node22",
     minify: true,
     legalComments: "none",
-  });
+  };
+  await Promise.all([
+    build({ ...options, entryPoints: [path.join(root, "src", "keep-going.mjs")], outfile: bundle }),
+    build({ ...options, entryPoints: [path.join(root, "src", "pi.mjs")], outfile: path.join(root, "extensions", "keep-going.js") }),
+  ]);
   await chmod(bundle, 0o755);
   await emit();
 }

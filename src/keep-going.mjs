@@ -24,6 +24,17 @@ const LAST_STRETCH = 10;
 // is keyed on that identity. Function declarations hoist, so the counter and
 // the runners below are already bound when this is evaluated.
 const RUNTIMES = {
+  // Pi supplies a model call from its authenticated registry and counts nudges
+  // on the active session branch. No subprocess or separate tally is needed.
+  pi: {
+    requires: ["session_id", "turn_id"],
+    count: (input) => {
+      if (!Number.isSafeInteger(input.continuation_count) || input.continuation_count < 0) {
+        throw new Error("Pi stop input is missing a valid continuation_count");
+      }
+      return input.continuation_count;
+    },
+  },
   codex: {
     requires: ["turn_id", "session_id"],
     state: xdgStateHome,
@@ -177,8 +188,7 @@ function compactText(value, limit) {
   return `${redacted.slice(0, head)}\n...[truncated]...\n${redacted.slice(-tail)}`;
 }
 
-// Every reviewer is a child process that either exits 0 or explains itself on
-// one of its two streams.
+// CLI reviewers must exit successfully before their output is parsed.
 function assertExitOk(result, label) {
   if (result.code === 0) return result;
   const detail = compactText(
@@ -269,23 +279,18 @@ function claudeUserMessage(record) {
 // are this turn's continuations.
 async function claudeContinuations(input) {
   const transcriptPath = await allowedTranscriptPath(input, "claude");
-  const messages = [];
+  let count = 0;
+  let hasOwner = false;
   for await (const record of jsonLines(transcriptPath)) {
     const message = claudeUserMessage(record);
-    if (message) messages.push(message);
-  }
-
-  const turnStart = messages.findLastIndex((message) => message.genuine);
-  if (turnStart < 0) return 0;
-  let count = 0;
-  for (let index = turnStart + 1; index < messages.length; index += 1) {
-    if (HOOK_PROMPT_PATTERN.test(messages[index].text)) count += 1;
+    if (message?.genuine) {
+      hasOwner = true;
+      count = 0;
+    } else if (hasOwner && message && HOOK_PROMPT_PATTERN.test(message.text)) {
+      count += 1;
+    }
   }
   return count;
-}
-
-async function countContinuations(input, runner) {
-  return RUNTIMES[runner].count(input);
 }
 
 // The cap is the only thing between a stuck reviewer and a hundred turns of
@@ -358,6 +363,7 @@ async function writeTally(file, tally) {
 // key of the turn before. Ending a turn where the hook lets the stop through is
 // what keeps a finished turn's count from being spent on the next one in both.
 async function recordTurnState(input, runner, blocked, exact = null) {
+  if (!RUNTIMES[runner].state) return;
   const file = tallyFile(input, runner);
   const key = turnKey(input);
   const tally = await readTally(file);
@@ -435,12 +441,8 @@ function runProcess(command, args, input, timeoutMs, env = process.env, cwd) {
       fail(new Error(`${command} timed out after ${timeoutMs} ms`));
     }, timeoutMs);
 
-    child.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(error);
-    });
+    child.on("error", fail);
+    child.stdin.on("error", fail);
     const [out, err] = [child.stdout, child.stderr].map((stream) => {
       const collector = streamCollector(MODEL_OUTPUT_LIMIT, "child process output exceeded 2 MB");
       stream.setEncoding("utf8");
@@ -464,10 +466,18 @@ function runProcess(command, args, input, timeoutMs, env = process.env, cwd) {
   });
 }
 
-async function runCodexModel({ prompt, timeoutMs }) {
-  const directory = await mkdtemp(path.join(tmpdir(), "codex-keep-going-"));
-  const outputPath = path.join(directory, "result.txt");
+async function inTemporaryDirectory(runner, work) {
+  const directory = await mkdtemp(path.join(tmpdir(), `${runner}-keep-going-`));
   try {
+    return await work(directory);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function runCodexModel({ prompt, timeoutMs }) {
+  return inTemporaryDirectory("codex", async (directory) => {
+    const outputPath = path.join(directory, "result.txt");
     const codex = process.env.KEEP_GOING_CODEX_BIN || "codex";
     const args = [
       "exec",
@@ -491,15 +501,12 @@ async function runCodexModel({ prompt, timeoutMs }) {
       "-",
     ];
     assertExitOk(await runProcess(codex, args, prompt, timeoutMs), "codex exec");
-    return await readFile(outputPath, "utf8");
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+    return readFile(outputPath, "utf8");
+  });
 }
 
 async function runClaudeModel({ prompt, timeoutMs }) {
-  const directory = await mkdtemp(path.join(tmpdir(), "claude-keep-going-"));
-  try {
+  return inTemporaryDirectory("claude", async (directory) => {
     const claude = process.env.KEEP_GOING_CLAUDE_BIN || "claude";
     // No tools and no --json-schema: a plain-text verdict completes in one turn,
     // whereas the StructuredOutput tool call was fumbled often enough to exhaust
@@ -518,8 +525,8 @@ async function runClaudeModel({ prompt, timeoutMs }) {
       "dontAsk",
       "--output-format",
       "json",
+      ...modelArgs("KEEP_GOING_CLAUDE_MODEL"),
     ];
-    args.push(...modelArgs("KEEP_GOING_CLAUDE_MODEL"));
     const env = { ...process.env };
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_EFFORT_LEVEL;
@@ -543,17 +550,14 @@ async function runClaudeModel({ prompt, timeoutMs }) {
     }
     if (typeof parsed.result !== "string") throw new Error("claude returned no result text");
     return parsed.result;
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  });
 }
 
 // Grok's own headless mode is the reviewer, which also makes the recursion
 // impossible by construction: `grok --single` dispatches session_start hooks
 // and no stop hook, so the reviewer cannot trip the hook that spawned it.
 async function runGrokModel({ prompt, timeoutMs }) {
-  const directory = await mkdtemp(path.join(tmpdir(), "grok-keep-going-"));
-  try {
+  return inTemporaryDirectory("grok", async (directory) => {
     const grok = process.env.KEEP_GOING_GROK_BIN || "grok";
     const args = [
       "--single",
@@ -567,16 +571,14 @@ async function runGrokModel({ prompt, timeoutMs }) {
       "--no-plan",
       "--cwd",
       directory,
+      ...modelArgs("KEEP_GOING_GROK_MODEL"),
     ];
-    args.push(...modelArgs("KEEP_GOING_GROK_MODEL"));
     const result = assertExitOk(
       await runProcess(grok, args, "", timeoutMs, process.env, directory),
       "grok",
     );
     return result.stdout;
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  });
 }
 
 // A headless run fires Stop hooks, so without an overlay the reviewer would
@@ -587,8 +589,7 @@ async function runGrokModel({ prompt, timeoutMs }) {
 // non-default config home is unreachable from here and the review then fails
 // open.
 async function runMuseModel({ prompt, timeoutMs }) {
-  const root = await mkdtemp(path.join(tmpdir(), "muse-keep-going-"));
-  try {
+  return inTemporaryDirectory("muse", async (root) => {
     const muse = process.env.KEEP_GOING_MUSE_BIN || "muse";
     const directory = path.join(root, "work");
     const configHome = path.join(root, "config");
@@ -620,9 +621,7 @@ async function runMuseModel({ prompt, timeoutMs }) {
       "muse",
     );
     return result.stdout;
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+  });
 }
 
 async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
@@ -686,15 +685,14 @@ async function recordReviewAudit(input, runner, { verdict, reason, error, counte
   const entry = {
     timestamp: new Date().toISOString(),
     runner,
+    ...(typeof input?.reviewer_model === "string" ? { reviewer_model: input.reviewer_model } : {}),
     session_id: input?.session_id ?? null,
     turn_id: input?.turn_id ?? null,
     cwd: typeof input?.cwd === "string" ? input.cwd : null,
     verdict: error ? "ERROR" : verdict,
     rationale: error ? compactText(String(error), 2_000) : reason ?? "",
-    // Which mechanism capped the turn, on every stop rather than only on the
-    // failure path. A host counted by the tally is a host without a RUNTIMES
-    // entry, and the fields it sent are what one would be written from —
-    // names only, since the values are the payload and one is the transcript.
+    // Record how the turn was counted. For tally-backed hosts, include field
+    // names to help diagnose their payload format without logging its values.
     counted_by: countedBy,
     ...(countedBy === "tally" ? { stop_input_fields: Object.keys(input ?? {}).sort() } : {}),
   };
@@ -706,11 +704,12 @@ async function recordReviewAudit(input, runner, { verdict, reason, error, counte
 }
 
 async function recordedContinuations(input, runner) {
+  if (!RUNTIMES[runner].state) return RUNTIMES[runner].count(input);
   const tally = await readTally(tallyFile(input, runner));
   return tally[turnKey(input)]?.count ?? 0;
 }
 
-async function handleStop(input, runner = "codex") {
+async function handleStop(input, runner = "codex", { runModel } = {}) {
   const runtime = RUNTIMES[runner];
   if (!runtime) throw new Error(`Unsupported keep-going runtime: ${runner}`);
   for (const key of runtime.requires) {
@@ -737,9 +736,8 @@ async function handleStop(input, runner = "codex") {
   }
 
   let review;
-  // Kept after the cap check: the nudge changes tone as the turn nears the cap.
   let continuations = await recordedContinuations(input, runner);
-  let countedBy = "tally";
+  let countedBy = runtime.state ? "tally" : "session";
   const named = payloadTurn(input);
   try {
     // A transcript is read only by a host whose payload leaves the turn
@@ -749,7 +747,7 @@ async function handleStop(input, runner = "codex") {
     // and its parent's transcript holds the parent's messages regardless.
     if (!named && runtime.count && typeof input.transcript_path === "string" && input.transcript_path) {
       try {
-        continuations = await countContinuations(input, runner);
+        continuations = await runtime.count(input);
         countedBy = "transcript";
       } catch {
         // A transcript in a shape or a place this runtime does not know is the
@@ -766,8 +764,10 @@ async function handleStop(input, runner = "codex") {
       return capped;
     }
 
+    const run = runModel ?? runtime.run;
+    if (!run) throw new Error(`${runner} review requires its native extension`);
     review = parseReviewVerdict(
-      await runtime.run({
+      await run({
         prompt: `${reviewPrompt(continuations)}\n\n${JSON.stringify({ last_assistant_message: lastAssistantMessage })}`,
         timeoutMs: CLASSIFIER_TIMEOUT_MS,
         ghostHome: input.ghost_home,
@@ -817,7 +817,7 @@ export {
   VERDICTS,
   NUDGE_LIMIT,
   LAST_STRETCH,
-  countContinuations,
+  claudeContinuations,
   recordedContinuations,
   reviewPrompt,
   handleStop,

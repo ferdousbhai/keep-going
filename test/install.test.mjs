@@ -403,6 +403,26 @@ test("status reports every host, including the two it does not write", async () 
   }
 });
 
+test("Codex status scopes feature flags to their table, including a final table", async (t) => {
+  const { codexHome, env, cleanup } = await installHome("codex-features");
+  t.after(cleanup);
+  await mkdir(codexHome, { recursive: true });
+  const plugin = '[plugins."keep-going@keep-going"]\nenabled = true\n';
+  for (const [config, disabled] of [
+    [`${plugin}\n[features]\nplugins = false`, true],
+    [`${plugin}\n[features]\nplugins = false\n`, true],
+    [`${plugin}\n[features]\nplugins = false\n`.replaceAll("\n", "\r\n"), true],
+    [`${plugin}\n[features]\nplugins = true\n[other]\nplugins = false\n`, false],
+    [`${plugin}\n[other]\nplugins = false\n`, false],
+  ]) {
+    await writeFile(path.join(codexHome, "config.toml"), config);
+    const result = await runInstaller(["--status"], env);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /codex\s+registered/);
+    assert.equal(result.stdout.includes("plugins disabled"), disabled, config);
+  }
+});
+
 test("installer requires an explicit target", async () => {
   const result = await runInstaller([], {});
   assert.equal(result.code, 1);

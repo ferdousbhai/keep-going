@@ -1,7 +1,7 @@
 {
   "name": "@ferdousbhai/keep-going",
-  "version": "0.8.0",
-  "description": "A Stop hook that tells Codex, Claude Code, Muse Code, and Ghost to keep going when work remains.",
+  "version": "0.9.0",
+  "description": "Tell Codex, Claude Code, Muse Code, Ghost, Grok, and Pi to keep going when work remains.",
   "type": "module",
   "license": "MIT",
   "author": "Ferdous Bhai",
@@ -14,7 +14,16 @@
   "bin": {
     "keep-going": "scripts/install.mjs"
   },
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/keep-going.js"
+    ]
+  },
   "files": [
+    "extensions",
     "plugins/keep-going",
     "scripts/hosts.mjs",
     "scripts/install.mjs",
@@ -24,6 +33,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.mjs",
+    "test:pi": "node --test test/pi.integration.mjs",
     "check": "npm run build && npm test"
   },
   "devDependencies": {

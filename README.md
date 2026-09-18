@@ -1,7 +1,7 @@
 # keep going
 
-A Stop hook for Codex, Claude Code, Muse Code, Ghost, and Grok that tells the
-agent to keep going when work remains.
+A Stop hook for Codex, Claude Code, Muse Code, Ghost, and Grok, and a native Pi
+extension, that tells the agent to keep going when work remains.
 
 Jarred Sumner's input, through a day and a half of Claude subagents chasing the
 Riemann hypothesis, was mostly variants of "keep going" and "believe in
@@ -16,18 +16,18 @@ redraws the image from them.
 ## How it works
 
 When the agent tries to end a turn, keep-going shows the last assistant message
-— redacted, truncated, and nothing else — to a small reviewer model, which
-answers with one of:
+— redacted, truncated, and nothing else — to a reviewer model, which answers
+with one of:
 
 - `CONTINUE` — work remains that the agent can do right now.
 - `JUDGE` — it is asking the user for something more reasoning or research
   should resolve.
 - `STOP` — it is genuinely done, or genuinely blocked on the user.
 
-`CONTINUE` and `JUDGE` block the stop and send the agent back in with a few
-words the reviewer writes for the occasion. The transcript is read only to
-count continuations, never shown to the reviewer. Any failure — missing binary,
-timeout, unparseable verdict — accepts the stop.
+`CONTINUE` and `JUDGE` block the stop (or queue a follow-up in Pi) and send the
+agent back in with a few words the reviewer writes for the occasion. Session
+history is used only for bookkeeping, never shown to the reviewer. Any failure
+— missing binary, timeout, unparseable verdict — accepts the stop.
 
 At most 100 continuations per owner turn. Past the cap the next stop is accepted
 without a review; over the last 10 the reviewer is asked for a line about
@@ -40,6 +40,7 @@ belongs to: the hook keeps its own tally per session and turn under
 holds on a host whose transcript cannot be read — which is also why the hook
 does something useful there at all. A plain Claude Code stop names no turn, so
 there the count comes from the transcript, read for that and nothing else.
+Pi counts follow-up entries on the active session branch instead.
 
 On Claude Code it reviews subagents too, on the same terms: a subagent that
 quits with work left is the failure this hook is named for. A subagent stop
@@ -48,10 +49,14 @@ gets its own count of 100 and spends none of the turn that launched it.
 
 ## Install
 
-Requires Node.js 22+ and the host CLI (`codex`, `claude`, `muse`, `ghostd`, or
-`grok`; Ghost also needs `ghostd hook-smol-complete`).
+CLI hooks require Node.js 22+ and the host CLI (`codex`, `claude`, `muse`,
+`ghostd`, or `grok`; Ghost also needs `ghostd hook-smol-complete`). The native
+Pi extension requires Pi 0.84.2+ and uses Pi's model registry directly.
 
 ```bash
+# Pi — then /reload or start a new session
+pi install git:github.com/ferdousbhai/keep-going
+
 # Codex — then start a new session
 codex plugin marketplace add ferdousbhai/keep-going
 codex plugin add keep-going@keep-going
@@ -67,9 +72,9 @@ npx --yes github:ferdousbhai/keep-going --muse
 npx --yes github:ferdousbhai/keep-going --ghost   # --claude, --grok, --all
 ```
 
-`--all` covers every host that needs a hook of its own, which leaves Grok out
-when Claude is installed: Grok dispatches Claude's settings, so registering
-both reviews every Grok stop twice. Asking for `--grok` explicitly still does
+`--all` covers the CLI hooks managed by the `npx` installer, not Pi or the
+Codex plugin. It leaves Grok out when Claude is installed: Grok dispatches
+Claude's settings, so registering both reviews every Grok stop twice. Asking for `--grok` explicitly still does
 it, and says so.
 
 Grok Build needs `--grok` **only** if keep-going is not already in
@@ -83,8 +88,9 @@ One route per host: the plugin and the `npx` installer each register their own
 Stop hook, and a host with both runs the reviewer twice on every stop.
 
 These track `main`, gated by `npm run check`. To pin instead, add a git tag —
-`--ref v0.8.0` for Codex, `#v0.8.0` for `npx`; the Claude plugin moves only when
-you run `claude plugin update`. There is no npm package.
+`--ref v0.9.0` for Codex, `#v0.9.0` for `npx`, or `@v0.9.0` for Pi's Git source.
+The Claude plugin moves only when you run `claude plugin update`. There is no
+npm package.
 
 Working on keep-going itself: `node scripts/install.mjs --claude --ghost --link`
 registers this checkout rather than copying it, so edits take effect with no
@@ -92,13 +98,51 @@ reinstall. Switching between `--link` and a copy replaces the registration
 instead of adding a second one.
 
 `npx --yes github:ferdousbhai/keep-going --status` prints where keep-going is
-registered on this machine, for all four hosts — settings files and Claude Code
-plugins alike — naming any event a host is missing, listing any other plugin
+registered on this machine for the CLI hook hosts — settings files and Claude
+Code plugins alike — naming any event a host is missing, listing any other plugin
 that also runs on the same stop, and warning when one host is wired to review
 a stop twice.
 
 Uninstall: `claude plugin uninstall keep-going`, or the same `npx` command with
 `--uninstall`.
+
+## Pi
+
+Pi loads keep-going as an extension, not as a `hooks.json` command. It reviews
+only a normal final text response, before Pi drains its follow-up queue.
+Tool turns, aborted or failed responses, and turns with queued messages are
+left alone. `CONTINUE` or `JUDGE` queues one visible custom follow-up; `STOP`
+leaves the response alone. The reviewer is a direct, tool-free model call, so
+it cannot recursively trigger the extension.
+
+The reviewer uses Pi's active model by default, with the provider's default
+inference settings, not the session's thinking level. To choose a different
+reviewer, set `KEEP_GOING_PI_MODEL` to an exact `provider/model-id` before
+starting Pi. Pi supplies authentication, including subscription credentials.
+No other host CLI is needed.
+
+- `/keep-going` or `/keep-going status` shows the enabled state and reviewer.
+- `/keep-going off` disables reviews for the current session and cancels any
+  review in progress; `/keep-going on` enables them again.
+- Escape cancels the review along with the active run. New input, model changes,
+  and session navigation discard an in-flight verdict rather than resume stale
+  work. Provider errors and review timeouts accept the stop.
+
+Pi counts keep-going follow-ups since the latest user message on the active
+session branch. The 100-continuation cap survives reloads, respects branching,
+and resets for a new user message. A persisted per-response marker prevents
+double reviews, including when two copies of the extension are loaded.
+
+For local development, run `npm run build`, then
+`pi install /absolute/path/to/keep-going` and `/reload`. Install one source,
+not both the local checkout and Git package. Remove it with `pi remove` using
+the same source you installed. `npx ... --status` does not inspect Pi; use
+`/keep-going status` there.
+
+`npm run test:pi` runs end-to-end tests against an installed Pi using a local
+mock provider, with no credentials or paid model calls. It covers continuation,
+JUDGE, STOP, invalid output, reviewer overrides, duplicate installs, and the cap.
+`npm run check` runs the build and unit tests without requiring Pi.
 
 ## Environment variables
 
@@ -109,16 +153,23 @@ Uninstall: `claude plugin uninstall keep-going`, or the same `npx` command with
 | `KEEP_GOING_MUSE_BIN` | `muse` |
 | `KEEP_GOING_GHOST_BIN` | `ghostd` |
 | `KEEP_GOING_GROK_BIN` | `grok` |
-| `KEEP_GOING_CODEX_MODEL` | unset; codex is run without `--model`, so it picks |
+| `KEEP_GOING_CODEX_MODEL` | unset; Codex chooses its default without loading the user config |
 | `KEEP_GOING_CLAUDE_MODEL` | unset; claude is run without `--model`, so it picks |
 | `KEEP_GOING_MUSE_MODEL` | unset; muse is run without `--model`, so it picks |
 | `KEEP_GOING_GROK_MODEL` | unset; grok is run without `--model`, so it picks |
+| `KEEP_GOING_PI_MODEL` | unset; Pi's active model; override with exact `provider/model-id` |
 | `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, saying which mechanism capped the turn |
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
-No host is given a model it did not choose: the reviewer runs on whatever
-that CLI is configured to use unless the variable above names one. Ghost's
-reviewer model is ghostd's, not ours.
+keep-going does not select a small or low-cost model automatically. For CLI
+reviewers, unless a `KEEP_GOING_*_MODEL` override is set, it omits `--model` and
+lets the reviewer CLI choose. That need not be the session's active model,
+and the default can change with CLI versions or provider defaults.
+
+The Codex reviewer runs with `--ignore-user-config`, so it does not inherit
+`model` or reasoning settings from `~/.codex/config.toml`. Set
+`KEEP_GOING_CODEX_MODEL` explicitly to choose its reviewer model. Ghost's
+reviewer model is selected by `ghostd hook-smol-complete`, not keep-going.
 
 Muse reviews itself with `muse exec`, which fires Stop hooks — so the reviewer
 runs under an empty config overlay carrying no hooks, with the default home's

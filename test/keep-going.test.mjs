@@ -13,7 +13,7 @@ import {
   LAST_STRETCH,
   NUDGE_LIMIT,
   REVIEW_PROMPT,
-  countContinuations,
+  claudeContinuations,
   recordedContinuations,
   reviewPrompt,
   handleStop,
@@ -377,6 +377,17 @@ test("last_assistant_message is reviewed when the transcript is unavailable", { 
   }
 });
 
+test("a missing reviewer executable fails open and clears the turn tally", async (t) => {
+  const context = await fixture();
+  t.after(() => context.cleanup());
+  await handleStop(context.input, "codex", { runModel: async () => "CONTINUE" });
+  assert.equal(await recordedContinuations(context.input, "codex"), 1);
+  process.env.KEEP_GOING_CODEX_BIN += ".missing";
+  const output = await handleStop(context.input);
+  assert.match(output.systemMessage, /ENOENT/);
+  assert.equal(await recordedContinuations(context.input, "codex"), 0);
+});
+
 test("invalid reviewer verdict fails open", { concurrency: false }, async () => {
   const context = await fixture();
   try {
@@ -391,7 +402,7 @@ test("invalid reviewer verdict fails open", { concurrency: false }, async () => 
 test("Claude counting starts at the last genuine prompt and counts only hook feedback", { concurrency: false }, async () => {
   const context = await claudeFixture();
   try {
-    assert.equal(await countContinuations(context.input, "claude"), 0);
+    assert.equal(await claudeContinuations(context.input), 0);
 
     const additions = [
       JSON.stringify({ type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback:\ncontinue" } }),
@@ -408,10 +419,23 @@ test("Claude counting starts at the last genuine prompt and counts only hook fee
     ];
     await appendRecords(context.input.transcript_path, additions);
 
-    assert.equal(await countContinuations(context.input, "claude"), 1);
+    assert.equal(await claudeContinuations(context.input), 1);
   } finally {
     await context.cleanup();
   }
+});
+
+test("Claude ignores orphan feedback and resets the streaming count for a new owner", async (t) => {
+  const context = await claudeFixture();
+  t.after(() => context.cleanup());
+  const feedback = { type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback: continue" } };
+  const owner = { type: "user", message: { role: "user", content: "New request" } };
+  await writeFile(context.input.transcript_path, JSON.stringify(feedback));
+  assert.equal(await claudeContinuations(context.input), 0);
+  await appendRecords(context.input.transcript_path, [owner, feedback, feedback].map((record) => JSON.stringify(record)));
+  assert.equal(await claudeContinuations(context.input), 2);
+  await appendRecords(context.input.transcript_path, [JSON.stringify(owner), "incomplete JSON"]);
+  assert.equal(await claudeContinuations(context.input), 0);
 });
 
 test("Claude uses Sonnet with its default effort for classification", { concurrency: false }, async () => {
@@ -453,6 +477,31 @@ test("names no model unless one is configured", { concurrency: false }, async ()
       await handleStop(context.input, runner);
       const [call] = await context.calls();
       assert.ok(!call.args.includes("--model"), `${runner} passed --model with ${variable} unset`);
+    } finally {
+      await context.cleanup();
+    }
+  }
+});
+
+test("temporary reviewers remove their scratch directories after process failure", async () => {
+  for (const [runner, createFixture] of [
+    ["codex", fixture], ["claude", claudeFixture], ["grok", grokFixture], ["muse", museFixture],
+  ]) {
+    const context = await createFixture();
+    try {
+      await writeFile(process.env[`KEEP_GOING_${runner.toUpperCase()}_BIN`], `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+for await (const chunk of process.stdin) {} // Consume input before exiting.
+const args = process.argv.slice(2);
+const directory = args.includes("--cd") ? args[args.indexOf("--cd") + 1] : process.cwd();
+appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ directory }) + "\\n");
+process.exitCode = 1;
+`);
+      const result = await handleStop(context.input, runner);
+      assert.match(result.systemMessage, /exited 1/);
+      const [call] = await context.calls();
+      await assert.rejects(stat(call.directory), { code: "ENOENT" });
+      if (runner === "muse") await assert.rejects(stat(path.dirname(call.directory)), { code: "ENOENT" });
     } finally {
       await context.cleanup();
     }
@@ -860,6 +909,14 @@ test("the tally caps a turn the transcript cannot", { concurrency: false }, asyn
   } finally {
     await context.cleanup();
   }
+});
+
+test("version stamping requires an actual string version field", () => {
+  for (const source of ['{}', '{"description":"version"}', '{"version":null}']) {
+    assert.throws(() => stampVersion(source, "0.9.0"), /no version/);
+  }
+  assert.equal(stampVersion('{"version": "0.8.0"}', "0.9.0"), '{"version": "0.9.0"}');
+  assert.equal(stampVersion('{"version":"0.9.0"}', "0.9.0"), '{"version":"0.9.0"}');
 });
 
 test("the committed manifests and hook files are what the build emits", async () => {

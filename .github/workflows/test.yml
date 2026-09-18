@@ -18,8 +18,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      # The build writes the bundle, both hook files and the stamped versions,
+      # The build writes both bundles, hook files and the stamped versions,
       # and all of them ship from the tree. A skipped build has to fail here
       # rather than release stale files.
       - name: Verify committed build output
-        run: git diff --exit-code -- plugins/keep-going .claude-plugin/marketplace.json
+        run: git diff --exit-code -- extensions plugins/keep-going .claude-plugin/marketplace.json
