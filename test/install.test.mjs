@@ -28,6 +28,7 @@ async function installHome(label) {
     dataHome,
     configHome,
     settings: path.join(claudeHome, "settings.json"),
+    museSettings: path.join(configHome, "muse", "settings.json"),
     env: {
       KEEP_GOING_HOME: home,
       XDG_DATA_HOME: dataHome,
@@ -129,6 +130,47 @@ test("installer adds, updates, and removes Claude Code, Ghost, and Grok hooks", 
     assert.deepEqual(removedGhost.hooks.session_stop, []);
     assert.deepEqual(removedGrok.hooks.Stop, []);
     assert.equal(removedClaude.hooks.SessionStart[0].hooks[0].command, "keep-me");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("installer adds, updates, and removes Muse Code hooks", async () => {
+  const { museSettings, dataHome, env, cleanup } = await installHome("muse");
+  try {
+    // A fresh install creates the file, and Muse fails every command without
+    // schema_version — so the created file must include it.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const result = await runInstaller(["--muse"], env);
+      assert.equal(result.code, 0, result.stderr);
+    }
+
+    const installed = path.join(dataHome, "keep-going", "keep-going.mjs");
+    await access(installed);
+    const muse = JSON.parse(await readFile(museSettings, "utf8"));
+    assert.equal(muse.schema_version, 1);
+    for (const event of ["Stop", "SubagentStop"]) {
+      assert.equal(muse.hooks[event].length, 1, JSON.stringify(muse.hooks[event]));
+      assert.match(muse.hooks[event][0].hooks[0].command, /keep-going\.mjs' muse$/);
+    }
+
+    // A value already set is never overwritten, and unrelated keys survive.
+    await writeFile(
+      museSettings,
+      JSON.stringify({ schema_version: 1, theme: "dark", hooks: muse.hooks }),
+    );
+    assert.equal((await runInstaller(["--muse"], env)).code, 0);
+    const kept = JSON.parse(await readFile(museSettings, "utf8"));
+    assert.equal(kept.schema_version, 1);
+    assert.equal(kept.theme, "dark");
+    assert.equal(kept.hooks.Stop.length, 1);
+
+    const result = await runInstaller(["--uninstall", "--muse"], env);
+    assert.equal(result.code, 0, result.stderr);
+    const removed = JSON.parse(await readFile(museSettings, "utf8"));
+    assert.deepEqual(removed.hooks.Stop, []);
+    assert.deepEqual(removed.hooks.SubagentStop, []);
+    assert.equal(removed.schema_version, 1);
   } finally {
     await cleanup();
   }
@@ -329,6 +371,7 @@ test("status reports every host, including the two it does not write", async () 
     const bare = await runInstaller(["--status"], env);
     assert.equal(bare.code, 0, bare.stderr);
     assert.match(bare.stdout, /claude\s+not registered/);
+    assert.match(bare.stdout, /muse\s+not registered/);
     assert.match(bare.stdout, /codex\s+not registered/);
 
     assert.equal((await runInstaller(["--claude"], env)).code, 0);
@@ -363,7 +406,7 @@ test("status reports every host, including the two it does not write", async () 
 test("installer requires an explicit target", async () => {
   const result = await runInstaller([], {});
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /Select --claude, --ghost, --grok, or --all/);
+  assert.match(result.stderr, /Select --claude, --muse, --ghost, --grok, or --all/);
 });
 
 test("uninstalling an absent hook does not create a settings file", async () => {

@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { appendFile, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -40,6 +40,15 @@ const RUNTIMES = {
     requires: ["session_id", "owner_prompt", "ghost_home"],
     state: (input) => input.ghost_home,
     run: runGhostModel,
+  },
+  // Muse names its turn, so the tally keys on it wherever it is sent. Only
+  // session_id is required: the hook contract is unpublished and a stop that
+  // stopped naming its turn should still be reviewed and capped per session,
+  // not refused outright.
+  muse: {
+    requires: ["session_id"],
+    state: xdgStateHome,
+    run: runMuseModel,
   },
   // Grok dispatches hooks it finds in ~/.claude/settings.json as well as its
   // own, so this runtime is reached only from ~/.grok/hooks/keep-going.json,
@@ -567,6 +576,52 @@ async function runGrokModel({ prompt, timeoutMs }) {
     return result.stdout;
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+}
+
+// A headless run fires Stop hooks, so without an overlay the reviewer would
+// re-enter this hook: each nested review is a fresh session, and the tally
+// that caps one turn cannot cap the regress. The overlay carries no settings
+// file and therefore no hooks. XDG_CONFIG_HOME is stripped from hook commands,
+// so the default home's auth is restored into the overlay best-effort — a
+// non-default config home is unreachable from here and the review then fails
+// open.
+async function runMuseModel({ prompt, timeoutMs }) {
+  const root = await mkdtemp(path.join(tmpdir(), "muse-keep-going-"));
+  try {
+    const muse = process.env.KEEP_GOING_MUSE_BIN || "muse";
+    const directory = path.join(root, "work");
+    const configHome = path.join(root, "config");
+    await mkdir(directory, { recursive: true });
+    try {
+      const authTarget = path.join(configHome, "muse", "auth.json");
+      await mkdir(path.dirname(authTarget), { recursive: true });
+      await copyFile(path.join(homedir(), ".config", "muse", "auth.json"), authTarget);
+      await chmod(authTarget, 0o600);
+    } catch {
+      // No credentials to restore: the reviewer fails open below.
+    }
+    const promptPath = path.join(directory, "prompt.txt");
+    await writeFile(promptPath, prompt, { encoding: "utf8", mode: 0o600 });
+    const args = [
+      "exec",
+      "--no-session-log",
+      "--max-model-steps",
+      "1",
+      "--disable-approval",
+      "--disable-web-tools",
+      "--no-foreign-personal-context",
+      "--prompt-file",
+      promptPath,
+      ...modelArgs("KEEP_GOING_MUSE_MODEL"),
+    ];
+    const result = assertExitOk(
+      await runProcess(muse, args, "", timeoutMs, { ...process.env, XDG_CONFIG_HOME: configHome }, directory),
+      "muse",
+    );
+    return result.stdout;
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 }
 

@@ -1,7 +1,7 @@
 # keep going
 
-A Stop hook for Codex, Claude Code, Ghost, and Grok that tells the agent to keep
-going when work remains.
+A Stop hook for Codex, Claude Code, Muse Code, Ghost, and Grok that tells the
+agent to keep going when work remains.
 
 Jarred Sumner's input, through a day and a half of Claude subagents chasing the
 Riemann hypothesis, was mostly variants of "keep going" and "believe in
@@ -48,8 +48,8 @@ gets its own count of 100 and spends none of the turn that launched it.
 
 ## Install
 
-Requires Node.js 22+ and the host CLI (`codex`, `claude`, `ghostd`, or `grok`;
-Ghost also needs `ghostd hook-smol-complete`).
+Requires Node.js 22+ and the host CLI (`codex`, `claude`, `muse`, `ghostd`, or
+`grok`; Ghost also needs `ghostd hook-smol-complete`).
 
 ```bash
 # Codex — then start a new session
@@ -59,6 +59,9 @@ codex plugin add keep-going@keep-going
 # Claude Code — registers Stop and SubagentStop
 claude plugin marketplace add ferdousbhai/keep-going
 claude plugin install keep-going@keep-going
+
+# Muse Code — registers Stop and SubagentStop in the settings `hooks` block
+npx --yes github:ferdousbhai/keep-going --muse
 
 # Ghost, Grok Build, or Claude Code without the plugin
 npx --yes github:ferdousbhai/keep-going --ghost   # --claude, --grok, --all
@@ -103,10 +106,12 @@ Uninstall: `claude plugin uninstall keep-going`, or the same `npx` command with
 | --- | --- |
 | `KEEP_GOING_CODEX_BIN` | `codex` |
 | `KEEP_GOING_CLAUDE_BIN` | `claude` |
+| `KEEP_GOING_MUSE_BIN` | `muse` |
 | `KEEP_GOING_GHOST_BIN` | `ghostd` |
 | `KEEP_GOING_GROK_BIN` | `grok` |
 | `KEEP_GOING_CODEX_MODEL` | unset; codex is run without `--model`, so it picks |
 | `KEEP_GOING_CLAUDE_MODEL` | unset; claude is run without `--model`, so it picks |
+| `KEEP_GOING_MUSE_MODEL` | unset; muse is run without `--model`, so it picks |
 | `KEEP_GOING_GROK_MODEL` | unset; grok is run without `--model`, so it picks |
 | `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, saying which mechanism capped the turn |
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
@@ -114,6 +119,11 @@ Uninstall: `claude plugin uninstall keep-going`, or the same `npx` command with
 No host is given a model it did not choose: the reviewer runs on whatever
 that CLI is configured to use unless the variable above names one. Ghost's
 reviewer model is ghostd's, not ours.
+
+Muse reviews itself with `muse exec`, which fires Stop hooks — so the reviewer
+runs under an empty config overlay carrying no hooks, with the default home's
+`auth.json` restored into it. A non-default config home (`XDG_CONFIG_HOME`) is
+unreachable from inside a hook command, so there the review fails open.
 
 ## Upgrading from Unblock or Stop Review
 

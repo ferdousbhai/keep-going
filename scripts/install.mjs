@@ -25,16 +25,17 @@ const BUNDLED_HOOK = path.join(
 );
 
 function usage() {
-  return `Install Keep Going for Claude Code, Ghost, and Grok Build.
+  return `Install Keep Going for Claude Code, Muse Code, Ghost, and Grok Build.
 
 Usage:
   keep-going --claude
+  keep-going --muse
   keep-going --ghost
   keep-going --grok
   keep-going --all
   keep-going --claude --link
   keep-going --status
-  keep-going --uninstall --claude|--ghost|--grok|--all
+  keep-going --uninstall --claude|--muse|--ghost|--grok|--all
 
 --link registers this checkout's hook instead of copying it, so edits to the
 working tree take effect with no reinstall. Switching between --link and a
@@ -50,6 +51,13 @@ const claudeConfigDir = (userHome) => process.env.CLAUDE_CONFIG_DIR || path.join
 const TARGETS = {
   claude: {
     settings: ({ userHome }) => path.join(claudeConfigDir(userHome), "settings.json"),
+  },
+  // Muse reads its hooks from the same settings file: a `hooks` block beside
+  // schema_version. The project-level .muse/hooks.json is documented but the
+  // shipping build ignores it, and managed_hooks_path names exactly one file
+  // another tool may already claim — so the settings block is the install.
+  muse: {
+    settings: ({ configHome }) => path.join(configHome, "muse", "settings.json"),
   },
   ghost: {
     settings: ({ configHome }) => path.join(configHome, "ghost", "hooks.json"),
@@ -166,6 +174,7 @@ codexSource.where = (paths) => codexConfig(paths);
 // prints, and the wrong-runtime warning all need.
 const SOURCES = {
   claude: [settingsSource("claude"), claudePluginSource],
+  muse: [settingsSource("muse")],
   ghost: [settingsSource("ghost")],
   grok: [settingsSource("grok"), settingsSource("claude")],
   codex: [codexSource],
@@ -301,7 +310,13 @@ function updateHookConfig(config, events, hookFile, runner, uninstall) {
     }
     hooks[event] = groups;
   }
-  return { ...config, hooks };
+  const updated = { ...config, hooks };
+  // Muse fails every command when schema_version is absent, so a file this
+  // install creates must include it; a value already set is never overwritten.
+  if (runner === "muse" && !uninstall && updated.schema_version === undefined) {
+    return { schema_version: 1, ...updated };
+  }
+  return updated;
 }
 
 async function main() {

@@ -25,12 +25,15 @@ import { HOOK_FILES, VERSIONED, hookFile, stampVersion } from "../scripts/build.
 
 const ENV_KEYS = [
   "CLAUDE_CONFIG_DIR",
+  "HOME",
   "KEEP_GOING_CLAUDE_BIN",
   "KEEP_GOING_CLAUDE_MODEL",
   "KEEP_GOING_CODEX_BIN",
   "KEEP_GOING_CODEX_MODEL",
   "KEEP_GOING_GHOST_BIN",
   "KEEP_GOING_GROK_BIN",
+  "KEEP_GOING_MUSE_BIN",
+  "KEEP_GOING_MUSE_MODEL",
   "MOCK_CALL_LOG",
   "MOCK_REVIEW_RESPONSE",
   "MOCK_REVIEW_PAD",
@@ -441,6 +444,7 @@ test("names no model unless one is configured", { concurrency: false }, async ()
   for (const [runner, fixtureFor, variable] of [
     ["codex", fixture, "KEEP_GOING_CODEX_MODEL"],
     ["claude", claudeFixture, "KEEP_GOING_CLAUDE_MODEL"],
+    ["muse", museFixture, "KEEP_GOING_MUSE_MODEL"],
   ]) {
     const context = await fixtureFor();
     try {
@@ -622,6 +626,64 @@ process.stdout.write(process.env.MOCK_REVIEW_RESPONSE + "\\n");
   };
 }
 
+async function museFixture() {
+  const root = await mkdtemp(path.join(tmpdir(), "muse-keep-going-test-"));
+  const modelMock = path.join(root, "mock-muse.mjs");
+  const callLog = path.join(root, "calls.jsonl");
+  // The reviewer restores the default home's auth into its hook-free overlay,
+  // so the fixture home carries a credential to be restored.
+  const fakeHome = path.join(root, "home");
+  await mkdir(path.join(fakeHome, ".config", "muse"), { recursive: true });
+  await writeFile(path.join(fakeHome, ".config", "muse", "auth.json"), "fixture-auth");
+  await writeFile(
+    modelMock,
+    `#!/usr/bin/env node
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+const args = process.argv.slice(2);
+const prompt = readFileSync(args[args.indexOf("--prompt-file") + 1], "utf8");
+const configHome = process.env.XDG_CONFIG_HOME ?? null;
+appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({
+  args,
+  prompt,
+  configHome,
+  overlayHasSettings: configHome ? existsSync(path.join(configHome, "muse", "settings.json")) : null,
+  overlayHasAuth: configHome ? existsSync(path.join(configHome, "muse", "auth.json")) : null,
+}) + "\\n");
+process.stdout.write(process.env.MOCK_REVIEW_RESPONSE);
+`,
+  );
+  await chmod(modelMock, 0o755);
+
+  const previous = environmentSnapshot();
+  process.env.HOME = fakeHome;
+  process.env.KEEP_GOING_MUSE_BIN = modelMock;
+  process.env.KEEP_GOING_MUSE_MODEL = "muse-spark-fixture";
+  process.env.MOCK_CALL_LOG = callLog;
+  process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
+  process.env.XDG_STATE_HOME = path.join(root, "state");
+
+  return {
+    // The payload Muse's native Stop hook actually sends, spelling intact.
+    input: {
+      cwd: "/tmp/project",
+      hook_event_name: "Stop",
+      last_assistant_message: "Candidate final response.",
+      model: "muse-spark-fixture",
+      permission_mode: "default",
+      session_id: "session-test",
+      stop_hook_active: false,
+      transcript_path: null,
+      turn_id: "turn-test",
+    },
+    calls: () => readCalls(callLog),
+    async cleanup() {
+      restoreEnvironment(previous);
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
 test("a subagent is capped on its own account, not its parent's", { concurrency: false }, async () => {
   // SubagentStop carries the parent session's id, so without agent_id in the
   // key a handful of subagents would spend the cap of the turn that launched
@@ -673,6 +735,66 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", { co
       .trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(row.counted_by, "tally");
     assert.equal(await recordedContinuations(context.input, "grok"), 1);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Muse counts against the turn id it sends", { concurrency: false }, async () => {
+  // The turn id is in the payload, so the count is keyed on it directly. Only
+  // session_id is required: a stop that stopped naming its turn is still
+  // reviewed and capped per session rather than refused outright.
+  const context = await museFixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    for (const expected of [1, 2]) {
+      assert.equal((await handleStop(context.input, "muse")).decision, "block");
+      assert.equal(await recordedContinuations(context.input, "muse"), expected);
+    }
+
+    assert.equal(
+      await recordedContinuations({ ...context.input, turn_id: "turn-next" }, "muse"),
+      0,
+    );
+
+    const sessionOnly = { ...context.input };
+    delete sessionOnly.turn_id;
+    assert.equal(await recordedContinuations(sessionOnly, "muse"), 0);
+    assert.equal((await handleStop(sessionOnly, "muse")).decision, "block");
+    assert.equal(await recordedContinuations(sessionOnly, "muse"), 1);
+
+    for (const row of await auditRows()) assert.equal(row.counted_by, "tally");
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Muse is reviewed by muse exec in a hook-free overlay", { concurrency: false }, async () => {
+  const context = await museFixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
+    const output = await handleStop(
+      { ...context.input, last_assistant_message: "Shipped it. token=supersecretvalue" },
+      "muse",
+    );
+    assert.deepEqual(output, {});
+
+    const [call] = await context.calls();
+    // A headless run fires Stop hooks, so the reviewer must not see the
+    // registration it was spawned from: the overlay carries auth but no hooks.
+    assert.equal(call.args[0], "exec");
+    assert.ok(call.args.includes("--prompt-file"));
+    assert.equal(call.args[call.args.indexOf("--max-model-steps") + 1], "1");
+    assert.ok(call.configHome, "reviewer ran without a config overlay");
+    assert.equal(call.overlayHasSettings, false);
+    assert.equal(call.overlayHasAuth, true);
+
+    // The reviewer sees the redacted final message and nothing else: no cwd,
+    // no owner prompt, no transcript content.
+    assert.match(call.prompt, /Reply with the verdict word alone/);
+    assert.doesNotMatch(call.prompt, /supersecretvalue/);
+    assert.match(call.prompt, /token=\[REDACTED\]/);
+    assert.doesNotMatch(call.prompt, /\/tmp\/project/);
   } finally {
     await context.cleanup();
   }

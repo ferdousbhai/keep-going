@@ -9,6 +9,7 @@ export const HOSTS = {
   // registers at runtime, so a settings.json Stop hook never sees a subagent:
   // the event has to be asked for by name.
   claude: { events: ["Stop", "SubagentStop"] },
+  muse: { events: ["Stop", "SubagentStop"] },
   ghost: { events: ["session_stop"] },
   grok: { events: ["Stop"] },
 };
