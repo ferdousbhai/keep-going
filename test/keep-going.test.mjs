@@ -538,6 +538,13 @@ test("an exact required reply fulfills the owner prompt without a reviewer", () 
     lastMessageFulfillsOwnerPrompt("Please finish the requested change.", "Candidate final response."),
     false,
   );
+  assert.equal(
+    lastMessageFulfillsOwnerPrompt(
+      "Do not use tools. Reply with only the word WIP and then stop. We still need the full implementation after that.",
+      "WIP",
+    ),
+    true,
+  );
 });
 
 test("Ghost accepts a stop whose last message is the exact required reply", { concurrency: false }, async () => {

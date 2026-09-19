@@ -451,6 +451,10 @@ function exactReplyCandidates(ownerPrompt) {
     /\b(?:reply(?:\s+with)?(?:\s+exactly)?|exactly(?:\s+this(?:\s+one)?\s+line(?:\s+and\s+nothing\s+else)?)?)\s*:\s*(.+)\s*$/i,
   );
   if (after) found.push(after[1]);
+  const onlyWord = prompt.match(/\breply\s+with\s+only(?:\s+the\s+word)?\s+([^\s.:,]+)/i);
+  if (onlyWord) found.push(onlyWord[1]);
+  const onlyColon = prompt.match(/\breply\s+with\s+only\s*:\s*(.+?)(?:\s+and\s+then\s+stop|\s*$)/i);
+  if (onlyColon) found.push(onlyColon[1]);
   return [...new Set(found.map(normalizeReply).filter(Boolean))];
 }
 
