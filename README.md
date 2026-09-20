@@ -26,14 +26,14 @@ answers with one of:
   could still surface more; it goes back in to scan again.
 - `STOP` — it is genuinely done, or genuinely blocked on the user.
 
-`CONTINUE` and `THINK` block the stop (or queue a follow-up in Pi) and send the
-agent back in with a short line the reviewer writes for the occasion. Ghost
-sends the owner's request on the stop payload; Claude, Codex, Grok, and Pi
-recover it from the transcript or session. Muse's stop payload has no prompt
-and no transcript, so that field is empty. Any failure
-— missing binary, timeout, unparseable verdict — accepts the stop. So does a
-stop with no owner prompt and a final message of a bare completion token
-(`None`, `Done.`): there is nothing to judge, and no reviewer is run.
+`CONTINUE`, `THINK`, and `RESCAN` block the stop (or queue a follow-up in Pi)
+and send the agent back in with a short line the reviewer writes for the
+occasion. Ghost sends the owner's request on the stop payload; Claude, Codex,
+Grok, and Pi recover it from the transcript or session. Muse's stop payload has
+no prompt and no transcript, so that field is empty. Any failure — missing
+binary, timeout, unparseable verdict — accepts the stop. So does a stop with no
+owner prompt and a final message of a bare completion token (`None`, `Done.`):
+there is nothing to judge, and no reviewer is run.
 
 At most 100 continuations per owner turn, rescans included. Past the cap the
 next stop is accepted without a review; over the last 10 the reviewer is asked
@@ -62,10 +62,11 @@ host: Claude/Codex transcripts, Grok's chat log, Ghost's pi session file,
 Pi's branch — all redacted and truncated. Muse sends no transcript, so it
 decides from the current turn alone. `KEEP_GOING_TURNS=0` disables the index.
 
-On Claude Code it reviews subagents too, on the same terms: a subagent that
-quits with work left is the failure this hook is named for. A subagent stop
-names the agent it came from and carries its parent's session, so each subagent
-gets its own count of 100 and spends none of the turn that launched it.
+On Claude Code and Muse it reviews subagents too, on the same terms: a
+subagent that quits with work left is the failure this hook is named for. A
+subagent stop carries an id of its own — the agent on Claude, the child session
+on Muse — so each subagent gets its own count of 100 and spends none of the
+turn that launched it.
 
 ## Install
 
@@ -116,11 +117,11 @@ registers this checkout rather than copying it, so edits take effect with no
 reinstall. Switching between `--link` and a copy replaces the registration
 instead of adding a second one.
 
-`--audit-log PATH` writes `KEEP_GOING_AUDIT_LOG` into each registered command.
-Muse passes a hook only the environment its settings spell out, so a shell
-export never reaches it; the installer is where that setting lives. A reinstall
-without the flag drops it. Codex's plugin and the Pi extension read the
-variable from the shell environment instead.
+`--audit-log PATH` writes `KEEP_GOING_AUDIT_LOG` into each registered command,
+and a reinstall without it drops the setting. It lives in the command because
+Muse passes a hook only the environment its settings spell out; a shell export
+never reaches it. Codex's plugin and the Pi extension read the variable from
+the shell instead.
 
 `npx --yes github:ferdousbhai/keep-going --status` prints where keep-going is
 registered on this machine for the CLI hook hosts — settings files and Claude
@@ -136,8 +137,8 @@ Uninstall: `claude plugin uninstall keep-going`, or the same `npx` command with
 Pi loads keep-going as an extension, not as a `hooks.json` command. It reviews
 only a normal final text response, before Pi drains its follow-up queue.
 Tool turns, aborted or failed responses, and turns with queued messages are
-left alone. `CONTINUE` or `THINK` queues one visible custom follow-up; `STOP`
-leaves the response alone. The reviewer is a direct, tool-free model call, so
+left alone. A blocking verdict queues one visible follow-up; `STOP` leaves the
+response alone. The reviewer is a direct, tool-free model call, so
 it cannot recursively trigger the extension.
 
 The reviewer uses Pi's active model by default, with the provider's default
@@ -191,10 +192,10 @@ THINK, STOP, invalid output, reviewer overrides, duplicate installs, and the cap
 keep-going does not select a small or low-cost model automatically. For CLI
 reviewers, unless a `KEEP_GOING_*_MODEL` override is set, it omits `--model` and
 lets the reviewer CLI choose. That need not be the session's active model,
-and the default can change with CLI versions or provider defaults. Where the
-host exposes it, reasoning is the lowest advertised level (`none` on Codex
-and Pi, `low` on Grok and Claude — Grok's CLI has no `none`). Reviewers are
-run without tools.
+and the default can change with CLI versions or provider defaults. Reasoning
+is the lowest advertised level where keep-going sets it: `none` on Codex and
+Pi, `low` on Grok and Claude (Grok's CLI has no `none`); Muse runs at its CLI
+default. Reviewers are run without tools.
 
 The Codex reviewer runs with `--ignore-user-config`, so it does not inherit
 `model` or reasoning settings from `~/.codex/config.toml`. Set
