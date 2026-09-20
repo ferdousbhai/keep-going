@@ -34,11 +34,14 @@ no turn, as on Claude Code, it is read from the transcript; Pi counts
 follow-ups on the session branch. Subagents on Claude Code and Muse are
 reviewed on the same terms, each with its own count.
 
-A fresh stop waits fifteen seconds first; if the transcript grows in that
-window the user was already following up, and the stop goes through. The
-reviewer may reply `TURN n` or `TURN x-y` (up to five turns) to read earlier
-turns before verdicting, at most twice per stop. Muse sends no transcript, so
-there the stop is reviewed at once from the current turn alone.
+A fresh stop waits fifteen seconds first; if the owner's next message lands
+in the transcript during that window they were already following up, and the
+stop goes through. Only an owner message counts: the host's own writes, such
+as Claude Code landing the final assistant message after Stop has fired, do
+not. Subagent stops skip the wait. The reviewer may reply `TURN n` or
+`TURN x-y` (up to five turns) to read earlier turns before verdicting, at most
+twice per stop. Muse sends no transcript, so there the stop is reviewed at
+once from the current turn alone.
 
 ## Install
 

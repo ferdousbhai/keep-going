@@ -18,8 +18,8 @@ const CONTINUATION_CAP = 100;
 const LAST_STRETCH = 10;
 // How long the hook holds a fresh stop before reviewing it. A user who was
 // already typing a follow-up should not pay for a review of a turn they were
-// about to extend: after the wait, a transcript that grew in the meantime is
-// taken as that follow-up and the stop is let through unreviewed.
+// about to extend: an owner message that lands in the transcript during the
+// wait is that follow-up, and the stop is let through unreviewed.
 const QUIET_DELAY_MS = 15_000;
 
 function quietDelayMs() {
@@ -34,30 +34,47 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Size, not content: while the hook waits, only a new message — the user's
-// follow-up or the next turn's work — can append to the transcript.
-async function transcriptSize(transcriptPath) {
-  if (typeof transcriptPath !== "string" || !transcriptPath) return null;
+async function fileSize(file) {
   try {
-    return (await stat(transcriptPath)).size;
+    return (await stat(file)).size;
   } catch {
     return null;
   }
 }
 
 // Hold a fresh stop before reviewing it, so a follow-up the user was already
-// typing lets the stop through unreviewed. True when the transcript grew
-// during the wait; a retry already waited once, and a stop with no transcript
-// to watch cannot show a follow-up, so both skip the wait.
-async function followedUpDuringQuietWait(input, delay) {
+// typing lets the stop through unreviewed. True only when the owner's log
+// gained a record that opens a turn — the host writes to the same file while
+// the hook runs: Claude Code lands the final assistant message itself, then
+// hook summaries and housekeeping records, after Stop has fired, so growth
+// alone said "follow-up" on most stops and let them through unreviewed. A
+// retry already waited once, a subagent's owner is the parent that is waiting
+// on it, and a host with no owner log to watch cannot show a follow-up, so
+// all three skip the wait.
+async function followedUpDuringQuietWait(input, runtime, delay) {
   const quietMs = quietDelayMs();
-  if (quietMs <= 0 || input.stop_hook_active || input.stopHookActive) return false;
-  const before = await transcriptSize(input.transcript_path);
+  if (quietMs <= 0 || input.stop_hook_active || input.stopHookActive || input.agent_id) return false;
+  const watch = runtime.followUp;
+  if (!watch) return false;
+  const file = watch.file(input);
+  const before = await fileSize(file);
   if (before === null) return false;
   await (delay ?? sleep)(quietMs);
-  const after = await transcriptSize(input.transcript_path);
-  return after !== null && after > before;
+  const after = await fileSize(file);
+  if (after === null || after <= before) return false;
+  // A line cut by either boundary fails to parse and is skipped; a message
+  // the owner sent is always a whole line of its own.
+  try {
+    for await (const record of jsonLines(file, { start: before, end: after - 1 })) {
+      if (watch.turn(record)?.open) return true;
+    }
+  } catch {
+    // An unreadable range shows no follow-up; the stop is reviewed as usual.
+  }
+  return false;
 }
+
+const ownTranscript = (input) => input.transcript_path;
 
 // Everything that differs per host, keyed once: the inputs it must supply, the
 // directory its state belongs under, the directories its transcripts may live
@@ -83,6 +100,7 @@ const RUNTIMES = {
     roots: () => [path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "sessions")],
     ownerPrompt: codexOwnerPrompt,
     run: runCodexModel,
+    followUp: { file: ownTranscript, turn: codexTurn },
   },
   claude: {
     requires: ["session_id"],
@@ -91,11 +109,13 @@ const RUNTIMES = {
     count: claudeContinuations,
     ownerPrompt: claudeOwnerPrompt,
     run: runClaudeModel,
+    followUp: { file: ownTranscript, turn: claudeTurn },
   },
   ghost: {
     requires: ["session_id", "owner_prompt", "ghost_home"],
     state: (input) => input.ghost_home,
     run: runGhostModel,
+    followUp: { file: ownTranscript, turn: ghostTurn },
   },
   // Muse names its turn, so the tally keys on it wherever it is sent. Only
   // session_id is required: the hook contract is unpublished and a stop that
@@ -121,6 +141,10 @@ const RUNTIMES = {
     roots: () => [path.join(process.env.GROK_HOME || path.join(homedir(), ".grok"), "sessions")],
     ownerPrompt: grokOwnerPrompt,
     run: runGrokModel,
+    followUp: {
+      file: (input) => (typeof input.transcript_path === "string" ? grokChatHistory(input.transcript_path) : null),
+      turn: grokTurn,
+    },
   },
 };
 
@@ -343,8 +367,8 @@ function isInjectedContext(text) {
   );
 }
 
-async function* jsonLines(file) {
-  const stream = createReadStream(file, { encoding: "utf8" });
+async function* jsonLines(file, range = {}) {
+  const stream = createReadStream(file, { encoding: "utf8", ...range });
   const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
   for await (const line of lines) {
@@ -449,6 +473,10 @@ async function codexOwnerPrompt(input) {
   });
 }
 
+// The stop names the updates log; what the owner typed lands in the chat
+// history beside it.
+const grokChatHistory = (updates) => path.join(path.dirname(updates), "chat_history.jsonl");
+
 function grokQueryText(record) {
   const raw = messageText(record);
   const tagged = raw.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/);
@@ -471,7 +499,7 @@ async function grokOwnerPrompt(input) {
     // prompt_history is the typed prompt; chat_history is the fallback wrap.
   }
   try {
-    return await lastTranscriptMatch(path.join(sessionDir, "chat_history.jsonl"), (record) =>
+    return await lastTranscriptMatch(grokChatHistory(updates), (record) =>
       record?.type !== "user" || record.synthetic_reason ? "" : grokQueryText(record));
   } catch {
     return "";
@@ -598,7 +626,7 @@ async function codexPastTurns(input) {
 
 async function grokPastTurns(input) {
   const updates = await allowedTranscriptPath(input, "grok");
-  const segments = await readTurns(path.join(path.dirname(updates), "chat_history.jsonl"), grokTurn);
+  const segments = await readTurns(grokChatHistory(updates), grokTurn);
   return segments.slice(0, -1);
 }
 
@@ -1265,7 +1293,7 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
       throw new Error(`Stop input is missing ${key}`);
     }
   }
-  if (await followedUpDuringQuietWait(input, delay)) {
+  if (await followedUpDuringQuietWait(input, runtime, delay)) {
     return settleStop(input, runner, {}, { reason: "user followed up during quiet wait", countedBy: "quiet-wait" });
   }
   const lastAssistantMessage = compactText(stopCandidateText(input), 12_000);

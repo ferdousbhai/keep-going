@@ -807,6 +807,22 @@ test("the hook never asks for a register it does not keep itself", () => {
   }
 });
 
+// A Grok session on disk: the updates log the stop names, its owner's chat
+// history beside it, and the stop input pointing at the log.
+async function grokSession(context) {
+  const enc = path.join(process.env.GROK_HOME, "sessions", encodeURIComponent("/tmp/project"));
+  const sessionDir = path.join(enc, context.input.session_id);
+  await mkdir(sessionDir, { recursive: true });
+  const updates = path.join(sessionDir, "updates.jsonl");
+  await writeFile(updates, "{}\n");
+  return {
+    enc,
+    sessionDir,
+    chat: path.join(sessionDir, "chat_history.jsonl"),
+    input: { ...context.input, transcript_path: updates },
+  };
+}
+
 async function grokFixture() {
   const root = await mkdtemp(path.join(tmpdir(), "grok-keep-going-test-"));
   const modelMock = path.join(root, "mock-grok.mjs");
@@ -988,16 +1004,12 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", { co
 test("Grok recovers owner_prompt from prompt_history", { concurrency: false }, async () => {
   const context = await grokFixture();
   try {
-    const enc = path.join(process.env.GROK_HOME, "sessions", encodeURIComponent("/tmp/project"));
-    const sessionDir = path.join(enc, context.input.session_id);
-    await mkdir(sessionDir, { recursive: true });
-    await writeFile(path.join(sessionDir, "updates.jsonl"), "{}\n");
+    const { enc, input } = await grokSession(context);
     await writeFile(
       path.join(enc, "prompt_history.jsonl"),
       `${JSON.stringify({ session_id: context.input.session_id, prompt: "Ship the hook.", is_bash: false })}\n`,
     );
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
-    const input = { ...context.input, transcript_path: path.join(sessionDir, "updates.jsonl") };
     assert.equal(await resolveOwnerPrompt(input, "grok"), "Ship the hook.");
     await handleStop(input, "grok");
     const [call] = await context.calls();
@@ -1291,6 +1303,111 @@ test("a follow-up during the quiet wait lets the stop through unreviewed", { con
   }
 });
 
+test("the host's own writes during the quiet wait are not a follow-up", { concurrency: false }, async () => {
+  // Claude Code fires Stop before the final assistant message reaches the
+  // transcript, then lands it, the hook summary, and housekeeping records
+  // while the hook waits. None of that is the owner speaking, so the stop
+  // is still reviewed.
+  const context = await claudeFixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
+    process.env.KEEP_GOING_QUIET_MS = "60000";
+    const output = await handleStop(context.input, "claude", {
+      delay: async () => {
+        await appendRecords(context.input.transcript_path, [
+          JSON.stringify({
+            type: "assistant",
+            message: { role: "assistant", content: [{ type: "text", text: "Candidate final response." }] },
+          }),
+          JSON.stringify({ type: "attachment", attachment: { type: "hook_success", hookName: "Stop" } }),
+          JSON.stringify({ type: "system", subtype: "stop_hook_summary", hookCount: 1 }),
+          JSON.stringify({ type: "queue-operation", operation: "enqueue", content: "<task-notification>done</task-notification>" }),
+          JSON.stringify({ type: "last-prompt", lastPrompt: "Build it now." }),
+          JSON.stringify({ type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback: keep going" } }),
+          JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", content: "ok" }] } }),
+        ]);
+      },
+    });
+    assert.deepEqual(output, {});
+    assert.equal((await context.calls()).length, 1);
+    const [row] = await auditRows();
+    assert.equal(row.counted_by, "transcript");
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("an owner message queued during the quiet wait lets a Claude stop through", { concurrency: false }, async () => {
+  const context = await claudeFixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
+    process.env.KEEP_GOING_QUIET_MS = "60000";
+    const output = await handleStop(context.input, "claude", {
+      delay: async () => {
+        await appendRecords(context.input.transcript_path, [
+          JSON.stringify({
+            type: "assistant",
+            message: { role: "assistant", content: [{ type: "text", text: "Candidate final response." }] },
+          }),
+          JSON.stringify({
+            type: "user",
+            promptSource: "queued",
+            message: { role: "user", content: [{ type: "text", text: "Actually, one more thing." }] },
+          }),
+        ]);
+      },
+    });
+    assert.deepEqual(output, {});
+    assert.deepEqual(await context.calls(), []);
+    const [row] = await auditRows();
+    assert.equal(row.counted_by, "quiet-wait");
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("a subagent stop skips the quiet wait", { concurrency: false }, async () => {
+  // Its owner is the parent agent, which is waiting on it and cannot follow up.
+  const context = await claudeFixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
+    process.env.KEEP_GOING_QUIET_MS = "60000";
+    const output = await handleStop({ ...context.input, agent_id: "agent-1" }, "claude", {
+      delay: async () => { throw new Error("a subagent has no owner to wait for"); },
+    });
+    assert.deepEqual(output, {});
+    assert.equal((await context.calls()).length, 1);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Grok's quiet wait watches the chat history beside the updates log", { concurrency: false }, async () => {
+  const context = await grokFixture();
+  try {
+    const { chat, input } = await grokSession(context);
+    await writeFile(chat, `${JSON.stringify({ type: "user", content: [{ type: "text", text: "Ship the hook." }] })}\n`);
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
+    process.env.KEEP_GOING_QUIET_MS = "60000";
+
+    // The updates log growing is the host at work, not the owner.
+    await handleStop(input, "grok", {
+      delay: async () => { await appendRecords(input.transcript_path, ["{}", "{}"]); },
+    });
+    assert.equal((await context.calls()).length, 1);
+
+    await handleStop(input, "grok", {
+      delay: async () => {
+        await appendRecords(chat, [JSON.stringify({ type: "user", content: [{ type: "text", text: "One more thing." }] })]);
+      },
+    });
+    assert.equal((await context.calls()).length, 1);
+    assert.equal((await auditRows()).at(-1).counted_by, "quiet-wait");
+  } finally {
+    await context.cleanup();
+  }
+});
+
 test("a retry after hook feedback skips the quiet wait", { concurrency: false }, async () => {
   const context = await fixture();
   try {
@@ -1402,18 +1519,13 @@ test("Codex past turns segment on turn_context and skip hook feedback", { concur
 test("Grok past turns pair chat log users with their assistant finals", { concurrency: false }, async () => {
   const context = await grokFixture();
   try {
-    const sessionDir = path.join(
-      process.env.GROK_HOME, "sessions", encodeURIComponent("/tmp/project"), context.input.session_id,
-    );
-    await mkdir(sessionDir, { recursive: true });
-    await writeFile(path.join(sessionDir, "updates.jsonl"), "{}\n");
-    await writeFile(path.join(sessionDir, "chat_history.jsonl"), [
+    const { chat, input } = await grokSession(context);
+    await writeFile(chat, [
       JSON.stringify({ type: "user", content: [{ type: "text", text: "First thing." }] }),
       JSON.stringify({ type: "assistant", content: "First done." }),
       JSON.stringify({ type: "user", content: [{ type: "text", text: "Second thing." }] }),
       JSON.stringify({ type: "assistant", content: "Second done." }),
     ].join("\n"));
-    const input = { ...context.input, transcript_path: path.join(sessionDir, "updates.jsonl") };
     assert.deepEqual(await listPastTurns(input, "grok"), [
       { owner: "First thing.", final: "First done." },
     ]);
