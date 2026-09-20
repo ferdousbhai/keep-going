@@ -134,6 +134,39 @@ test("installer adds, updates, and removes Claude Code, Ghost, and Grok hooks", 
   }
 });
 
+test("--audit-log writes the log path into each command and a plain reinstall drops it", async () => {
+  const { settings, museSettings, home, env, cleanup } = await installHome("audit");
+  try {
+    // Muse only passes a hook the environment its settings spell out, so the
+    // path has to ride inside the command; ~ is expanded against the install
+    // home because a quoted path is never expanded again.
+    const result = await runInstaller(["--claude", "--muse", "--audit-log", "~/state/audit.jsonl"], env);
+    assert.equal(result.code, 0, result.stderr);
+    const expected = path.join(home, "state", "audit.jsonl");
+    assert.match(result.stdout, new RegExp(`Audit log at ${expected.replaceAll(".", "\\.")}`));
+    const claude = JSON.parse(await readFile(settings, "utf8"));
+    const muse = JSON.parse(await readFile(museSettings, "utf8"));
+    for (const [config, event, runner] of [[claude, "Stop", "claude"], [claude, "SubagentStop", "claude"], [muse, "Stop", "muse"]]) {
+      assert.equal(config.hooks[event].length, 1);
+      const command = config.hooks[event][0].hooks[0].command;
+      assert.ok(command.startsWith(`KEEP_GOING_AUDIT_LOG='${expected}' '`), command);
+      assert.match(command, new RegExp(`keep-going\\.mjs' ${runner}$`));
+    }
+
+    const plain = await runInstaller(["--claude", "--muse"], env);
+    assert.equal(plain.code, 0, plain.stderr);
+    const reinstalled = JSON.parse(await readFile(museSettings, "utf8"));
+    assert.equal(reinstalled.hooks.Stop.length, 1);
+    assert.doesNotMatch(reinstalled.hooks.Stop[0].hooks[0].command, /KEEP_GOING_AUDIT_LOG/);
+
+    const missing = await runInstaller(["--muse", "--audit-log"], env);
+    assert.equal(missing.code, 1);
+    assert.match(missing.stderr, /--audit-log needs a path/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("installer adds, updates, and removes Muse Code hooks", async () => {
   const { museSettings, dataHome, env, cleanup } = await installHome("muse");
   try {

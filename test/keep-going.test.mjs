@@ -386,6 +386,75 @@ test("STOP accepts the stop", { concurrency: false }, async () => {
     const audit = JSON.parse((await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8")).trim());
     assert.equal(audit.verdict, "STOP");
     assert.equal(audit.rationale, "");
+    assert.equal(audit.reviewer_output, "STOP");
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("audit keeps the reviewer's raw text", { concurrency: false }, async () => {
+  const context = await fixture();
+  try {
+    const continued = await handleStop(context.input, "codex", {
+      runModel: async () => "CONTINUE\nKeep going, finish it.",
+    });
+    assert.equal(continued.decision, "block");
+    const stopped = await handleStop(context.input, "codex", {
+      runModel: async () => `STOP\n${"x".repeat(5000)}`,
+    });
+    assert.deepEqual(stopped, {});
+    const invalid = await handleStop(context.input, "codex", {
+      runModel: async () => "just thinking out loud",
+    });
+    assert.match(invalid.systemMessage, /keep-going was skipped/);
+    const [continueRow, longRow, invalidRow] = await auditRows();
+    assert.equal(continueRow.verdict, "CONTINUE");
+    assert.equal(continueRow.rationale, "Keep going, finish it.");
+    assert.equal(continueRow.reviewer_output, "CONTINUE\nKeep going, finish it.");
+    assert.equal(longRow.verdict, "STOP");
+    assert.match(longRow.reviewer_output, /^\s*STOP/);
+    assert.match(longRow.reviewer_output, /\.\.\.\[truncated\]\.\.\./);
+    assert.ok(longRow.reviewer_output.length < 5000);
+    assert.equal(invalidRow.verdict, "ERROR");
+    assert.equal(invalidRow.reviewer_output, "just thinking out loud");
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("stub final messages without an owner prompt skip review", { concurrency: false }, async () => {
+  const context = await museFixture();
+  try {
+    let reviews = 0;
+    const review = async () => {
+      reviews++;
+      return "STOP";
+    };
+    const stop = (message, extra = {}) =>
+      handleStop({ ...context.input, last_assistant_message: message, ...extra }, "muse", {
+        runModel: review,
+      });
+    // Bare completion tokens with nothing to match against are accepted
+    // without spending a reviewer call.
+    for (const message of ["None", "Done."]) {
+      assert.deepEqual(await stop(message), {});
+    }
+    assert.equal(reviews, 0);
+    // Anything carrying task content is still reviewed...
+    assert.deepEqual(await stop("Not done"), {});
+    assert.equal(reviews, 1);
+    // ...as is any stub arriving with an owner prompt to match against.
+    assert.deepEqual(await stop("Done.", { owner_prompt: "Finish the migration." }), {});
+    assert.equal(reviews, 2);
+    const rows = await auditRows();
+    assert.equal(rows.length, 4);
+    for (const row of rows.slice(0, 2)) {
+      assert.equal(row.verdict, "STOP");
+      assert.equal(row.counted_by, "stub");
+      assert.ok(!("reviewer_output" in row));
+    }
+    assert.equal(rows[2].reviewer_output, "STOP");
+    assert.equal(rows[3].reviewer_output, "STOP");
   } finally {
     await context.cleanup();
   }
@@ -1147,6 +1216,12 @@ test("Muse blocks an empty final message once, then accepts the retry", { concur
     assert.equal(first.decision, "block");
     assert.match(first.reason, /did not see your last message/);
     assert.deepEqual(await handleStop({ ...input, stop_hook_active: true }, "muse"), {});
+    // Both stops leave a row: this is the path every Muse reminder observer
+    // takes first, and it used to vanish from the audit log.
+    const rows = await auditRows();
+    assert.deepEqual(rows.map((row) => [row.verdict, row.counted_by]), [["CONTINUE", "empty"], ["STOP", "empty"]]);
+    assert.match(rows[0].rationale, /did not see your last message/);
+    assert.equal(rows[1].rationale, "no last message on retry");
   } finally {
     await context.cleanup();
   }
@@ -1577,8 +1652,9 @@ test("the shipped plugin bundles no runtime dependency", async () => {
   // else would notice a dependency reappearing: the CI drift check only proves
   // the bundle matches src, not that src stayed dependency-free. The size cap
   // below is recalibrated when a feature grows src on purpose (16 KiB through
-  // the quiet wait, 22 KiB with reviewer history lookup); the dependency
-  // assertions above are the part that never moves.
+  // the quiet wait, 22 KiB with reviewer history lookup, 23 KiB with audit raw
+  // text and the stub skip); the dependency assertions above are the part that
+  // never moves.
   const manifest = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8")
   );
@@ -1586,7 +1662,7 @@ test("the shipped plugin bundles no runtime dependency", async () => {
 
   const bundlePath = new URL("../plugins/keep-going/scripts/keep-going.mjs", import.meta.url);
   const bundle = await stat(bundlePath);
-  assert.ok(bundle.size < 22 * 1024, `expected bundle below 22 KiB, received ${bundle.size} bytes`);
+  assert.ok(bundle.size < 23 * 1024, `expected bundle below 23 KiB, received ${bundle.size} bytes`);
 
   const source = await readFile(bundlePath, "utf8");
   const bareImports = [...source.matchAll(/^\s*import[^\n]*?from\s+"([^"]+)"/gm)]

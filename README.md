@@ -31,7 +31,9 @@ agent back in with a short line the reviewer writes for the occasion. Ghost
 sends the owner's request on the stop payload; Claude, Codex, Grok, and Pi
 recover it from the transcript or session. Muse's stop payload has no prompt
 and no transcript, so that field is empty. Any failure
-— missing binary, timeout, unparseable verdict — accepts the stop.
+— missing binary, timeout, unparseable verdict — accepts the stop. So does a
+stop with no owner prompt and a final message of a bare completion token
+(`None`, `Done.`): there is nothing to judge, and no reviewer is run.
 
 At most 100 continuations per owner turn, rescans included. Past the cap the
 next stop is accepted without a review; over the last 10 the reviewer is asked
@@ -105,7 +107,7 @@ One route per host: the plugin and the `npx` installer each register their own
 Stop hook, and a host with both runs the reviewer twice on every stop.
 
 These track `main`, gated by `npm run check`. To pin instead, add a git tag —
-`--ref v0.11.0` for Codex, `#v0.11.0` for `npx`, or `@v0.11.0` for Pi's Git source.
+`--ref v0.12.0` for Codex, `#v0.12.0` for `npx`, or `@v0.12.0` for Pi's Git source.
 The Claude plugin moves only when you run `claude plugin update`. There is no
 npm package.
 
@@ -113,6 +115,12 @@ Working on keep-going itself: `node scripts/install.mjs --claude --ghost --link`
 registers this checkout rather than copying it, so edits take effect with no
 reinstall. Switching between `--link` and a copy replaces the registration
 instead of adding a second one.
+
+`--audit-log PATH` writes `KEEP_GOING_AUDIT_LOG` into each registered command.
+Muse passes a hook only the environment its settings spell out, so a shell
+export never reaches it; the installer is where that setting lives. A reinstall
+without the flag drops it. Codex's plugin and the Pi extension read the
+variable from the shell environment instead.
 
 `npx --yes github:ferdousbhai/keep-going --status` prints where keep-going is
 registered on this machine for the CLI hook hosts — settings files and Claude
@@ -177,7 +185,7 @@ THINK, STOP, invalid output, reviewer overrides, duplicate installs, and the cap
 | `KEEP_GOING_PI_MODEL` | unset; Pi's active model; override with exact `provider/model-id` |
 | `KEEP_GOING_QUIET_MS` | `15000`; how long a fresh stop waits before review; `0` reviews immediately |
 | `KEEP_GOING_TURNS` | unset; `0` disables the past-turn index reviewers can request |
-| `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, saying which mechanism capped the turn |
+| `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision with the reviewer's raw text and which mechanism capped the turn; the installer's `--audit-log` sets it per host |
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
 keep-going does not select a small or low-cost model automatically. For CLI
