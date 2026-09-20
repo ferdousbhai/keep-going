@@ -24,7 +24,7 @@ async function runPi(t, { cap = false, duplicate = false, verdict = "CONTINUE", 
       let body = "";
       for await (const chunk of req) body += chunk;
       const input = JSON.parse(body);
-      const review = JSON.stringify(input.messages).includes("A coding agent just tried to end its turn.");
+      const review = JSON.stringify(input.messages).includes("An agent just tried to end its turn.");
       requests.push({ input, review });
       let text;
       if (review) {
@@ -104,10 +104,10 @@ test("real Pi continues once, then stops; duplicate installs still review each r
   assert.match(result.stdout, /2 \+ 2 = 4\. Done\./);
 });
 
-test("real Pi honors JUDGE and an explicit reviewer model", { timeout: 60_000 }, async (t) => {
-  const result = await runPi(t, { verdict: "JUDGE", reviewerModel: "fixture/reviewer" });
+test("real Pi honors THINK and an explicit reviewer model", { timeout: 60_000 }, async (t) => {
+  const result = await runPi(t, { verdict: "THINK", reviewerModel: "fixture/reviewer" });
   assert.equal(result.mainCalls, 2);
-  assert.deepEqual(result.rows.map((row) => row.verdict), ["JUDGE", "STOP"]);
+  assert.deepEqual(result.rows.map((row) => row.verdict), ["THINK", "STOP"]);
   for (const { input, review } of result.requests) {
     assert.equal(input.model, review ? "reviewer" : "fixture");
   }

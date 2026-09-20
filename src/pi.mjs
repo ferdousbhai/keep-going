@@ -1,4 +1,4 @@
-import { handleStop } from "./keep-going.mjs";
+import { handleStop, TURN_INDEX_LIMIT } from "./keep-going.mjs";
 
 const NUDGE = "keep-going";
 const REVIEW = "keep-going-review";
@@ -11,6 +11,30 @@ const textOf = (message) => (message.content ?? [])
 
 const lastAssistant = (branch) => branch.findLast((entry) =>
   entry.type === "message" && entry.message.role === "assistant");
+
+const HOOK_FEEDBACK_PATTERN = /^\s*Stop hook feedback\b/;
+
+// Turns before the one under review, oldest first, for the reviewer's TURN
+// requests. Segments open at user messages; tool-only assistant traffic has
+// no text and never becomes a final. Hook feedback is a continuation of its
+// turn, never a turn of its own.
+function pastTurnsFromBranch(branch, ownerIndex) {
+  const turns = [];
+  let current = null;
+  for (const entry of branch.slice(0, ownerIndex)) {
+    if (entry?.type !== "message") continue;
+    if (entry.message?.role === "user") {
+      const owner = textOf(entry.message).trim();
+      if (!owner || HOOK_FEEDBACK_PATTERN.test(owner)) continue;
+      current = { owner_prompt: owner, final_response: "" };
+      turns.push(current);
+    } else if (entry.message?.role === "assistant" && current) {
+      const text = textOf(entry.message).trim();
+      if (text) current.final_response = text;
+    }
+  }
+  return turns.slice(-TURN_INDEX_LIMIT);
+}
 
 function enabled(ctx) {
   const setting = ctx.sessionManager.getBranch().findLast((entry) =>
@@ -136,6 +160,8 @@ export default function keepGoing(pi) {
         continuation_count: count,
         reviewer_model: `${model.provider}/${model.id}`,
         last_assistant_message: text,
+        owner_prompt: textOf(owner.message),
+        past_turns: pastTurnsFromBranch(branch, ownerIndex),
       }, "pi", { runModel: (request) => reviewWithPi(ctx, model, request, signal) });
 
       // The user may have typed, aborted, navigated, or disabled the extension

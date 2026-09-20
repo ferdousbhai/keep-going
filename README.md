@@ -16,23 +16,27 @@ redraws the image from them.
 ## How it works
 
 When the agent tries to end a turn, keep-going shows the last assistant message
-— redacted, truncated, and nothing else — to a reviewer model, which answers
-with one of:
+and the owner's request — redacted and truncated — to a reviewer model, which
+answers with one of:
 
 - `CONTINUE` — work remains that the agent can do right now.
-- `JUDGE` — it is asking the user for something more reasoning or research
-  should resolve.
+- `THINK` — more reasoning is needed; it should think this through instead of
+  stopping or asking the user.
+- `RESCAN` — the agent claims open-ended work is finished, but a fresh pass
+  could still surface more; it goes back in to scan again.
 - `STOP` — it is genuinely done, or genuinely blocked on the user.
 
-`CONTINUE` and `JUDGE` block the stop (or queue a follow-up in Pi) and send the
-agent back in with a few words the reviewer writes for the occasion. Session
-history is used only for bookkeeping, never shown to the reviewer. Any failure
+`CONTINUE` and `THINK` block the stop (or queue a follow-up in Pi) and send the
+agent back in with a short line the reviewer writes for the occasion. Ghost
+sends the owner's request on the stop payload; Claude, Codex, Grok, and Pi
+recover it from the transcript or session. Muse's stop payload has no prompt
+and no transcript, so that field is empty. Any failure
 — missing binary, timeout, unparseable verdict — accepts the stop.
 
-At most 100 continuations per owner turn. Past the cap the next stop is accepted
-without a review; over the last 10 the reviewer is asked for a line about
-landing what is in flight rather than starting something new. A new owner
-prompt starts a fresh count.
+At most 100 continuations per owner turn, rescans included. Past the cap the
+next stop is accepted without a review; over the last 10 the reviewer is asked
+for a line about landing what is in flight rather than starting something new.
+A new owner prompt starts a fresh count.
 
 Continuations are counted from the stop payload wherever it says which turn it
 belongs to: the hook keeps its own tally per session and turn under
@@ -41,6 +45,20 @@ holds on a host whose transcript cannot be read — which is also why the hook
 does something useful there at all. A plain Claude Code stop names no turn, so
 there the count comes from the transcript, read for that and nothing else.
 Pi counts follow-up entries on the active session branch instead.
+
+A fresh stop waits fifteen seconds before review; a transcript that grows in
+that window means the user was already following up, so the stop goes through
+unreviewed. Retries skip the wait, and a host with no readable transcript is
+reviewed at once. `KEEP_GOING_QUIET_MS` tunes the wait in milliseconds;
+`0` reviews immediately.
+
+The prompt covers the current turn, but the reviewer may reply `TURN n` (or
+`TURN x-y`, at most five turns) to read earlier turns' prompts and finals
+before verdicting. The hook fulfills from the transcript and re-asks, at most
+twice per stop within one time budget; anything else fails open. Sources per
+host: Claude/Codex transcripts, Grok's chat log, Ghost's pi session file,
+Pi's branch — all redacted and truncated. Muse sends no transcript, so it
+decides from the current turn alone. `KEEP_GOING_TURNS=0` disables the index.
 
 On Claude Code it reviews subagents too, on the same terms: a subagent that
 quits with work left is the failure this hook is named for. A subagent stop
@@ -87,7 +105,7 @@ One route per host: the plugin and the `npx` installer each register their own
 Stop hook, and a host with both runs the reviewer twice on every stop.
 
 These track `main`, gated by `npm run check`. To pin instead, add a git tag —
-`--ref v0.10.4` for Codex, `#v0.10.4` for `npx`, or `@v0.10.4` for Pi's Git source.
+`--ref v0.11.0` for Codex, `#v0.11.0` for `npx`, or `@v0.11.0` for Pi's Git source.
 The Claude plugin moves only when you run `claude plugin update`. There is no
 npm package.
 
@@ -110,7 +128,7 @@ Uninstall: `claude plugin uninstall keep-going`, or the same `npx` command with
 Pi loads keep-going as an extension, not as a `hooks.json` command. It reviews
 only a normal final text response, before Pi drains its follow-up queue.
 Tool turns, aborted or failed responses, and turns with queued messages are
-left alone. `CONTINUE` or `JUDGE` queues one visible custom follow-up; `STOP`
+left alone. `CONTINUE` or `THINK` queues one visible custom follow-up; `STOP`
 leaves the response alone. The reviewer is a direct, tool-free model call, so
 it cannot recursively trigger the extension.
 
@@ -140,7 +158,7 @@ the same source you installed. `npx ... --status` does not inspect Pi; use
 
 `npm run test:pi` runs end-to-end tests against an installed Pi using a local
 mock provider, with no credentials or paid model calls. It covers continuation,
-JUDGE, STOP, invalid output, reviewer overrides, duplicate installs, and the cap.
+THINK, STOP, invalid output, reviewer overrides, duplicate installs, and the cap.
 `npm run check` runs the build and unit tests without requiring Pi.
 
 ## Environment variables
@@ -157,6 +175,8 @@ JUDGE, STOP, invalid output, reviewer overrides, duplicate installs, and the cap
 | `KEEP_GOING_MUSE_MODEL` | unset; muse is run without `--model`, so it picks |
 | `KEEP_GOING_GROK_MODEL` | unset; grok is run without `--model`, so it picks |
 | `KEEP_GOING_PI_MODEL` | unset; Pi's active model; override with exact `provider/model-id` |
+| `KEEP_GOING_QUIET_MS` | `15000`; how long a fresh stop waits before review; `0` reviews immediately |
+| `KEEP_GOING_TURNS` | unset; `0` disables the past-turn index reviewers can request |
 | `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, saying which mechanism capped the turn |
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 

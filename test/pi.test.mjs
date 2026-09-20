@@ -98,7 +98,8 @@ test("Pi uses its active model and sends only the redacted final text", async (t
   assert.equal(context.tools, undefined);
   const prompt = context.messages[0].content[0].text;
   assert.match(prompt, /token=\[REDACTED\]/);
-  assert.doesNotMatch(prompt, /private-value|private owner request|private\/workspace/);
+  assert.match(prompt, /"owner_prompt":"private owner request"/);
+  assert.doesNotMatch(prompt, /private-value|private\/workspace/);
   assert.equal(options.maxTokens, 2048);
   assert.equal(options.reasoning, false);
   assert.equal(f.sent.length, 0);
@@ -108,6 +109,22 @@ test("Pi uses its active model and sends only the redacted final text", async (t
   assert.equal(row.reviewer_model, "test/active-model");
   // Native branch state replaces the standalone hook's tally.
   await assert.rejects(stat(path.join(f.root, "keep-going", "continuations.json")), { code: "ENOENT" });
+});
+
+test("Pi sends earlier turns for reviewer TURN requests", async (t) => {
+  const f = await fixture(t);
+  f.branch.unshift(
+    { id: "assistant-0", type: "message", message: { role: "assistant", content: text("First done."), stopReason: "stop" } },
+  );
+  f.branch.unshift(
+    { id: "owner-0", type: "message", message: { role: "user", content: text("First errand.") } },
+  );
+  await f.finish(reply("Second done."));
+  assert.equal(f.calls.length, 1);
+  const prompt = f.calls[0][1].messages[0].content[0].text;
+  assert.match(prompt, /Past turns, oldest first/);
+  assert.match(prompt, /1: First errand\./);
+  assert.match(prompt, /"owner_prompt":"private owner request"/);
 });
 
 test("Pi model override is exact provider/model-id, including slashes in model IDs", async (t) => {
@@ -123,9 +140,9 @@ test("Pi model override is exact provider/model-id, including slashes in model I
   assert.throws(() => reviewerModel({ ...f.ctx, model: undefined }), /No Pi model/);
 });
 
-test("CONTINUE and JUDGE queue one custom follow-up, not a new owner prompt", async (t) => {
+test("CONTINUE and THINK queue one custom follow-up, not a new owner prompt", async (t) => {
   const f = await fixture(t);
-  for (const verdict of ["CONTINUE", "JUDGE"]) {
+  for (const verdict of ["CONTINUE", "THINK"]) {
     f.review(async () => reply(`${verdict}\nWork it out first.`));
     await f.finish(reply("There is work left."));
     assert.deepEqual(f.sent, [{

@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { appendFile, chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -16,6 +16,48 @@ const CLASSIFIER_TIMEOUT_MS = 180_000;
 const CONTINUATION_CAP = 100;
 // Continuations before the cap where the nudge stops inviting new work.
 const LAST_STRETCH = 10;
+// How long the hook holds a fresh stop before reviewing it. A user who was
+// already typing a follow-up should not pay for a review of a turn they were
+// about to extend: after the wait, a transcript that grew in the meantime is
+// taken as that follow-up and the stop is let through unreviewed.
+const QUIET_DELAY_MS = 15_000;
+
+function quietDelayMs() {
+  const raw = process.env.KEEP_GOING_QUIET_MS;
+  if (raw === undefined || raw === "") return QUIET_DELAY_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return QUIET_DELAY_MS;
+  return Math.floor(parsed);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Size, not content: while the hook waits, only a new message — the user's
+// follow-up or the next turn's work — can append to the transcript.
+async function transcriptSize(transcriptPath) {
+  if (typeof transcriptPath !== "string" || !transcriptPath) return null;
+  try {
+    return (await stat(transcriptPath)).size;
+  } catch {
+    return null;
+  }
+}
+
+// Hold a fresh stop before reviewing it, so a follow-up the user was already
+// typing lets the stop through unreviewed. True when the transcript grew
+// during the wait; a retry already waited once, and a stop with no transcript
+// to watch cannot show a follow-up, so both skip the wait.
+async function followedUpDuringQuietWait(input, delay) {
+  const quietMs = quietDelayMs();
+  if (quietMs <= 0 || input.stop_hook_active || input.stopHookActive) return false;
+  const before = await transcriptSize(input.transcript_path);
+  if (before === null) return false;
+  await (delay ?? sleep)(quietMs);
+  const after = await transcriptSize(input.transcript_path);
+  return after !== null && after > before;
+}
 
 // Everything that differs per host, keyed once: the inputs it must supply, the
 // directory its state belongs under, the directories its transcripts may live
@@ -38,6 +80,8 @@ const RUNTIMES = {
   codex: {
     requires: ["turn_id", "session_id"],
     state: xdgStateHome,
+    roots: () => [path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "sessions")],
+    ownerPrompt: codexOwnerPrompt,
     run: runCodexModel,
   },
   claude: {
@@ -45,6 +89,7 @@ const RUNTIMES = {
     state: xdgStateHome,
     roots: () => [path.join(process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), ".claude"), "projects")],
     count: claudeContinuations,
+    ownerPrompt: claudeOwnerPrompt,
     run: runClaudeModel,
   },
   ghost: {
@@ -73,6 +118,8 @@ const RUNTIMES = {
   grok: {
     requires: ["session_id"],
     state: xdgStateHome,
+    roots: () => [path.join(process.env.GROK_HOME || path.join(homedir(), ".grok"), "sessions")],
+    ownerPrompt: grokOwnerPrompt,
     run: runGrokModel,
   },
 };
@@ -85,7 +132,6 @@ const VERDICTS = {
   CONTINUE: {
     blocks: true,
     describe: "required work remains that the agent can perform now.",
-    directive: "push it onward",
     // Rotated rather than fixed: a hundred continuations carrying one identical
     // sentence read to the agent like a stuck loop instead of a push.
     fallbacks: [
@@ -95,18 +141,29 @@ const VERDICTS = {
       "There is still work left here. Keep going.",
     ],
   },
-  JUDGE: {
+  THINK: {
     blocks: true,
-    describe: "it asks the user for input, but more reasoning or research should resolve it.",
-    directive: "tell it not to ask the user yet",
-    // Not CONTINUE's lines. The whole of JUDGE is "do not ask yet", and a
-    // dropped reviewer line would otherwise answer a question the agent put to
-    // the user with "keep going" — which is no reason not to ask it again.
+    describe: "more reasoning is needed; it should think this through instead of stopping or asking the user.",
+    // Not CONTINUE's lines. THINK is "reason further", and a dropped reviewer
+    // line would otherwise answer a question the agent put to the user with
+    // "keep going" — which is no reason not to ask it again.
     fallbacks: [
+      "Think it through. Keep going.",
       "Do not ask yet \u2014 work it out first.",
       "You can answer this one yourself. Keep going.",
       "Research it before handing it back. Keep going.",
-      "Settle this without the user. Keep going.",
+    ],
+  },
+  RESCAN: {
+    blocks: true,
+    describe: "the agent claims open-ended work is done, but a fresh pass could still surface more.",
+    // A rescan nudge names the one remaining move: look again, then report.
+    // It never restates the task, so a dropped line still reads as a push.
+    fallbacks: [
+      "Do a fresh scan for anything left.",
+      "Scan once more before you finish.",
+      "One more full pass, then report.",
+      "Look again with fresh eyes.",
     ],
   },
   STOP: {
@@ -134,35 +191,56 @@ const REVIEW_VERDICT_PATTERN = new RegExp(
 // "CONTINUE." as its encouragement.
 const VERDICT_ECHO = new RegExp(`^(?:${VERDICT_ALTERNATION})${VERDICT_SEPARATOR}`);
 
-// A few words. The inspiration for this hook was a person typing "keep going"
-// and "believe in yourself" for a day and a half, so a paragraph is the wrong
-// register even when it is correct. A line over the limit is dropped rather
-// than truncated, and the fallbacks are the same handful of words, so a drop
-// costs tone, not much else.
-const NUDGE_LIMIT = 60;
+// The reviewer's line reaches the agent verbatim, so it is bounded — but
+// truncated, not dropped, so a pointed line keeps its point.
+const NUDGE_LIMIT = 500;
 
-const REVIEW_PROMPT = `A coding agent just tried to end its turn. Its final message is
+// History lookup the reviewer can request before verdicting. The reviewer
+// stays tool-free: it replies TURN n (or TURN x-y) and the hook fulfills the
+// request from its own transcript readers, then asks again. Past turns only —
+// the current turn is already in the prompt — numbered 1 for the oldest, with
+// -1 meaning the previous turn.
+const TURN_INDEX_LIMIT = 20;
+const TURN_INDEX_CHARS = 100;
+const TURNS_PER_REQUEST = 5;
+const TURN_REQUESTS_MAX = 2;
+const TURN_OWNER_CHARS = 2_000;
+const TURN_FINAL_CHARS = 4_000;
+// The whole loop shares one budget so two slow reviewers cannot stack past
+// the hook timeout that hosts enforce above this process.
+const REVIEW_BUDGET_MS = 200_000;
+const REVIEW_CALL_FLOOR_MS = 15_000;
+
+function turnsEnabled() {
+  return process.env.KEEP_GOING_TURNS !== "0";
+}
+
+const REVIEW_PROMPT = `An agent just tried to end its turn. Its final message is
 last_assistant_message. Decide whether the turn is really over.
 
 ${VERDICT_NAMES.map((name) => `${name} — ${VERDICTS[name].describe}`).join("\n")}
 
-Prefer JUDGE over STOP when the request for input looks self-resolvable by the agent.
+Prefer THINK over STOP when the request for input looks self-resolvable by the agent.
 Do not default to any outcome or invent unstated work.
 
-When owner_prompt is present, it is the owner's request this turn. STOP if
-last_assistant_message already fulfills it.
+Prefer RESCAN over STOP when the message claims open-ended work is done —
+finding every issue, fixing them all, cleaning up — and a fresh pass could
+surface more. Tell it to scan once more and report what the scan found. STOP
+when the message already reports such a rescan with nothing left, or when the
+work is complete on any other terms.
+
+owner_prompt is the owner's request this turn. STOP if last_assistant_message
+already fulfills it.
 
 Reply with the verdict word alone on the first line: ${listVerdicts(VERDICT_NAMES)}.
 For ${listVerdicts(ENDING_VERDICTS)}, stop there. For ${listVerdicts(BLOCKING_VERDICTS)}, add one more
 line: it reaches the agent verbatim, as the whole reason its turn was not
 allowed to end.
 
-Use as few words as you can, under ${NUDGE_LIMIT} characters — "Keep going.",
-"Believe in yourself.", "Don't ask yet — you can work this out." Speak to the
-agent. Name no task, file, command, or requirement its message did not already
-state. A longer line is discarded for a generic one.
-
-${BLOCKING_VERDICTS.map((name) => `After ${name}, ${VERDICTS[name].directive}.`).join(" ")}`;
+Write one short sentence — "Keep going.", "Believe in yourself.", "Don't
+ask yet — you can work this out." Speak to the agent. Name no task, file,
+command, or requirement its message did not already state. A longer line is
+truncated at ${NUDGE_LIMIT} characters.`;
 
 // No host is given a model it did not choose, so the flag is absent unless the
 // variable names one.
@@ -335,6 +413,243 @@ async function claudeContinuations(input) {
     }
   }
   return count;
+}
+
+function lastGenuinePrompt(text) {
+  const trimmed = typeof text === "string" ? text.trim() : "";
+  if (!trimmed || isInjectedContext(trimmed) || HOOK_PROMPT_PATTERN.test(trimmed)) return "";
+  return trimmed;
+}
+
+// Each owner-prompt reader keeps the last genuine prompt in its transcript;
+// records that match nothing contribute nothing.
+async function lastTranscriptMatch(transcriptPath, pick) {
+  let last = "";
+  for await (const record of jsonLines(transcriptPath)) {
+    const text = pick(record);
+    if (text) last = text;
+  }
+  return last;
+}
+
+async function claudeOwnerPrompt(input) {
+  return lastTranscriptMatch(await allowedTranscriptPath(input, "claude"), (record) => {
+    const message = claudeUserMessage(record);
+    return message?.genuine ? lastGenuinePrompt(message.text) : "";
+  });
+}
+
+async function codexOwnerPrompt(input) {
+  const turnId = input.turn_id;
+  return lastTranscriptMatch(await allowedTranscriptPath(input, "codex"), (record) => {
+    const payload = record?.payload;
+    if (record?.type !== "response_item" || payload?.type !== "message" || payload?.role !== "user") return "";
+    if (turnId && payload.internal_chat_message_metadata_passthrough?.turn_id !== turnId) return "";
+    return lastGenuinePrompt(messageText(payload));
+  });
+}
+
+function grokQueryText(record) {
+  const raw = messageText(record);
+  const tagged = raw.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/);
+  return lastGenuinePrompt(tagged ? tagged[1] : raw);
+}
+
+async function grokOwnerPrompt(input) {
+  const updates = await allowedTranscriptPath(input, "grok");
+  const sessionDir = path.dirname(updates);
+  const cwdDir = path.dirname(sessionDir);
+  const sessionId = input.session_id;
+  try {
+    const last = await lastTranscriptMatch(path.join(cwdDir, "prompt_history.jsonl"), (record) => {
+      if (record?.is_bash) return "";
+      if (sessionId && record?.session_id && record.session_id !== sessionId) return "";
+      return typeof record?.prompt === "string" ? record.prompt.trim() : "";
+    });
+    if (last) return last;
+  } catch {
+    // prompt_history is the typed prompt; chat_history is the fallback wrap.
+  }
+  try {
+    return await lastTranscriptMatch(path.join(sessionDir, "chat_history.jsonl"), (record) =>
+      record?.type !== "user" || record.synthetic_reason ? "" : grokQueryText(record));
+  } catch {
+    return "";
+  }
+}
+
+async function resolveOwnerPrompt(input, runner) {
+  const fromPayload = typeof input.owner_prompt === "string" ? input.owner_prompt.trim() : "";
+  if (fromPayload) return fromPayload;
+  // A subagent stop carries the parent's transcript; that is the parent's request.
+  const recover = RUNTIMES[runner].ownerPrompt;
+  if (!recover || input.agent_id) return "";
+  try {
+    return (await recover(input)).trim();
+  } catch {
+    return "";
+  }
+}
+
+// Past turns per harness, oldest first, current turn excluded. Every reader
+// is best-effort: what it cannot parse is a turn the reviewer never hears
+// about. Only the owner's prompt and the turn's final assistant text are
+// kept — tool calls, reasoning, and hook feedback never leave the file.
+async function readTurns(file, classify) {
+  const segments = [];
+  let current = null;
+  for await (const record of jsonLines(file)) {
+    const turn = classify(record);
+    if (!turn) continue;
+    if (turn.open === undefined) {
+      if (current && turn.final) current.final = turn.final;
+    } else if (current && !current.owner && turn.open) {
+      // A turn_context marker opens an empty head; its user message fills
+      // it, so the marker and the message stay one turn.
+      current.owner = turn.open;
+    } else {
+      current = { owner: turn.open, final: "" };
+      if (turn.id !== undefined) current.id = turn.id;
+      segments.push(current);
+    }
+  }
+  return segments;
+}
+
+function claudeTurn(record) {
+  if (record?.type === "assistant" && record.message?.role === "assistant") {
+    const text = messageText(record.message).trim();
+    return text ? { final: text } : null;
+  }
+  const message = claudeUserMessage(record);
+  if (!message?.genuine) return null;
+  const owner = lastGenuinePrompt(message.text);
+  return owner ? { open: owner } : null;
+}
+
+function grokTurn(record) {
+  if (record?.type === "user" && !record.synthetic_reason) {
+    const text = grokQueryText(record);
+    // Prompt recovery falls back to prompt_history; the chat log's injected
+    // blocks (<user_info> and friends) carry no request to index.
+    return text && !text.startsWith("<") ? { open: text } : null;
+  }
+  if (record?.type === "assistant") {
+    const raw = record.content;
+    const text = (typeof raw === "string" ? raw : messageText(record)).trim();
+    return text ? { final: text } : null;
+  }
+  return null;
+}
+
+function ghostTurn(record) {
+  // Turns segment the way the daemon itself does: user-role messages open
+  // them (agent echoes excluded). Custom entries — hook context, nudges,
+  // imports — never open a turn.
+  if (record?.type !== "message") return null;
+  const message = record.message;
+  if (message?.role === "user" && message.attribution !== "agent") {
+    const text = lastGenuinePrompt(messageText(message));
+    return text && !HOOK_PROMPT_PATTERN.test(text) ? { open: text } : null;
+  }
+  if (message?.role === "assistant" && message.stopReason !== "toolUse") {
+    const text = messageText(message).trim();
+    return text ? { final: text } : null;
+  }
+  return null;
+}
+
+async function claudePastTurns(input) {
+  // A subagent stop carries the parent's transcript, not the subagent's turns.
+  if (input.agent_id) return [];
+  const segments = await readTurns(await allowedTranscriptPath(input, "claude"), claudeTurn);
+  return segments.slice(0, -1);
+}
+
+function codexTurn(record) {
+  if (record?.type === "turn_context" && typeof record.payload?.turn_id === "string") {
+    return { open: "", id: record.payload.turn_id };
+  }
+  const payload = record?.type === "response_item" ? record.payload : null;
+  if (payload?.type !== "message") return null;
+  if (payload.role === "user") {
+    const text = lastGenuinePrompt(messageText(payload));
+    // A past continuation's hook feedback would otherwise overwrite the
+    // turn's real request; it is feedback, not a prompt.
+    return text && !HOOK_PROMPT_PATTERN.test(text) ? { open: text } : null;
+  }
+  if (payload.role === "assistant") {
+    const text = messageText(payload).trim();
+    return text ? { final: text } : null;
+  }
+  return null;
+}
+
+async function codexPastTurns(input) {
+  const segments = await readTurns(await allowedTranscriptPath(input, "codex"), codexTurn);
+  const named = segments.filter((segment) => segment.owner);
+  let currentIndex = named.length - 1;
+  if (typeof input.turn_id === "string" && input.turn_id) {
+    const found = named.findLastIndex((segment) => segment.id === input.turn_id);
+    if (found >= 0) currentIndex = found;
+  }
+  return named.slice(0, currentIndex).map(({ owner, final }) => ({ owner, final }));
+}
+
+async function grokPastTurns(input) {
+  const updates = await allowedTranscriptPath(input, "grok");
+  const segments = await readTurns(path.join(path.dirname(updates), "chat_history.jsonl"), grokTurn);
+  return segments.slice(0, -1);
+}
+
+async function ghostPastTurns(input) {
+  // Ghost hands the hook the runtime's own pi session file as the transcript.
+  if (typeof input.transcript_path !== "string" || !input.transcript_path) return [];
+  let file;
+  try {
+    file = await realpath(input.transcript_path);
+  } catch {
+    return [];
+  }
+  const segments = await readTurns(file, ghostTurn);
+  return segments.slice(0, -1);
+}
+
+function piPastTurns(input) {
+  // The extension owns the branch, so it sends the turns down with the stop
+  // instead of the hook re-reading a file it cannot see.
+  if (!Array.isArray(input.past_turns)) return [];
+  return input.past_turns
+    .filter((turn) =>
+      turn && typeof turn.owner_prompt === "string" && turn.owner_prompt.trim() &&
+      typeof turn.final_response === "string",
+    )
+    .map((turn) => ({ owner: turn.owner_prompt, final: turn.final_response }))
+    .slice(-TURN_INDEX_LIMIT);
+}
+
+async function listPastTurns(input, runner) {
+  if (!turnsEnabled()) return [];
+  try {
+    switch (runner) {
+      case "claude":
+        return (await claudePastTurns(input)).slice(-TURN_INDEX_LIMIT);
+      case "codex":
+        return (await codexPastTurns(input)).slice(-TURN_INDEX_LIMIT);
+      case "grok":
+        return (await grokPastTurns(input)).slice(-TURN_INDEX_LIMIT);
+      case "ghost":
+        return (await ghostPastTurns(input)).slice(-TURN_INDEX_LIMIT);
+      case "pi":
+        return piPastTurns(input);
+      default:
+        // Muse sends no transcript, so there is nothing to index: the review
+        // runs exactly as it did before turns existed.
+        return [];
+    }
+  } catch {
+    return [];
+  }
 }
 
 // The cap is the only thing between a stuck reviewer and a hundred turns of
@@ -775,11 +1090,50 @@ async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
 }
 
 // The reviewer's own words carry into the agent's next turn, so they are
-// redacted, flattened to one line, and dropped whole if they outgrow a sentence.
+// redacted, flattened to one line, and truncated to the budget. An empty
+// line still falls back to a generic one.
 function sanitizeNudge(value) {
+  return oneLine(value, NUDGE_LIMIT).trimEnd();
+}
+
+const TURN_REQUEST_PATTERN = /^TURN\s+(-?\d+)(?:\s*-\s*(-?\d+))?\s*$/i;
+
+// A history request names past turns 1-based, oldest first; negative counts
+// back from the previous turn, so -1 is the turn just before this one. Out
+// of range, backwards beyond a swap, or wider than the per-request cap is
+// not a request at all: the output fails open as a bad verdict instead.
+function parseTurnRequest(text, count) {
+  const match = TURN_REQUEST_PATTERN.exec(String(text ?? "").trim());
+  if (!match) return null;
+  const at = (n) => (n < 0 ? count + n + 1 : n);
+  let start = at(Number(match[1]));
+  let end = match[2] === undefined ? start : at(Number(match[2]));
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+  if (start > end) [start, end] = [end, start];
+  if (start < 1 || end > count || end - start + 1 > TURNS_PER_REQUEST) return null;
+  return { start, end };
+}
+
+function oneLine(value, limit) {
   const line = redactSensitive(String(value ?? "")).replace(/\s+/g, " ").trim();
-  if (!line || line.length > NUDGE_LIMIT) return "";
-  return line;
+  return line.length <= limit ? line : line.slice(0, limit);
+}
+
+function turnIndexSection(turns) {
+  const lines = turns.map((turn, index) =>
+    `${index + 1}: ${oneLine(turn.owner, TURN_INDEX_CHARS) || "(no prompt recorded)"}`);
+  return [
+    `Past turns, oldest first. To read full text before verdicting, reply TURN n or TURN x-y (at most ${TURNS_PER_REQUEST} turns), e.g. TURN ${turns.length}. Then verdict as usual.`,
+    ...lines,
+  ].join("\n");
+}
+
+function formatTurns(turns, { start, end }) {
+  return turns.slice(start - 1, end).map((turn, index) => [
+    `Turn ${start + index}`,
+    `owner_prompt: ${compactText(turn.owner, TURN_OWNER_CHARS)}`,
+    `final_response: ${compactText(turn.final, TURN_FINAL_CHARS) || "(none)"}`,
+  ].join("\n")).join("\n\n");
 }
 
 function parseReviewVerdict(text) {
@@ -866,7 +1220,7 @@ async function recordedContinuations(input, runner) {
   return tally[turnKey(input)]?.count ?? 0;
 }
 
-async function handleStop(input, runner = "codex", { runModel } = {}) {
+async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
   if (await yieldsToGrokNative(runner)) return {};
   runner = resolveRunner(runner);
   const runtime = RUNTIMES[runner];
@@ -875,6 +1229,15 @@ async function handleStop(input, runner = "codex", { runModel } = {}) {
     if (typeof input[key] !== "string" || !input[key]) {
       throw new Error(`Stop input is missing ${key}`);
     }
+  }
+  if (await followedUpDuringQuietWait(input, delay)) {
+    await recordTurnState(input, runner, false);
+    await recordReviewAudit(input, runner, {
+      verdict: "STOP",
+      reason: "user followed up during quiet wait",
+      countedBy: "quiet-wait",
+    });
+    return {};
   }
   // Every exit below that lets the stop through ends the turn, and ending a
   // turn is what clears the tally. Missing one is how the cap gets disarmed:
@@ -894,7 +1257,7 @@ async function handleStop(input, runner = "codex", { runModel } = {}) {
     };
   }
 
-  const ownerPrompt = typeof input.owner_prompt === "string" ? input.owner_prompt.trim() : "";
+  const ownerPrompt = await resolveOwnerPrompt(input, runner);
   if (ownerPrompt && lastMessageFulfillsOwnerPrompt(ownerPrompt, lastAssistantMessage)) {
     await recordTurnState(input, runner, false);
     await recordReviewAudit(input, runner, {
@@ -910,11 +1273,9 @@ async function handleStop(input, runner = "codex", { runModel } = {}) {
   let countedBy = runtime.state ? "tally" : "session";
   const named = payloadTurn(input);
   try {
-    // A transcript is read only by a host whose payload leaves the turn
-    // unidentified, and then only to count: its content never reaches the
-    // reviewer. Where it is read it is exact, so it replaces the tally both
-    // here and in what the tally is left holding. A subagent names its turn,
-    // and its parent's transcript holds the parent's messages regardless.
+    // A transcript is read to count when the payload leaves the turn unnamed,
+    // and to recover owner_prompt when the host does not send it. A subagent
+    // names its turn, and its parent's transcript holds the parent's messages.
     if (!named && runtime.count && typeof input.transcript_path === "string" && input.transcript_path) {
       try {
         continuations = await runtime.count(input);
@@ -936,16 +1297,41 @@ async function handleStop(input, runner = "codex", { runModel } = {}) {
 
     const run = runModel ?? runtime.run;
     if (!run) throw new Error(`${runner} review requires its native extension`);
-    review = parseReviewVerdict(
-      await run({
-        prompt: `${reviewPrompt(continuations)}\n\n${JSON.stringify({
-          last_assistant_message: lastAssistantMessage,
-          ...(ownerPrompt ? { owner_prompt: compactText(ownerPrompt, 12_000) } : {}),
-        })}`,
-        timeoutMs: CLASSIFIER_TIMEOUT_MS,
+    // Past turns ride along only when there are any: the index tells the
+    // reviewer what it may ask for, and a harness with no readable history
+    // reviews exactly as before.
+    const pastTurns = await listPastTurns(input, runner);
+    let reviewerPrompt = `${reviewPrompt(continuations)}\n\n${JSON.stringify({
+      last_assistant_message: lastAssistantMessage,
+      owner_prompt: compactText(ownerPrompt, 12_000),
+    })}`;
+    if (pastTurns.length) reviewerPrompt += `\n\n${turnIndexSection(pastTurns)}`;
+    const loopStart = Date.now();
+    let turnRequests = 0;
+    for (;;) {
+      const remaining = REVIEW_BUDGET_MS - (Date.now() - loopStart);
+      if (remaining < REVIEW_CALL_FLOOR_MS) {
+        throw new Error(`review budget (${REVIEW_BUDGET_MS} ms) spent before a verdict`);
+      }
+      const raw = await run({
+        prompt: reviewerPrompt,
+        timeoutMs: Math.min(CLASSIFIER_TIMEOUT_MS, remaining),
         ghostHome: input.ghost_home,
-      }),
-    );
+      });
+      try {
+        review = parseReviewVerdict(raw);
+        break;
+      } catch (verdictError) {
+        // Not a verdict: the one other legal move is asking for history. Ways
+        // of asking that name nothing readable fail open as a bad verdict.
+        const request = pastTurns.length && turnRequests < TURN_REQUESTS_MAX
+          ? parseTurnRequest(raw, pastTurns.length)
+          : null;
+        if (!request) throw verdictError;
+        reviewerPrompt += `\n\n${formatTurns(pastTurns, request)}\n\nVerdict now, with the turns above in mind.`;
+        turnRequests += 1;
+      }
+    }
   } catch (error) {
     // Failing open lets the stop through, so it ends the turn like any other
     // accepted stop. This is the path a reviewer timeout takes — the stuck
@@ -986,6 +1372,9 @@ if (import.meta.url === entry) await main();
 export {
   BLOCKING_VERDICTS,
   CONTINUATION_CAP,
+  TURN_INDEX_LIMIT,
+  QUIET_DELAY_MS,
+  quietDelayMs,
   REVIEW_PROMPT,
   VERDICTS,
   NUDGE_LIMIT,
@@ -995,8 +1384,13 @@ export {
   reviewPrompt,
   handleStop,
   hookOutputForVerdict,
+  listPastTurns,
   parseReviewVerdict,
+  parseTurnRequest,
+  turnIndexSection,
+  formatTurns,
   resolveRunner,
   yieldsToGrokNative,
   lastMessageFulfillsOwnerPrompt,
+  resolveOwnerPrompt,
 };

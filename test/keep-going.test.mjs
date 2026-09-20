@@ -12,16 +12,23 @@ import {
   VERDICTS,
   LAST_STRETCH,
   NUDGE_LIMIT,
+  QUIET_DELAY_MS,
+  quietDelayMs,
   REVIEW_PROMPT,
   claudeContinuations,
   recordedContinuations,
   reviewPrompt,
   handleStop,
   hookOutputForVerdict,
+  listPastTurns,
   parseReviewVerdict,
+  parseTurnRequest,
+  turnIndexSection,
+  formatTurns,
   resolveRunner,
   yieldsToGrokNative,
   lastMessageFulfillsOwnerPrompt,
+  resolveOwnerPrompt,
 } from "../src/keep-going.mjs";
 import { HOOK_FILES, VERSIONED, hookFile, stampVersion } from "../scripts/build.mjs";
 
@@ -38,8 +45,11 @@ const ENV_KEYS = [
   "KEEP_GOING_GROK_MODEL",
   "KEEP_GOING_MUSE_BIN",
   "KEEP_GOING_MUSE_MODEL",
+  "KEEP_GOING_QUIET_MS",
+  "KEEP_GOING_TURNS",
   "GROK_HOOK_EVENT",
   "GROK_HOME",
+  "CODEX_HOME",
   "MOCK_CALL_LOG",
   "MOCK_REVIEW_RESPONSE",
   "MOCK_REVIEW_PAD",
@@ -154,6 +164,10 @@ writeFileSync(output, value);
   process.env.MOCK_CALL_LOG = callLog;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
   process.env.XDG_STATE_HOME = path.join(root, "state");
+  process.env.CODEX_HOME = path.join(root, "codex");
+  // The quiet wait holds a fresh stop briefly; fixtures opt out so the
+  // suite stays fast, and the wait itself is covered by its own tests below.
+  process.env.KEEP_GOING_QUIET_MS = "0";
 
   return {
     input: {
@@ -246,6 +260,7 @@ if (pad > 0) process.stdout.write("y".repeat(pad));
   process.env.MOCK_CALL_LOG = callLog;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
   process.env.XDG_STATE_HOME = path.join(root, "state");
+  process.env.KEEP_GOING_QUIET_MS = "0";
 
   return {
     input: {
@@ -288,6 +303,7 @@ process.stdout.write(JSON.stringify({ text: process.env.MOCK_REVIEW_RESPONSE }))
   process.env.MOCK_CALL_LOG = callLog;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
   process.env.XDG_STATE_HOME = path.join(root, "state");
+  process.env.KEEP_GOING_QUIET_MS = "0";
 
   return {
     input: {
@@ -365,10 +381,27 @@ test("STOP accepts the stop", { concurrency: false }, async () => {
     assert.ok(calls[0].args.includes('model_reasoning_effort="none"'));
     assert.ok(!calls[0].args.includes("--output-schema"));
     assert.match(calls[0].prompt, /"last_assistant_message":"Candidate final response\."/);
-    assert.doesNotMatch(calls[0].prompt, /Build it now|supersecretvalue|tool_events|project_context/);
+    assert.match(calls[0].prompt, /"owner_prompt":"Build it now. token=\[REDACTED\]"/);
+    assert.doesNotMatch(calls[0].prompt, /supersecretvalue|tool_events|project_context/);
     const audit = JSON.parse((await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8")).trim());
     assert.equal(audit.verdict, "STOP");
     assert.equal(audit.rationale, "");
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("RESCAN blocks with a fresh-scan nudge", { concurrency: false }, async () => {
+  const context = await fixture();
+  try {
+    const output = await handleStop(context.input, "codex", {
+      runModel: async () => "RESCAN\nScan once more for leftovers.",
+    });
+    assert.deepEqual(output, { decision: "block", reason: "Scan once more for leftovers." });
+    const bare = await handleStop({ ...context.input, turn_id: "turn-rescan" }, "codex", {
+      runModel: async () => "RESCAN",
+    });
+    assert.deepEqual(bare, { decision: "block", reason: VERDICTS.RESCAN.fallbacks[0] });
   } finally {
     await context.cleanup();
   }
@@ -382,6 +415,7 @@ test("last_assistant_message is reviewed when the transcript is unavailable", { 
     assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
     const [call] = await context.calls();
     assert.match(call.prompt, /"last_assistant_message":"Candidate final response\."/);
+    assert.match(call.prompt, /"owner_prompt":""/);
   } finally {
     await context.cleanup();
   }
@@ -401,9 +435,9 @@ test("a missing reviewer executable fails open and clears the turn tally", async
 test("invalid reviewer verdict fails open", { concurrency: false }, async () => {
   const context = await fixture();
   try {
-    process.env.MOCK_REVIEW_RESPONSE = "JUDGE_ADVISOR";
+    process.env.MOCK_REVIEW_RESPONSE = "THINK_ADVISOR";
     const output = await handleStop(context.input);
-    assert.match(output.systemMessage, /begin with CONTINUE, JUDGE, or STOP/);
+    assert.match(output.systemMessage, /begin with CONTINUE, THINK, RESCAN, or STOP/);
   } finally {
     await context.cleanup();
   }
@@ -430,6 +464,7 @@ test("Claude counting starts at the last genuine prompt and counts only hook fee
     await appendRecords(context.input.transcript_path, additions);
 
     assert.equal(await claudeContinuations(context.input), 1);
+    assert.equal(await resolveOwnerPrompt(context.input, "claude"), "Do one more thing.");
   } finally {
     await context.cleanup();
   }
@@ -464,7 +499,8 @@ test("Claude classifies with no tools and the lowest advertised effort", { concu
     assert.ok(!call.args.includes("--max-turns"));
     assert.match(call.prompt, /Reply with the verdict word alone/);
     assert.match(call.prompt, /"last_assistant_message":"Candidate final response\."/);
-    assert.doesNotMatch(call.prompt, /Build it now|supersecretvalue|tool_events|project_context/);
+    assert.match(call.prompt, /"owner_prompt":"Build it now. token=\[REDACTED\]"/);
+    assert.doesNotMatch(call.prompt, /supersecretvalue|tool_events|project_context/);
   } finally {
     await context.cleanup();
   }
@@ -577,9 +613,9 @@ test("Ghost accepts a stop whose last message is the exact required reply", { co
 test("Ghost delegates classification to its smol-model bridge", { concurrency: false }, async () => {
   const context = await ghostFixture();
   try {
-    process.env.MOCK_REVIEW_RESPONSE = "JUDGE";
+    process.env.MOCK_REVIEW_RESPONSE = "THINK";
     const output = await handleStop(context.input, "ghost");
-    assert.deepEqual(output, { decision: "block", reason: VERDICTS.JUDGE.fallbacks[0] });
+    assert.deepEqual(output, { decision: "block", reason: VERDICTS.THINK.fallbacks[0] });
     const [call] = await context.calls();
     assert.deepEqual(call.args, ["hook-smol-complete"]);
     assert.equal(call.input.ghost_home, context.input.ghost_home);
@@ -592,11 +628,11 @@ test("Ghost delegates classification to its smol-model bridge", { concurrency: f
 });
 
 test("verdict parsing accepts only the exact review enum", () => {
-  for (const verdict of ["CONTINUE", "JUDGE", "STOP"]) {
+  for (const verdict of ["CONTINUE", "THINK", "RESCAN", "STOP"]) {
     assert.deepEqual(parseReviewVerdict(` ${verdict}\n`), { verdict, nudge: "" });
   }
-  for (const invalid of ["continue", "CONSULT", "JUDGE_ADVISOR", "{}", "", null, undefined]) {
-    assert.throws(() => parseReviewVerdict(invalid), /begin with CONTINUE, JUDGE, or STOP/);
+  for (const invalid of ["continue", "CONSULT", "THINK_ADVISOR", "JUDGE", "RESCAN_NOW", "{}", "", null, undefined]) {
+    assert.throws(() => parseReviewVerdict(invalid), /begin with CONTINUE, THINK, RESCAN, or STOP/);
   }
   assert.deepEqual(
     parseReviewVerdict("I'll check the session state.\nSTOP"),
@@ -628,12 +664,12 @@ test("a verdict answered twice is still one verdict", () => {
     nudge: "Keep going.",
   });
   // Widening the boundary must not start accepting a longer word.
-  for (const invalid of ["CONTINUEX", "JUDGE_ADVISOR", "continue"]) {
+  for (const invalid of ["CONTINUEX", "THINK_ADVISOR", "JUDGE", "continue"]) {
     assert.throws(() => parseReviewVerdict(invalid));
   }
 });
 
-test("the reviewer's own line is carried through, sanitised, or dropped", () => {
+test("the reviewer's own line is carried through, sanitised, or truncated", () => {
   // The reviewer writes the whole blocking message, so a line that arrives
   // unusable has to fall back rather than ship empty.
   const { verdict, nudge } = parseReviewVerdict(
@@ -641,7 +677,7 @@ test("the reviewer's own line is carried through, sanitised, or dropped", () => 
   );
   assert.equal(verdict, "CONTINUE");
   assert.equal(nudge, "Three files into the rename and the last one is small.");
-  // Both blocking verdicts ship this line and nothing else: JUDGE's fixed
+  // Both blocking verdicts ship this line and nothing else: THINK's fixed
   // preamble is gone, so the reviewer writes the whole message either way.
   for (const blocking of BLOCKING_VERDICTS) {
     assert.deepEqual(hookOutputForVerdict(blocking, 0, nudge), { decision: "block", reason: nudge });
@@ -658,11 +694,14 @@ test("the reviewer's own line is carried through, sanitised, or dropped", () => 
     /token=\[REDACTED\]/,
   );
 
-  // A speech rather than a sentence is dropped whole: truncating would leave a
-  // broken clause, and the reviewer never saw the transcript to begin with.
-  const long = "go on and on ".repeat(30);
+  // A speech rather than a sentence is truncated to the budget, keeping its
+  // point instead of falling back to a generic line.
+  const long = "go on and on ".repeat(60);
   assert.ok(long.length > NUDGE_LIMIT);
-  assert.equal(parseReviewVerdict(`CONTINUE\n${long}`).nudge, "");
+  const kept = parseReviewVerdict(`CONTINUE\n${long}`).nudge;
+  assert.ok(kept.length <= NUDGE_LIMIT);
+  assert.ok(kept.startsWith("go on and on"));
+  assert.notEqual(kept, VERDICTS.CONTINUE.fallbacks[0]);
   assert.deepEqual(hookOutputForVerdict("CONTINUE", 0, ""), {
     decision: "block",
     reason: VERDICTS.CONTINUE.fallbacks[0],
@@ -678,9 +717,9 @@ test("the fallback line rotates and the last stretch asks for a landing", () => 
   assert.deepEqual(reasons, VERDICTS.CONTINUE.fallbacks);
   assert.equal(new Set(reasons).size, VERDICTS.CONTINUE.fallbacks.length);
 
-  // A dropped JUDGE line must not degrade into CONTINUE: the whole of the
-  // verdict is "do not ask yet", and the agent has just asked the user.
-  const shared = VERDICTS.JUDGE.fallbacks.filter((line) => VERDICTS.CONTINUE.fallbacks.includes(line));
+  // A dropped THINK line must not degrade into CONTINUE: the whole of the
+  // verdict is "think it through", and the agent has just asked the user.
+  const shared = VERDICTS.THINK.fallbacks.filter((line) => VERDICTS.CONTINUE.fallbacks.includes(line));
   assert.deepEqual(shared, []);
 
   // Only this side knows the cap, so it reaches the reviewer the way every
@@ -705,11 +744,9 @@ test("the hook never asks for a register it does not keep itself", () => {
   for (const spec of Object.values(VERDICTS)) {
     for (const line of spec.fallbacks ?? []) assert.ok(line.length <= NUDGE_LIMIT, line);
   }
-  // Each verdict the parser accepts has to be a verdict the prompt asks for,
-  // and each blocking one has to tell the reviewer what to write after it.
-  for (const [verdict, spec] of Object.entries(VERDICTS)) {
+  // Each verdict the parser accepts has to be a verdict the prompt asks for.
+  for (const verdict of Object.keys(VERDICTS)) {
     assert.match(REVIEW_PROMPT, new RegExp(`^${verdict} \\u2014 `, "m"));
-    if (spec.blocks) assert.ok(REVIEW_PROMPT.includes(`After ${verdict}, ${spec.directive}.`));
   }
 });
 
@@ -740,6 +777,7 @@ process.stdout.write(process.env.MOCK_REVIEW_RESPONSE + "\\n");
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
   process.env.XDG_STATE_HOME = path.join(root, "state");
   process.env.GROK_HOME = path.join(root, "grok-home");
+  process.env.KEEP_GOING_QUIET_MS = "0";
 
   return {
     // The payload Grok's native Stop hook actually sends, spelling intact.
@@ -796,6 +834,7 @@ process.stdout.write(process.env.MOCK_REVIEW_RESPONSE);
   process.env.MOCK_CALL_LOG = callLog;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
   process.env.XDG_STATE_HOME = path.join(root, "state");
+  process.env.KEEP_GOING_QUIET_MS = "0";
 
   return {
     // The payload Muse's native Stop hook actually sends, spelling intact.
@@ -868,7 +907,7 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", { co
     assert.equal(call.args[call.args.indexOf("--effort") + 1], "low");
     assert.equal(
       call.args[call.args.indexOf("--system-prompt-override") + 1],
-      "Reply with exactly one of CONTINUE, JUDGE, or STOP as the first line. No preamble, no analysis.",
+      "Reply with exactly one of CONTINUE, THINK, RESCAN, or STOP as the first line. No preamble, no analysis.",
     );
     assert.equal(call.args[call.args.indexOf("--permission-mode") + 1], "dontAsk");
     assert.match(call.args[call.args.indexOf("--single") + 1], /Candidate final response\./);
@@ -883,6 +922,29 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", { co
     assert.equal(row.counted_by, "tally");
     assert.equal(await recordedContinuations(context.input, "grok"), 1);
     assert.ok(!call.args.includes("--model"));
+    assert.match(call.args[call.args.indexOf("--single") + 1], /"owner_prompt":""/);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Grok recovers owner_prompt from prompt_history", { concurrency: false }, async () => {
+  const context = await grokFixture();
+  try {
+    const enc = path.join(process.env.GROK_HOME, "sessions", encodeURIComponent("/tmp/project"));
+    const sessionDir = path.join(enc, context.input.session_id);
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(path.join(sessionDir, "updates.jsonl"), "{}\n");
+    await writeFile(
+      path.join(enc, "prompt_history.jsonl"),
+      `${JSON.stringify({ session_id: context.input.session_id, prompt: "Ship the hook.", is_bash: false })}\n`,
+    );
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
+    const input = { ...context.input, transcript_path: path.join(sessionDir, "updates.jsonl") };
+    assert.equal(await resolveOwnerPrompt(input, "grok"), "Ship the hook.");
+    await handleStop(input, "grok");
+    const [call] = await context.calls();
+    assert.match(call.args[call.args.indexOf("--single") + 1], /"owner_prompt":"Ship the hook\."/);
   } finally {
     await context.cleanup();
   }
@@ -1004,10 +1066,108 @@ test("Muse is reviewed by muse exec in a hook-free overlay", { concurrency: fals
     // The reviewer sees the redacted final message and nothing else: no cwd,
     // no transcript content.
     assert.match(call.prompt, /Reply with the verdict word alone/);
+    assert.match(call.prompt, /"owner_prompt":""/);
     assert.doesNotMatch(call.prompt, /supersecretvalue/);
     assert.match(call.prompt, /token=\[REDACTED\]/);
     assert.doesNotMatch(call.prompt, /\/tmp\/project/);
   } finally {
+    await context.cleanup();
+  }
+});
+
+test("Muse THINK blocks with a thinking fallback", { concurrency: false }, async () => {
+  const context = await museFixture();
+  try {
+    const output = await handleStop(context.input, "muse", { runModel: async () => "THINK" });
+    assert.deepEqual(output, { decision: "block", reason: VERDICTS.THINK.fallbacks[0] });
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Muse CONTINUE carries the reviewer's own line", { concurrency: false }, async () => {
+  const context = await museFixture();
+  try {
+    const output = await handleStop(context.input, "muse", {
+      runModel: async () => "CONTINUE\nLand the change first.",
+    });
+    assert.deepEqual(output, { decision: "block", reason: "Land the change first." });
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Muse accepts the stop at the continuation cap without a review", { concurrency: false }, async () => {
+  const context = await museFixture();
+  try {
+    const tallyFile = path.join(process.env.XDG_STATE_HOME, "keep-going", "continuations.json");
+    await mkdir(path.dirname(tallyFile), { recursive: true });
+    await writeFile(
+      tallyFile,
+      JSON.stringify({
+        [tallyKey(context.input.session_id, context.input.turn_id)]: {
+          count: CONTINUATION_CAP,
+          updated: Date.now(),
+        },
+      }),
+    );
+    const output = await handleStop(context.input, "muse", {
+      runModel: async () => { throw new Error("reviewer must not run at the cap"); },
+    });
+    assert.match(output.systemMessage, /continuation cap \(100\) reached/);
+    assert.equal(await recordedContinuations(context.input, "muse"), 0);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Muse fails open when the reviewer throws and clears the tally", { concurrency: false }, async () => {
+  const context = await museFixture();
+  try {
+    assert.equal(
+      (await handleStop(context.input, "muse", { runModel: async () => "CONTINUE" })).decision,
+      "block",
+    );
+    assert.equal(await recordedContinuations(context.input, "muse"), 1);
+    const output = await handleStop(context.input, "muse", {
+      runModel: async () => { throw new Error("boom"); },
+    });
+    assert.match(output.systemMessage, /keep-going was skipped: boom/);
+    assert.equal(await recordedContinuations(context.input, "muse"), 0);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Muse blocks an empty final message once, then accepts the retry", { concurrency: false }, async () => {
+  const context = await museFixture();
+  try {
+    const input = { session_id: "session-empty", last_assistant_message: "" };
+    const first = await handleStop(input, "muse");
+    assert.equal(first.decision, "block");
+    assert.match(first.reason, /did not see your last message/);
+    assert.deepEqual(await handleStop({ ...input, stop_hook_active: true }, "muse"), {});
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Muse ignores the quiet and history knobs it cannot use", { concurrency: false }, async () => {
+  // No transcript means no quiet wait to skip and no turns to index, whatever
+  // the knobs say: the stop goes straight to review.
+  const context = await museFixture();
+  const previous = process.env.KEEP_GOING_QUIET_MS;
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
+    process.env.KEEP_GOING_QUIET_MS = "60000";
+    const output = await handleStop(context.input, "muse", {
+      runModel: async () => "STOP",
+      delay: async () => { throw new Error("no transcript, so no wait"); },
+    });
+    assert.deepEqual(output, {});
+  } finally {
+    if (previous === undefined) delete process.env.KEEP_GOING_QUIET_MS;
+    else process.env.KEEP_GOING_QUIET_MS = previous;
     await context.cleanup();
   }
 });
@@ -1021,6 +1181,306 @@ test("an empty last assistant message blocks once instead of accepting the stop"
     assert.match(first.reason, /did not see your last message/);
     const second = await handleStop({ ...input, stop_hook_active: true }, "claude");
     assert.deepEqual(second, {});
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("a fresh stop waits out the quiet delay before any review", { concurrency: false }, async () => {
+  const context = await fixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
+    process.env.KEEP_GOING_QUIET_MS = "60000";
+    let waitedMs = null;
+    const output = await handleStop(context.input, "codex", {
+      delay: async (ms) => { waitedMs = ms; },
+    });
+    assert.deepEqual(output, {});
+    assert.equal(waitedMs, 60000);
+    assert.equal((await context.calls()).length, 1);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("a follow-up during the quiet wait lets the stop through unreviewed", { concurrency: false }, async () => {
+  const context = await fixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
+    process.env.KEEP_GOING_QUIET_MS = "60000";
+    const output = await handleStop(context.input, "codex", {
+      delay: async () => {
+        await appendRecords(context.input.transcript_path, [
+          transcriptLine(
+            { role: "user", content: [{ type: "input_text", text: "Actually, one more thing." }] },
+            "turn-next",
+          ),
+        ]);
+      },
+    });
+    assert.deepEqual(output, {});
+    assert.deepEqual(await context.calls(), []);
+    const [row] = await auditRows();
+    assert.equal(row.verdict, "STOP");
+    assert.equal(row.counted_by, "quiet-wait");
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("a retry after hook feedback skips the quiet wait", { concurrency: false }, async () => {
+  const context = await fixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
+    process.env.KEEP_GOING_QUIET_MS = "60000";
+    const output = await handleStop({ ...context.input, stop_hook_active: true }, "codex", {
+      delay: async () => { throw new Error("quiet wait must not run on a retry"); },
+    });
+    assert.deepEqual(output, {});
+    assert.equal((await context.calls()).length, 1);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("a stop with no transcript to watch is reviewed at once", { concurrency: false }, async () => {
+  // Muse sends transcript_path null, so no follow-up could ever be observed.
+  // Holding it for the quiet minute would only add latency.
+  const context = await museFixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
+    process.env.KEEP_GOING_QUIET_MS = "60000";
+    const output = await handleStop(context.input, "muse", {
+      delay: async () => { throw new Error("nothing to watch, so no wait"); },
+    });
+    assert.deepEqual(output, {});
+    assert.equal((await context.calls()).length, 1);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("the quiet wait defaults to fifteen seconds and parses defensively", () => {
+  const previous = process.env.KEEP_GOING_QUIET_MS;
+  try {
+    assert.equal(QUIET_DELAY_MS, 15_000);
+    delete process.env.KEEP_GOING_QUIET_MS;
+    assert.equal(quietDelayMs(), 15_000);
+    process.env.KEEP_GOING_QUIET_MS = "5000";
+    assert.equal(quietDelayMs(), 5000);
+    for (const invalid of ["nope", "-1", "Infinity"]) {
+      process.env.KEEP_GOING_QUIET_MS = invalid;
+      assert.equal(quietDelayMs(), 15_000);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.KEEP_GOING_QUIET_MS;
+    else process.env.KEEP_GOING_QUIET_MS = previous;
+  }
+});
+
+test("TURN requests name past turns 1-based, oldest first", () => {
+  assert.deepEqual(parseTurnRequest("TURN 1", 3), { start: 1, end: 1 });
+  assert.deepEqual(parseTurnRequest("turn 2-3", 3), { start: 2, end: 3 });
+  assert.deepEqual(parseTurnRequest("TURN 3-1", 5), { start: 1, end: 3 });
+  assert.deepEqual(parseTurnRequest("TURN -1", 3), { start: 3, end: 3 });
+  assert.deepEqual(parseTurnRequest("TURN -2", 3), { start: 2, end: 2 });
+  assert.deepEqual(parseTurnRequest("TURN 1-5", 9), { start: 1, end: 5 });
+  for (const invalid of ["CONTINUE", "TURN", "TURN 0", "TURN 4", "TURN 1-6", "TURN 1-9", "TURN -4", "", null]) {
+    assert.equal(parseTurnRequest(invalid, 3), null);
+  }
+});
+
+test("fulfilled turns carry redacted prompts and finals, never raw secrets", () => {
+  const out = formatTurns(
+    [{ owner: "do it token=supersecretvalue", final: "done token=supersecretvalue" }],
+    { start: 1, end: 1 },
+  );
+  assert.match(out, /Turn 1/);
+  assert.match(out, /token=\[REDACTED\]/);
+  assert.doesNotMatch(out, /supersecretvalue/);
+  assert.match(
+    turnIndexSection([{ owner: "First request", final: "x" }, { owner: "Second request", final: "y" }]),
+    /1: First request\n2: Second request/,
+  );
+});
+
+test("Claude past turns exclude the current turn and tool traffic", { concurrency: false }, async () => {
+  const context = await claudeFixture();
+  try {
+    assert.deepEqual(await listPastTurns(context.input, "claude"), [
+      { owner: "Earlier context.", final: "Earlier answer." },
+    ]);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Codex past turns segment on turn_context and skip hook feedback", { concurrency: false }, async () => {
+  const context = await fixture();
+  try {
+    await appendRecords(context.input.transcript_path, [
+      JSON.stringify({ type: "turn_context", payload: { turn_id: "turn-next" } }),
+      transcriptLine(
+        { role: "user", content: [{ type: "input_text", text: "Now the next thing." }] },
+        "turn-next",
+      ),
+      transcriptLine(
+        { role: "assistant", content: [{ type: "output_text", text: "Working on it." }] },
+        "turn-next",
+      ),
+    ]);
+    const past = await listPastTurns({ ...context.input, turn_id: "turn-next" }, "codex");
+    assert.deepEqual(past, [{ owner: "Build it now. token=supersecretvalue", final: "Candidate final response." }]);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Grok past turns pair chat log users with their assistant finals", { concurrency: false }, async () => {
+  const context = await grokFixture();
+  try {
+    const sessionDir = path.join(
+      process.env.GROK_HOME, "sessions", encodeURIComponent("/tmp/project"), context.input.session_id,
+    );
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(path.join(sessionDir, "updates.jsonl"), "{}\n");
+    await writeFile(path.join(sessionDir, "chat_history.jsonl"), [
+      JSON.stringify({ type: "user", content: [{ type: "text", text: "First thing." }] }),
+      JSON.stringify({ type: "assistant", content: "First done." }),
+      JSON.stringify({ type: "user", content: [{ type: "text", text: "Second thing." }] }),
+      JSON.stringify({ type: "assistant", content: "Second done." }),
+    ].join("\n"));
+    const input = { ...context.input, transcript_path: path.join(sessionDir, "updates.jsonl") };
+    assert.deepEqual(await listPastTurns(input, "grok"), [
+      { owner: "First thing.", final: "First done." },
+    ]);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Ghost past turns read the pi session file and skip tool passes", { concurrency: false }, async () => {
+  const context = await ghostFixture();
+  try {
+    const sessionFile = path.join(context.input.ghost_home, "session.jsonl");
+    const message = (role, content, extra = {}) => JSON.stringify({
+      type: "message", id: Math.random().toString(36).slice(2), message: { role, content, ...extra },
+    });
+    const text = (value) => [{ type: "text", text: value }];
+    await writeFile(sessionFile, [
+      message("user", text("First errand.")),
+      message("assistant", [{ type: "toolCall", name: "read" }], { stopReason: "toolUse" }),
+      message("assistant", text("First errand done."), { stopReason: "stop" }),
+      message("user", text("Second errand.")),
+      message("assistant", text("Second errand done."), { stopReason: "stop" }),
+    ].join("\n"));
+    const past = await listPastTurns({ ...context.input, transcript_path: sessionFile }, "ghost");
+    assert.deepEqual(past, [{ owner: "First errand.", final: "First errand done." }]);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Pi turns arrive with the stop and Muse has nothing to index", async () => {
+  assert.deepEqual(
+    await listPastTurns({ past_turns: [{ owner_prompt: "  ", final_response: "x" }, null] }, "pi"),
+    [],
+  );
+  assert.deepEqual(
+    await listPastTurns(
+      { past_turns: [{ owner_prompt: "Earlier.", final_response: "Did it." }] },
+      "pi",
+    ),
+    [{ owner: "Earlier.", final: "Did it." }],
+  );
+  const context = await museFixture();
+  try {
+    assert.deepEqual(await listPastTurns(context.input, "muse"), []);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("KEEP_GOING_TURNS=0 disables the index everywhere", { concurrency: false }, async () => {
+  const context = await claudeFixture();
+  const previous = process.env.KEEP_GOING_TURNS;
+  try {
+    process.env.KEEP_GOING_TURNS = "0";
+    assert.deepEqual(await listPastTurns(context.input, "claude"), []);
+  } finally {
+    if (previous === undefined) delete process.env.KEEP_GOING_TURNS;
+    else process.env.KEEP_GOING_TURNS = previous;
+    await context.cleanup();
+  }
+});
+
+test("a reviewer TURN request is fulfilled and then verdicts", { concurrency: false }, async () => {
+  const context = await claudeFixture();
+  try {
+    const prompts = [];
+    const responses = ["TURN 1", "CONTINUE\nStill unfinished."];
+    const output = await handleStop(context.input, "claude", {
+      runModel: async ({ prompt }) => {
+        prompts.push(prompt);
+        return responses.shift();
+      },
+    });
+    assert.deepEqual(output, { decision: "block", reason: "Still unfinished." });
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[0], /Past turns, oldest first/);
+    assert.match(prompts[1], /Turn 1\nowner_prompt: Earlier context\.\nfinal_response: Earlier answer\./);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("an unreadable TURN request fails open without a second call", { concurrency: false }, async () => {
+  const context = await claudeFixture();
+  try {
+    let calls = 0;
+    const output = await handleStop(context.input, "claude", {
+      runModel: async () => {
+        calls += 1;
+        return "TURN 9";
+      },
+    });
+    assert.match(output.systemMessage, /begin with CONTINUE, THINK, RESCAN, or STOP/);
+    assert.equal(calls, 1);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("repeated TURN requests hit the round cap and fail open", { concurrency: false }, async () => {
+  const context = await claudeFixture();
+  try {
+    let calls = 0;
+    const output = await handleStop(context.input, "claude", {
+      runModel: async () => {
+        calls += 1;
+        return "TURN 1";
+      },
+    });
+    assert.match(output.systemMessage, /begin with CONTINUE, THINK, RESCAN, or STOP/);
+    assert.equal(calls, 3);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("without past turns a TURN line is just a bad verdict", { concurrency: false }, async () => {
+  const context = await museFixture();
+  try {
+    const prompts = [];
+    const output = await handleStop(context.input, "muse", {
+      runModel: async ({ prompt }) => {
+        prompts.push(prompt);
+        return "TURN 1";
+      },
+    });
+    assert.match(output.systemMessage, /begin with CONTINUE, THINK, RESCAN, or STOP/);
+    assert.equal(prompts.length, 1);
+    assert.doesNotMatch(prompts[0], /Past turns/);
   } finally {
     await context.cleanup();
   }
@@ -1115,7 +1575,10 @@ test("the committed manifests and hook files are what the build emits", async ()
 test("the shipped plugin bundles no runtime dependency", async () => {
   // v0.1.1 dropped Zod to keep the hook cheap to install and start. Nothing
   // else would notice a dependency reappearing: the CI drift check only proves
-  // the bundle matches src, not that src stayed dependency-free.
+  // the bundle matches src, not that src stayed dependency-free. The size cap
+  // below is recalibrated when a feature grows src on purpose (16 KiB through
+  // the quiet wait, 22 KiB with reviewer history lookup); the dependency
+  // assertions above are the part that never moves.
   const manifest = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8")
   );
@@ -1123,7 +1586,7 @@ test("the shipped plugin bundles no runtime dependency", async () => {
 
   const bundlePath = new URL("../plugins/keep-going/scripts/keep-going.mjs", import.meta.url);
   const bundle = await stat(bundlePath);
-  assert.ok(bundle.size < 16 * 1024, `expected bundle below 16 KiB, received ${bundle.size} bytes`);
+  assert.ok(bundle.size < 22 * 1024, `expected bundle below 22 KiB, received ${bundle.size} bytes`);
 
   const source = await readFile(bundlePath, "utf8");
   const bareImports = [...source.matchAll(/^\s*import[^\n]*?from\s+"([^"]+)"/gm)]
