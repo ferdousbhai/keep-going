@@ -1,7 +1,7 @@
 {
   "name": "keep-going",
   "displayName": "Keep Going",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "description": "Classifies the last assistant message as CONTINUE, THINK, RESCAN, or STOP, then answers a premature stop with a few words from the reviewer instead of letting the turn end.",
   "author": {
     "name": "Ferdous Bhai",
