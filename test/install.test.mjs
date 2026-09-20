@@ -137,13 +137,10 @@ test("installer adds, updates, and removes Claude Code, Ghost, and Grok hooks", 
 test("--audit-log writes the log path into each command and a plain reinstall drops it", async () => {
   const { settings, museSettings, home, env, cleanup } = await installHome("audit");
   try {
-    // Muse only passes a hook the environment its settings spell out, so the
-    // path has to ride inside the command; ~ is expanded against the install
-    // home because a quoted path is never expanded again.
-    const result = await runInstaller(["--claude", "--muse", "--audit-log", "~/state/audit.jsonl"], env);
-    assert.equal(result.code, 0, result.stderr);
     const expected = path.join(home, "state", "audit.jsonl");
-    assert.match(result.stdout, new RegExp(`Audit log at ${expected.replaceAll(".", "\\.")}`));
+    const result = await runInstaller(["--claude", "--muse", "--audit-log", expected], env);
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok(result.stdout.includes(`Audit log at ${expected}\n`), result.stdout);
     const claude = JSON.parse(await readFile(settings, "utf8"));
     const muse = JSON.parse(await readFile(museSettings, "utf8"));
     for (const [config, event, runner] of [[claude, "Stop", "claude"], [claude, "SubagentStop", "claude"], [muse, "Stop", "muse"]]) {

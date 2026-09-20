@@ -759,13 +759,21 @@ function normalizeReply(text) {
 // A final message that asserts nothing beyond completion in a single token —
 // the shape internal observer subagents stop with ("None", "Done."). With no
 // owner prompt to match it against, a reviewer could only ever verdict STOP,
-// so the model call is skipped and the stop accepted. The rule keys on the
-// content, never on who sent it, and anything longer always runs: "Not done"
-// fits in a breath but still claims remaining work.
+// so the model call is skipped and the stop accepted.
 const VACUOUS_COMPLETIONS = new Set(["none", "done", "ok", "okay", "finished", "complete", "completed"]);
 
-function isVacuousCompletion(text) {
-  return VACUOUS_COMPLETIONS.has(normalizeReply(text).toLowerCase());
+// Stops that need no reviewer: the reply the owner asked for verbatim, or a
+// bare completion token with no prompt to weigh it against. Each rule names
+// the audit mechanism that accepted the stop.
+function reviewlessStop(ownerPrompt, lastMessage) {
+  if (ownerPrompt) {
+    return lastMessageFulfillsOwnerPrompt(ownerPrompt, lastMessage)
+      ? { reason: "last message fulfills owner_prompt", countedBy: "owner_prompt" }
+      : null;
+  }
+  return VACUOUS_COMPLETIONS.has(normalizeReply(lastMessage).toLowerCase())
+    ? { reason: "nothing to review", countedBy: "stub" }
+    : null;
 }
 
 function exactReplyCandidates(ownerPrompt) {
@@ -1229,6 +1237,18 @@ async function recordReviewAudit(input, runner, { verdict, reason, error, counte
   }
 }
 
+// Every exit of handleStop makes the same two writes: the turn state, which
+// a stop let through clears and a block advances, and the audit row. One
+// helper makes both so no exit can forget either. Forgetting the first is how
+// the cap gets disarmed, the count surviving into a turn that never earned
+// it; forgetting the second is how a whole path vanished from the log.
+async function settleStop(input, runner, output, audit, exact = null) {
+  const blocked = output.decision === "block";
+  await recordTurnState(input, runner, blocked, exact);
+  await recordReviewAudit(input, runner, { verdict: blocked ? "CONTINUE" : "STOP", reason: output.reason, ...audit });
+  return output;
+}
+
 async function recordedContinuations(input, runner) {
   if (!RUNTIMES[runner].state) return RUNTIMES[runner].count(input);
   const tally = await readTally(tallyFile(input, runner));
@@ -1246,65 +1266,32 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
     }
   }
   if (await followedUpDuringQuietWait(input, delay)) {
-    await recordTurnState(input, runner, false);
-    await recordReviewAudit(input, runner, {
-      verdict: "STOP",
-      reason: "user followed up during quiet wait",
-      countedBy: "quiet-wait",
-    });
-    return {};
+    return settleStop(input, runner, {}, { reason: "user followed up during quiet wait", countedBy: "quiet-wait" });
   }
-  // Every exit below that lets the stop through ends the turn, and ending a
-  // turn is what clears the tally. Missing one is how the cap gets disarmed:
-  // the count survives into a turn that never earned it.
   const lastAssistantMessage = compactText(stopCandidateText(input), 12_000);
   if (!lastAssistantMessage) {
     // Grok can fire Stop with no lastAssistantMessage. Accepting that stop
     // disables the hook. Block once; if the next stop is still empty, let it end.
-    // Both exits are audited: Muse reminder observers stop this way on every
-    // turn, and an unlogged block would look like the hook never ran.
     if (input.stop_hook_active || input.stopHookActive) {
-      await recordTurnState(input, runner, false);
-      await recordReviewAudit(input, runner, {
-        verdict: "STOP",
-        reason: "no last message on retry",
-        countedBy: "empty",
-      });
-      return {};
+      return settleStop(input, runner, {}, { reason: "no last message on retry", countedBy: "empty" });
     }
-    await recordTurnState(input, runner, true);
-    const reason = "The stop hook did not see your last message. If work remains, continue it; if you are done, say so in one sentence.";
-    await recordReviewAudit(input, runner, { verdict: "CONTINUE", reason, countedBy: "empty" });
-    return { decision: "block", reason };
+    return settleStop(input, runner, {
+      decision: "block",
+      reason: "The stop hook did not see your last message. If work remains, continue it; if you are done, say so in one sentence.",
+    }, { countedBy: "empty" });
   }
 
   const ownerPrompt = await resolveOwnerPrompt(input, runner);
-  if (ownerPrompt && lastMessageFulfillsOwnerPrompt(ownerPrompt, lastAssistantMessage)) {
-    await recordTurnState(input, runner, false);
-    await recordReviewAudit(input, runner, {
-      verdict: "STOP",
-      reason: "last message fulfills owner_prompt",
-      countedBy: "owner_prompt",
-    });
-    return {};
-  }
-
-  if (!ownerPrompt && isVacuousCompletion(lastAssistantMessage)) {
-    await recordTurnState(input, runner, false);
-    await recordReviewAudit(input, runner, {
-      verdict: "STOP",
-      reason: "nothing to review",
-      countedBy: "stub",
-    });
-    return {};
-  }
+  const settled = reviewlessStop(ownerPrompt, lastAssistantMessage);
+  if (settled) return settleStop(input, runner, {}, settled);
 
   let review;
   let continuations = await recordedContinuations(input, runner);
   let countedBy = runtime.state ? "tally" : "session";
   const named = payloadTurn(input);
-  // The last reviewer response, whatever it parses as: the audit row keeps it
-  // on both the verdict and the fail-open paths.
+  // The last reviewer response, whatever it parses as: an unparseable reply
+  // is the debugging evidence, so the audit row keeps it on the fail-open
+  // path as well as the verdict one.
   let rawReview;
   try {
     // A transcript is read to count when the payload leaves the turn unnamed,
@@ -1324,9 +1311,7 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
       const capped = {
         systemMessage: `keep-going: continuation cap (${CONTINUATION_CAP}) reached for this turn; accepting the stop.`,
       };
-      await recordTurnState(input, runner, false);
-      await recordReviewAudit(input, runner, { verdict: "CAP", reason: capped.systemMessage, countedBy });
-      return capped;
+      return settleStop(input, runner, capped, { verdict: "CAP", reason: capped.systemMessage, countedBy });
     }
 
     const run = runModel ?? runtime.run;
@@ -1347,22 +1332,19 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
       if (remaining < REVIEW_CALL_FLOOR_MS) {
         throw new Error(`review budget (${REVIEW_BUDGET_MS} ms) spent before a verdict`);
       }
-      const raw = await run({
+      rawReview = await run({
         prompt: reviewerPrompt,
         timeoutMs: Math.min(CLASSIFIER_TIMEOUT_MS, remaining),
         ghostHome: input.ghost_home,
       });
-      // Kept for the audit row even when this response parses as nothing the
-      // hook understands: the offending text is the debugging evidence.
-      rawReview = raw;
       try {
-        review = parseReviewVerdict(raw);
+        review = parseReviewVerdict(rawReview);
         break;
       } catch (verdictError) {
         // Not a verdict: the one other legal move is asking for history. Ways
         // of asking that name nothing readable fail open as a bad verdict.
         const request = pastTurns.length && turnRequests < TURN_REQUESTS_MAX
-          ? parseTurnRequest(raw, pastTurns.length)
+          ? parseTurnRequest(rawReview, pastTurns.length)
           : null;
         if (!request) throw verdictError;
         reviewerPrompt += `\n\n${formatTurns(pastTurns, request)}\n\nVerdict now, with the turns above in mind.`;
@@ -1374,25 +1356,21 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
     // accepted stop. This is the path a reviewer timeout takes — the stuck
     // case the cap exists for — and leaving the count behind would spend it
     // against whatever the session does next.
-    await recordTurnState(input, runner, false);
-    await recordReviewAudit(input, runner, { error: error.message, countedBy, reviewerOutput: rawReview });
-    return { systemMessage: `keep-going was skipped: ${compactText(error.message, 500)}` };
+    return settleStop(
+      input,
+      runner,
+      { systemMessage: `keep-going was skipped: ${compactText(error.message, 500)}` },
+      { error: error.message, countedBy, reviewerOutput: rawReview },
+    );
   }
 
-  const output = hookOutputForVerdict(review.verdict, continuations, review.nudge);
-  await recordTurnState(
+  return settleStop(
     input,
     runner,
-    output.decision === "block",
+    hookOutputForVerdict(review.verdict, continuations, review.nudge),
+    { verdict: review.verdict, countedBy, reviewerOutput: rawReview },
     countedBy === "transcript" ? continuations : null,
   );
-  await recordReviewAudit(input, runner, {
-    verdict: review.verdict,
-    reason: output.reason,
-    countedBy,
-    reviewerOutput: rawReview,
-  });
-  return output;
 }
 
 async function main() {

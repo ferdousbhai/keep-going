@@ -283,21 +283,19 @@ async function writeJsonAtomic(file, value) {
   }
 }
 
-// The audit path travels inside the command: Muse hands a hook only the
-// environment its settings spell out, so a shell export never reaches it.
 function installedCommand(hookFile, runner, auditLog) {
   const prefix = auditLog ? `KEEP_GOING_AUDIT_LOG=${shellQuote(auditLog)} ` : "";
   return `${prefix}${shellQuote(process.execPath)} ${shellQuote(hookFile)} ${runner}`;
 }
 
-function auditLogOption(args, userHome) {
-  const index = args.findIndex((arg) => arg === "--audit-log" || arg.startsWith("--audit-log="));
+function auditLogOption(args) {
+  const index = args.indexOf("--audit-log");
   if (index === -1) return "";
-  const value = args[index].includes("=") ? args[index].slice("--audit-log=".length) : args[index + 1];
-  if (!value || value.startsWith("--")) throw new Error("--audit-log needs a path.\n\n" + usage());
-  // Quoted in the command, the path is never expanded again, so ~ is resolved
-  // here against the home the installer writes under.
-  return path.resolve(value.replace(/^~(?=$|[\/])/, userHome));
+  const value = args[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`--audit-log needs a path.\n\n${usage()}`);
+  // Absolute in the command: a relative path would resolve against whatever
+  // directory each host runs its hooks from.
+  return path.resolve(value);
 }
 
 function removeInstalledHooks(groups) {
@@ -314,7 +312,7 @@ function removeInstalledHooks(groups) {
   return kept;
 }
 
-function updateHookConfig(config, events, hookFile, runner, uninstall, auditLog = "") {
+function updateHookConfig(config, events, command, runner, uninstall) {
   const hooks = isJsonObject(config.hooks) ? { ...config.hooks } : {};
   for (const event of events) {
     // Earlier releases installed under different names, and a hand-wired hook
@@ -322,7 +320,7 @@ function updateHookConfig(config, events, hookFile, runner, uninstall, auditLog 
     // one beside the new one and the reviewer runs twice on every stop.
     const groups = removeInstalledHooks(hooks[event]);
     if (!uninstall) {
-      groups.push(hookEntry(installedCommand(hookFile, runner, auditLog)));
+      groups.push(hookEntry(command));
     }
     hooks[event] = groups;
   }
@@ -360,7 +358,7 @@ async function main() {
   // by accident. Both spellings are always stripped, so switching between them
   // replaces the registration instead of leaving both to review every stop.
   const link = args.includes("--link");
-  const auditLog = uninstall ? "" : auditLogOption(args, userHome);
+  const auditLog = auditLogOption(args);
   const copiedHook = path.join(dataHome, "keep-going", "keep-going.mjs");
   const hookFile = link ? BUNDLED_HOOK : copiedHook;
 
@@ -388,7 +386,7 @@ async function main() {
     }
     await writeJsonAtomic(
       settingsFile,
-      updateHookConfig(config, HOSTS[runner].events, hookFile, runner, uninstall, auditLog),
+      updateHookConfig(config, HOSTS[runner].events, installedCommand(hookFile, runner, auditLog), runner, uninstall),
     );
     process.stdout.write(`${uninstall ? "Removed" : "Installed"} ${runner} hook in ${settingsFile}\n`);
   }
