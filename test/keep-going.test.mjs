@@ -17,6 +17,9 @@ import {
   REVIEW_PROMPT,
   claudeContinuations,
   recordedContinuations,
+  recordedRescan,
+  RESCAN_SPENT_PROMPT,
+  RESCAN_SPENT_VERDICTS,
   reviewPrompt,
   handleStop,
   hookOutputForVerdict,
@@ -464,6 +467,49 @@ test("RESCAN blocks with a fresh-scan nudge", { concurrency: false }, async () =
   }
 });
 
+test("RESCAN is offered once per turn; a second one fails open as an unoffered verdict", { concurrency: false }, async () => {
+  const context = await fixture();
+  try {
+    const prompts = [];
+    const runModel = async ({ prompt }) => {
+      prompts.push(prompt);
+      return "RESCAN\nLook again with fresh eyes.";
+    };
+    const first = await handleStop(context.input, "codex", { runModel });
+    assert.deepEqual(first, { decision: "block", reason: "Look again with fresh eyes." });
+    assert.equal(await recordedRescan(context.input, "codex"), true);
+    assert.match(prompts[0], /RESCAN — the agent claims/);
+
+    // The reviewer is offered three verdicts now; a RESCAN anyway is no answer
+    // to that prompt, and takes the fail-open path with a visible reason.
+    const verdicts = [];
+    const second = await handleStop(context.input, "codex", { runModel, onVerdict: (verdict) => verdicts.push(verdict) });
+    assert.match(second.systemMessage, /keep-going was skipped: Reviewer answered RESCAN, which was not offered/);
+    assert.deepEqual(verdicts, []);
+    assert.doesNotMatch(prompts[1], /RESCAN — the agent claims/);
+    assert.match(prompts[1], /already asked for this turn, so RESCAN is not on offer/);
+    assert.match(prompts[1], /verdict word alone on the first line: CONTINUE, THINK, or STOP\./);
+    const rows = (await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(rows.at(-1).verdict, "ERROR");
+    assert.match(rows.at(-1).reviewer_output, /^RESCAN/);
+    // The accepted stop ends the turn, and with it the memory of the scan.
+    assert.equal(await recordedRescan(context.input, "codex"), false);
+
+    // Under the reduced prompt the three offered verdicts work as ever, the
+    // flag survives blocks in between, and it is per turn.
+    await handleStop(context.input, "codex", { runModel });
+    const kept = await handleStop(context.input, "codex", { runModel: async () => "CONTINUE\nKeep going." });
+    assert.deepEqual(kept, { decision: "block", reason: "Keep going." });
+    assert.equal(await recordedRescan(context.input, "codex"), true);
+    assert.equal(await recordedContinuations(context.input, "codex"), 2);
+    assert.equal(await recordedRescan({ ...context.input, turn_id: "turn-next" }, "codex"), false);
+    assert.deepEqual(await handleStop(context.input, "codex", { runModel: async () => "STOP" }), {});
+    assert.equal(await recordedRescan(context.input, "codex"), false);
+  } finally {
+    await context.cleanup();
+  }
+});
+
 test("last_assistant_message is reviewed when the transcript is unavailable", { concurrency: false }, async () => {
   const context = await fixture();
   try {
@@ -785,6 +831,11 @@ test("the fallback line rotates and the last stretch asks for a landing", () => 
   assert.equal(reviewPrompt(CONTINUATION_CAP - LAST_STRETCH - 1), REVIEW_PROMPT);
   assert.match(reviewPrompt(CONTINUATION_CAP - LAST_STRETCH), /near its limit/);
   assert.match(reviewPrompt(CONTINUATION_CAP - 1), /land what is in flight/);
+  assert.equal(reviewPrompt(0, true), RESCAN_SPENT_PROMPT);
+  assert.throws(() => parseReviewVerdict("RESCAN\nLook again.", RESCAN_SPENT_VERDICTS), /not offered on this stop; expected CONTINUE, THINK, or STOP/);
+  assert.deepEqual(parseReviewVerdict("STOP", RESCAN_SPENT_VERDICTS), { verdict: "STOP", nudge: "" });
+  assert.doesNotMatch(RESCAN_SPENT_PROMPT, /RESCAN —|Prefer RESCAN/);
+  assert.match(reviewPrompt(CONTINUATION_CAP - 1, true), /not on offer[\s\S]*land what is in flight/);
   // The note changes the instruction, never the answer the reviewer gave.
   assert.equal(
     hookOutputForVerdict("CONTINUE", CONTINUATION_CAP - 1, "Nearly done.").reason,
@@ -1754,8 +1805,8 @@ test("the shipped plugin bundles no runtime dependency", async () => {
   // the bundle matches src, not that src stayed dependency-free. The size cap
   // below is recalibrated when a feature grows src on purpose (16 KiB through
   // the quiet wait, 22 KiB with reviewer history lookup, 23 KiB with audit raw
-  // text and the stub skip); the dependency assertions above are the part that
-  // never moves.
+  // text and the stub skip, 24 KiB with the once-per-turn rescan); the
+  // dependency assertions above are the part that never moves.
   const manifest = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8")
   );
@@ -1763,7 +1814,7 @@ test("the shipped plugin bundles no runtime dependency", async () => {
 
   const bundlePath = new URL("../plugins/keep-going/scripts/keep-going.mjs", import.meta.url);
   const bundle = await stat(bundlePath);
-  assert.ok(bundle.size < 23 * 1024, `expected bundle below 23 KiB, received ${bundle.size} bytes`);
+  assert.ok(bundle.size < 24 * 1024, `expected bundle below 24 KiB, received ${bundle.size} bytes`);
 
   const source = await readFile(bundlePath, "utf8");
   const bareImports = [...source.matchAll(/^\s*import[^\n]*?from\s+"([^"]+)"/gm)]

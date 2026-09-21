@@ -20,6 +20,12 @@ message and the owner's request — redacted and truncated — and answers:
 - `RESCAN` — it claims open-ended work is done; one more fresh pass first.
 - `STOP` — it is genuinely done, or genuinely blocked on the user.
 
+`RESCAN` is offered once per owner turn. The report of that scan is itself a
+claim that the work is done, so on every later stop of the turn the reviewer is
+told the scan was already asked for and chooses among the other three. A
+`RESCAN` it gives anyway is not an answer the prompt offered, so the stop goes
+through the way an unparseable verdict does, with a warning to the owner.
+
 The first three block the stop (in Pi, queue a follow-up) with a line the
 reviewer writes for the occasion. Everything else lets the stop through: a
 missing binary, a timeout, an unparseable verdict, a final message that is the

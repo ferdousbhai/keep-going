@@ -155,6 +155,33 @@ test("CONTINUE and THINK queue one custom follow-up, not a new owner prompt", as
   assert.equal(f.calls.length, 2);
 });
 
+test("Pi marks a RESCAN on the branch and reports it spent on the next stop", async (t) => {
+  const f = await fixture(t);
+  f.review(async () => reply("RESCAN\nLook again."));
+  await f.finish(reply("Everything is done."));
+  assert.equal(f.sent.length, 1);
+  assert.ok(f.branch.some((e) => e.type === "custom" && e.customType === "keep-going-rescan"));
+  f.deliver();
+
+  // The reviewer no longer has RESCAN to give; giving it anyway is no answer,
+  // so the stop goes through with a warning, the way an unparseable one does.
+  f.review(async () => reply("RESCAN\nLook again."));
+  await f.finish(reply("The scan found nothing."));
+  assert.equal(f.sent.length, 0);
+  assert.match(f.notifications.at(-1)[0], /keep-going was skipped: Reviewer answered RESCAN, which was not offered/);
+  const prompt = f.calls[1][1].messages[0].content[0].text;
+  assert.match(prompt, /already asked for this turn/);
+  assert.doesNotMatch(prompt, /RESCAN — the agent claims/);
+  const rows = await f.audit();
+  assert.equal(rows.at(-1).verdict, "ERROR");
+
+  // A new owner turn starts with the scan on offer again.
+  f.branch.push({ id: "owner-2", type: "message", message: { role: "user", content: text("next request") } });
+  f.review(async () => reply("STOP"));
+  await f.finish(reply("Done with the next thing."));
+  assert.match(f.calls[2][1].messages[0].content[0].text, /RESCAN — the agent claims/);
+});
+
 test("Pi does not review twice, even when two copies of the extension are loaded", async (t) => {
   const f = await fixture(t);
   keepGoing(f.pi);

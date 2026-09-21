@@ -2,6 +2,8 @@ import { handleStop, TURN_INDEX_LIMIT } from "./keep-going.mjs";
 
 const NUDGE = "keep-going";
 const REVIEW = "keep-going-review";
+// Marks the turn's one RESCAN, so the hook can take it off the table after.
+const RESCAN = "keep-going-rescan";
 const SETTINGS = "keep-going-settings";
 
 const textOf = (message) => (message.content ?? [])
@@ -162,8 +164,10 @@ export default function keepGoing(pi) {
     pi.appendEntry(REVIEW, { assistantId: assistant.id });
 
     const owner = branch[ownerIndex];
-    const count = branch.slice(ownerIndex + 1).filter((entry) =>
+    const thisTurn = branch.slice(ownerIndex + 1);
+    const count = thisTurn.filter((entry) =>
       entry.type === "custom_message" && entry.customType === NUDGE).length;
+    const rescanned = thisTurn.some((entry) => entry.type === "custom" && entry.customType === RESCAN);
     const controller = new AbortController();
     activeReview = controller;
     const signal = AbortSignal.any([ctx.signal, controller.signal]);
@@ -171,16 +175,21 @@ export default function keepGoing(pi) {
     try {
       const model = reviewerModel(ctx);
       ctx.ui.setStatus(NUDGE, `keep-going: reviewing with ${model.provider}/${model.id}`);
+      let verdict;
       const result = await handleStop({
         session_id: sessionId,
         turn_id: owner.id,
         cwd: ctx.cwd,
         continuation_count: count,
+        rescanned,
         reviewer_model: `${model.provider}/${model.id}`,
         last_assistant_message: text,
         owner_prompt: textOf(owner.message),
         past_turns: pastTurnsFromBranch(branch, ownerIndex),
-      }, "pi", { runModel: (request) => reviewWithPi(ctx, model, request, signal) });
+      }, "pi", {
+        runModel: (request) => reviewWithPi(ctx, model, request, signal),
+        onVerdict: (value) => { verdict = value; },
+      });
 
       // The user may have typed, aborted, navigated, or disabled the extension
       // during the review. A verdict is valid only for the branch we reviewed.
@@ -189,6 +198,7 @@ export default function keepGoing(pi) {
           lastAssistant(ctx.sessionManager.getBranch())?.id !== assistant.id) return;
       if (result.systemMessage) ctx.ui.notify(result.systemMessage, "warning");
       if (result.decision === "block") {
+        if (verdict === "RESCAN") pi.appendEntry(RESCAN, { assistantId: assistant.id });
         pi.sendMessage({ customType: NUDGE, content: result.reason, display: true },
           { deliverAs: "followUp", triggerTurn: true });
       }

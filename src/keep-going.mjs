@@ -178,6 +178,11 @@ const VERDICTS = {
       "Research it before handing it back. Keep going.",
     ],
   },
+  // Offered once per turn. A report that the scan found nothing is itself a
+  // claim that open-ended work is done, so a reviewer left to its own reading
+  // asked for the same scan again and again; the hook remembers the first ask
+  // and withdraws RESCAN after it (see reviewPrompt), and a RESCAN answered
+  // anyway fails open like any other reply the prompt did not offer.
   RESCAN: {
     blocks: true,
     describe: "the agent claims open-ended work is done, but a fresh pass could still surface more.",
@@ -239,25 +244,38 @@ function turnsEnabled() {
   return process.env.KEEP_GOING_TURNS !== "0";
 }
 
-const REVIEW_PROMPT = `An agent just tried to end its turn. Its final message is
+const RESCAN_GUIDANCE = `Prefer RESCAN over STOP when the message claims open-ended work is done —
+finding every issue, fixing them all, cleaning up — and a fresh pass could
+surface more. Tell it to scan once more and report what the scan found. STOP
+when the message already reports such a rescan with nothing left, or when the
+work is complete on any other terms.`;
+
+// The reviewer that asked for the scan does not see this turn again; the one
+// that reads the report has to be told the scan was already asked for, or a
+// report of nothing found reads as one more claim of done and earns one more
+// scan. With RESCAN gone from its choices, the honest verdicts remain.
+const RESCAN_SPENT_GUIDANCE = `A fresh scan was already asked for this turn, so RESCAN is not on offer.
+STOP when the message reports that scan, whatever it found and whether or not
+it fixed anything. CONTINUE only if the agent skipped the scan it was asked for.`;
+
+function composeReviewPrompt(names, rescanGuidance) {
+  const blocking = names.filter((name) => VERDICTS[name].blocks);
+  const ending = names.filter((name) => !VERDICTS[name].blocks);
+  return `An agent just tried to end its turn. Its final message is
 last_assistant_message. Decide whether the turn is really over.
 
-${VERDICT_NAMES.map((name) => `${name} — ${VERDICTS[name].describe}`).join("\n")}
+${names.map((name) => `${name} — ${VERDICTS[name].describe}`).join("\n")}
 
 Prefer THINK over STOP when the request for input looks self-resolvable by the agent.
 Do not default to any outcome or invent unstated work.
 
-Prefer RESCAN over STOP when the message claims open-ended work is done —
-finding every issue, fixing them all, cleaning up — and a fresh pass could
-surface more. Tell it to scan once more and report what the scan found. STOP
-when the message already reports such a rescan with nothing left, or when the
-work is complete on any other terms.
+${rescanGuidance}
 
 owner_prompt is the owner's request this turn. STOP if last_assistant_message
 already fulfills it.
 
-Reply with the verdict word alone on the first line: ${listVerdicts(VERDICT_NAMES)}.
-For ${listVerdicts(ENDING_VERDICTS)}, stop there. For ${listVerdicts(BLOCKING_VERDICTS)}, add one more
+Reply with the verdict word alone on the first line: ${listVerdicts(names)}.
+For ${listVerdicts(ending)}, stop there. For ${listVerdicts(blocking)}, add one more
 line: it reaches the agent verbatim, as the whole reason its turn was not
 allowed to end.
 
@@ -265,6 +283,11 @@ Write one short sentence — "Keep going.", "Believe in yourself.", "Don't
 ask yet — you can work this out." Speak to the agent. Name no task, file,
 command, or requirement its message did not already state. A longer line is
 truncated at ${NUDGE_LIMIT} characters.`;
+}
+
+const REVIEW_PROMPT = composeReviewPrompt(VERDICT_NAMES, RESCAN_GUIDANCE);
+const RESCAN_SPENT_VERDICTS = VERDICT_NAMES.filter((name) => name !== "RESCAN");
+const RESCAN_SPENT_PROMPT = composeReviewPrompt(RESCAN_SPENT_VERDICTS, RESCAN_SPENT_GUIDANCE);
 
 // The review is a one-word verdict, so the host's frontier default is more
 // model than it needs. Codex and Claude name a smaller tier the way Ghost's
@@ -755,7 +778,11 @@ async function writeTally(file, tally) {
 // names none, and an owner who repeats a prompt word for word re-derives the
 // key of the turn before. Ending a turn where the hook lets the stop through is
 // what keeps a finished turn's count from being spent on the next one in both.
-async function recordTurnState(input, runner, blocked, exact = null) {
+//
+// The entry also remembers whether a RESCAN was issued this turn, so the one
+// fresh pass the verdict asks for is asked for once. Like the count, it is
+// cleared when a stop goes through.
+async function recordTurnState(input, runner, blocked, exact = null, rescan = false) {
   if (!RUNTIMES[runner].state) return;
   const file = tallyFile(input, runner);
   const key = turnKey(input);
@@ -767,9 +794,18 @@ async function recordTurnState(input, runner, blocked, exact = null) {
     // from it rather than incremented past its own stale value — otherwise the
     // number the hook falls back to is one it has been drifting all turn.
     const from = exact ?? tally[key]?.count ?? 0;
-    tally[key] = { count: from + 1, updated: Date.now() };
+    const rescanned = tally[key]?.rescanned === true || rescan;
+    tally[key] = { count: from + 1, updated: Date.now(), ...(rescanned ? { rescanned } : {}) };
   }
   await writeTally(file, tally);
+}
+
+// Whether this turn has already had its one RESCAN. A tally-backed host reads
+// it from the turn's entry; Pi keeps no tally and says so in its stop input.
+async function recordedRescan(input, runner) {
+  if (!RUNTIMES[runner].state) return input.rescanned === true;
+  const tally = await readTally(tallyFile(input, runner));
+  return tally[turnKey(input)]?.rescanned === true;
 }
 
 function stopCandidateText(input) {
@@ -1005,8 +1041,10 @@ async function runClaudeModel({ prompt, timeoutMs }) {
 
 // Grok's default system prompt is a coding agent. Without this, --single
 // writes analysis before STOP and the hook fails open.
-const GROK_CLASSIFIER_PROMPT =
-  `Reply with exactly one of ${listVerdicts(VERDICT_NAMES)} as the first line. No preamble, no analysis.`;
+// The verdicts on offer this stop, so the system prompt never lists one the
+// user prompt has withdrawn.
+const grokClassifierPrompt = (verdicts) =>
+  `Reply with exactly one of ${listVerdicts(verdicts)} as the first line. No preamble, no analysis.`;
 
 function grokReviewerEnv(overlayHome) {
   const env = { ...process.env };
@@ -1024,7 +1062,7 @@ function grokReviewerEnv(overlayHome) {
 // level this CLI advertises; it has no none). --single
 // still dispatches no stop hook, so the reviewer cannot trip the hook that
 // spawned it.
-async function runGrokModel({ prompt, timeoutMs }) {
+async function runGrokModel({ prompt, timeoutMs, verdicts = VERDICT_NAMES }) {
   return inTemporaryDirectory("grok", async (directory) => {
     const overlayHome = path.join(directory, "home");
     await mkdir(path.join(overlayHome, "hooks"), { recursive: true });
@@ -1075,7 +1113,7 @@ async function runGrokModel({ prompt, timeoutMs }) {
       "--effort",
       "low",
       "--system-prompt-override",
-      GROK_CLASSIFIER_PROMPT,
+      grokClassifierPrompt(verdicts),
       "--cwd",
       directory,
       ...modelArgs("KEEP_GOING_GROK_MODEL"),
@@ -1192,13 +1230,18 @@ function formatTurns(turns, { start, end }) {
   ].join("\n")).join("\n\n");
 }
 
-function parseReviewVerdict(text) {
+function parseReviewVerdict(text, offered = VERDICT_NAMES) {
   const body = String(text ?? "").trim();
   const match = REVIEW_VERDICT_PATTERN.exec(body)
     ?? verdictAfterPreamble(body)
     ?? trailingVerdict(body);
   if (!match) {
-    throw new Error(`Reviewer output must begin with ${listVerdicts(VERDICT_NAMES)}`);
+    throw new Error(`Reviewer output must begin with ${listVerdicts(offered)}`);
+  }
+  // Every verdict word is still recognised, so an echo of a withdrawn one is
+  // stripped like any other; but a withdrawn one as the answer is no answer.
+  if (!offered.includes(match[1])) {
+    throw new Error(`Reviewer answered ${match[1]}, which was not offered on this stop; expected ${listVerdicts(offered)}`);
   }
   let rest = match[2];
   while (VERDICT_ECHO.test(rest)) rest = rest.replace(VERDICT_ECHO, "");
@@ -1231,9 +1274,10 @@ function trailingVerdict(body) {
 const LAST_STRETCH_NOTE =
   "This turn is near its limit: tell the agent to land what is in flight rather than start anything new.";
 
-function reviewPrompt(continuations) {
-  if (continuations < CONTINUATION_CAP - LAST_STRETCH) return REVIEW_PROMPT;
-  return `${REVIEW_PROMPT}\n\n${LAST_STRETCH_NOTE}`;
+function reviewPrompt(continuations, rescanned = false) {
+  const base = rescanned ? RESCAN_SPENT_PROMPT : REVIEW_PROMPT;
+  if (continuations < CONTINUATION_CAP - LAST_STRETCH) return base;
+  return `${base}\n\n${LAST_STRETCH_NOTE}`;
 }
 
 // The reviewer writes the whole line for every blocking verdict. A fixed
@@ -1278,9 +1322,9 @@ async function recordReviewAudit(input, runner, { verdict, reason, error, counte
 // helper makes both so no exit can forget either. Forgetting the first is how
 // the cap gets disarmed, the count surviving into a turn that never earned
 // it; forgetting the second is how a whole path vanished from the log.
-async function settleStop(input, runner, output, audit, exact = null) {
+async function settleStop(input, runner, output, audit, exact = null, rescan = false) {
   const blocked = output.decision === "block";
-  await recordTurnState(input, runner, blocked, exact);
+  await recordTurnState(input, runner, blocked, exact, rescan);
   await recordReviewAudit(input, runner, { verdict: blocked ? "CONTINUE" : "STOP", reason: output.reason, ...audit });
   return output;
 }
@@ -1291,7 +1335,7 @@ async function recordedContinuations(input, runner) {
   return tally[turnKey(input)]?.count ?? 0;
 }
 
-async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
+async function handleStop(input, runner = "codex", { runModel, delay, onVerdict } = {}) {
   if (await yieldsToGrokNative(runner)) return {};
   runner = resolveRunner(runner);
   const runtime = RUNTIMES[runner];
@@ -1323,6 +1367,8 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
 
   let review;
   let continuations = await recordedContinuations(input, runner);
+  const rescanned = await recordedRescan(input, runner);
+  const offered = rescanned ? RESCAN_SPENT_VERDICTS : VERDICT_NAMES;
   let countedBy = runtime.state ? "tally" : "session";
   const named = payloadTurn(input);
   // The last reviewer response, whatever it parses as: an unparseable reply
@@ -1356,7 +1402,7 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
     // reviewer what it may ask for, and a harness with no readable history
     // reviews exactly as before.
     const pastTurns = await listPastTurns(input, runner);
-    let reviewerPrompt = `${reviewPrompt(continuations)}\n\n${JSON.stringify({
+    let reviewerPrompt = `${reviewPrompt(continuations, rescanned)}\n\n${JSON.stringify({
       last_assistant_message: lastAssistantMessage,
       owner_prompt: compactText(ownerPrompt, 12_000),
     })}`;
@@ -1372,9 +1418,10 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
         prompt: reviewerPrompt,
         timeoutMs: Math.min(CLASSIFIER_TIMEOUT_MS, remaining),
         ghostHome: input.ghost_home,
+        verdicts: offered,
       });
       try {
-        review = parseReviewVerdict(rawReview);
+        review = parseReviewVerdict(rawReview, offered);
         break;
       } catch (verdictError) {
         // Not a verdict: the one other legal move is asking for history. Ways
@@ -1400,12 +1447,14 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
     );
   }
 
+  onVerdict?.(review.verdict);
   return settleStop(
     input,
     runner,
     hookOutputForVerdict(review.verdict, continuations, review.nudge),
     { verdict: review.verdict, countedBy, reviewerOutput: rawReview },
     countedBy === "transcript" ? continuations : null,
+    review.verdict === "RESCAN",
   );
 }
 
@@ -1432,11 +1481,14 @@ export {
   QUIET_DELAY_MS,
   quietDelayMs,
   REVIEW_PROMPT,
+  RESCAN_SPENT_PROMPT,
+  RESCAN_SPENT_VERDICTS,
   VERDICTS,
   NUDGE_LIMIT,
   LAST_STRETCH,
   claudeContinuations,
   recordedContinuations,
+  recordedRescan,
   reviewPrompt,
   handleStop,
   hookOutputForVerdict,
