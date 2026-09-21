@@ -1,0 +1,65 @@
+name: release
+
+# Pushing the tag is what releases. v0.13.1 was tagged and pushed without a
+# release ever being created, and nothing noticed until the next one shipped,
+# so the step does not belong to whoever remembers it.
+#
+# Notes come from the tag itself, which means an annotated one:
+#
+#   git tag -a --cleanup=verbatim v0.15.0 -F notes.md
+#   git push origin v0.15.0
+#
+# --cleanup=verbatim is not optional. Git strips every line beginning with #
+# from a tag message by default, which silently deletes each "## Changed" and
+# "## Fixed" heading and leaves the bullets running together.
+#
+# A lightweight tag resolves to its commit, so %(contents) would hand back the
+# release commit's message and trailer rather than notes. The object type is
+# the only honest test of whether anything was written, and a tag with nothing
+# to say falls back to notes generated from the commits since the last one.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The tag object and its message, and the history --generate-notes
+          # walks when the tag carries none.
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # test.yml runs on this push too, but a separate workflow cannot gate
+      # this one. A tag that fails its own tests must not become a release.
+      - run: npm run check
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already has a release; nothing to do."
+            exit 0
+          fi
+          notes=""
+          if [ "$(git cat-file -t "$TAG")" = "tag" ]; then
+            notes=$(git tag -l --format='%(contents)' "$TAG")
+          fi
+          if [ -n "${notes//[[:space:]]/}" ]; then
+            gh release create "$TAG" --title "keep going $TAG" --notes "$notes"
+          else
+            echo "::warning::$TAG is not an annotated tag; releasing with generated notes."
+            gh release create "$TAG" --title "keep going $TAG" --generate-notes
+          fi
