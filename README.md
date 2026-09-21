@@ -18,7 +18,8 @@ message and the owner's request — redacted and truncated — and answers:
 - `CONTINUE` — work remains that the agent can do right now.
 - `THINK` — it should reason this through instead of stopping or asking.
 - `RESCAN` — it claims open-ended work is done; one more fresh pass first.
-- `STOP` — it is genuinely done, or genuinely blocked on the user.
+- `STOP` — it is genuinely done, genuinely blocked on the user, or waiting on
+  a decision only the owner can make.
 
 `RESCAN` is offered once per owner turn. The report of that scan is itself a
 claim that the work is done, so on every later stop of the turn the reviewer is
@@ -27,14 +28,19 @@ told the scan was already asked for and chooses among the other three. A
 through the way an unparseable verdict does, with a warning to the owner.
 
 The first three block the stop (in Pi, queue a follow-up) with a line the
-reviewer writes for the occasion. Everything else lets the stop through: a
+reviewer writes for the occasion. That line never speaks for the owner: the
+reviewer is told not to state what they said, meant or approved, because the
+agent sees the sentence and not the reading behind it, and a turn that ended on
+a decision only the owner can make is `STOP` rather than something to push past. Everything else lets the stop through: a
 missing binary, a timeout, an unparseable verdict, a final message that is the
 exact reply the owner asked for, or a bare completion token (`Done.`) with no
 owner prompt to weigh it against.
 
 At most 100 continuations per owner turn; over the last 10 the reviewer is
 asked for a line about landing what is in flight, and past the cap the stop is
-accepted unreviewed. The count is a tally per session and turn under
+accepted unreviewed. From the first continuation it is told how many the turn
+has already had — earlier nudges are filtered out of the transcript it reads,
+so a stop it keeps refusing would otherwise look like a first attempt. The count is a tally per session and turn under
 `$XDG_STATE_HOME/keep-going` (the ghost home for Ghost). Where the stop names
 no turn, as on Claude Code, it is read from the transcript; Pi counts
 follow-ups on the session branch. Subagents on Claude Code and Muse are

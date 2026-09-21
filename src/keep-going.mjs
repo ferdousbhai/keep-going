@@ -395,15 +395,58 @@ function messageText(payload) {
     .join("\n");
 }
 
+// Whole records the harness writes when a turn ends early. Unlike the context
+// it injects, a marker carries none of the flags that give a record away as
+// the harness's own — no isMeta, no promptSource, no origin — so left unnamed
+// it reads as something the owner typed: the reviewer is handed one as the
+// turn's request, and the continuation count starts over as though a new turn
+// had begun, which is the opposite of what an interruption means.
+//
+// Matched whole and never as a prefix. The same text leads the message an
+// owner types after interrupting, and everything past it is theirs.
+const HARNESS_MARKERS = new Set([
+  "[Request interrupted by user]",
+  "[Request interrupted by user for tool use]",
+]);
+
+// Wrappers the harness puts around text that is not a request: context it
+// prepends to a turn, and the echo and output of a command the owner ran from
+// the prompt. Running `!ls` mid-turn is not asking the agent for anything, and
+// its output is even less so, but both land as user-role records carrying the
+// same flags a typed prompt carries.
+//
+// A slash command is deliberately absent. `<command-name>` and
+// `<command-message>` wrap something the owner invoked on purpose, and the
+// skills among them are the whole of what the turn was asked for.
+const INJECTED_PREFIXES = [
+  "<environment_context>",
+  "<recommended_plugins>",
+  "# AGENTS.md instructions",
+  "<skills_instructions>",
+  "<permissions instructions>",
+  "<local-command-caveat>",
+  "<local-command-stdout>",
+  "<local-command-stderr>",
+  "<bash-input>",
+  "<bash-stdout>",
+  "<bash-stderr>",
+  // Codex's own bookkeeping. <turn_aborted> is its interruption marker, the
+  // counterpart to the one in HARNESS_MARKERS; the rest name themselves.
+  "<turn_aborted>",
+  "<codex_internal_context>",
+  "<in-app-browser-context>",
+  "<task-notification>",
+  // A finished subagent reporting back. Codex has no flag for it the way
+  // Claude's task notifications do, and nothing else excludes it from turn
+  // segmentation, so it opened turns of its own in the history the reviewer
+  // browses — a third of them, across most sessions that used subagents.
+  "<subagent_notification>",
+];
+
 function isInjectedContext(text) {
   const trimmed = text.trimStart();
-  return (
-    trimmed.startsWith("<environment_context>") ||
-    trimmed.startsWith("<recommended_plugins>") ||
-    trimmed.startsWith("# AGENTS.md instructions") ||
-    trimmed.startsWith("<skills_instructions>") ||
-    trimmed.startsWith("<permissions instructions>")
-  );
+  if (HARNESS_MARKERS.has(text.trim())) return true;
+  return INJECTED_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
 }
 
 async function* jsonLines(file, range = {}) {
@@ -448,7 +491,11 @@ function claudeUserMessage(record) {
   const text = typeof record.message.content === "string"
     ? record.message.content
     : messageText(record.message);
-  if (!text || isInjectedContext(text)) return null;
+  // A compaction summary says so in a field of its own. It recaps the session
+  // in the owner's place, so counting it would restart the turn and handing it
+  // to the reviewer would offer a recap of past work as the request to judge
+  // the last message against — which nothing can fulfill.
+  if (!text || record.isCompactSummary === true || isInjectedContext(text)) return null;
   return {
     text,
     genuine:
@@ -519,7 +566,12 @@ const grokChatHistory = (updates) => path.join(path.dirname(updates), "chat_hist
 function grokQueryText(record) {
   const raw = messageText(record);
   const tagged = raw.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/);
-  return lastGenuinePrompt(tagged ? tagged[1] : raw);
+  if (tagged) return lastGenuinePrompt(tagged[1]);
+  // What the owner typed is tagged. An untagged block is one the log wrapped
+  // for its own purposes — <user_info> and friends — and carries no request.
+  // The guard lives here rather than at one call site, so prompt recovery and
+  // turn segmentation cannot disagree about what counts as a prompt.
+  return raw.trimStart().startsWith("<") ? "" : lastGenuinePrompt(raw);
 }
 
 async function grokOwnerPrompt(input) {
@@ -597,9 +649,7 @@ function claudeTurn(record) {
 function grokTurn(record) {
   if (record?.type === "user" && !record.synthetic_reason) {
     const text = grokQueryText(record);
-    // Prompt recovery falls back to prompt_history; the chat log's injected
-    // blocks (<user_info> and friends) carry no request to index.
-    return text && !text.startsWith("<") ? { open: text } : null;
+    return text ? { open: text } : null;
   }
   if (record?.type === "assistant") {
     const raw = record.content;

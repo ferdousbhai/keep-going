@@ -573,6 +573,113 @@ test("Claude counting starts at the last genuine prompt and counts only hook fee
   }
 });
 
+test("an interruption is not a new owner prompt", { concurrency: false }, async () => {
+  // The marker the harness writes when a turn ends early carries none of the
+  // flags the other injected records carry, so it used to pass as a genuine
+  // prompt: the count restarted at zero and the reviewer was handed
+  // "[Request interrupted by user]" as the request to judge against. An
+  // interruption is the owner cutting a turn short, not asking for something.
+  const context = await claudeFixture();
+  try {
+    const owner = { type: "user", message: { role: "user", content: "Fix the thing." }, origin: { kind: "human" } };
+    const feedback = { type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback: continue" } };
+    await appendRecords(context.input.transcript_path, [owner, feedback, feedback].map((r) => JSON.stringify(r)));
+    assert.equal(await claudeContinuations(context.input), 2);
+
+    for (const content of ["[Request interrupted by user]", "  [Request interrupted by user for tool use]  "]) {
+      await appendRecords(context.input.transcript_path, [JSON.stringify({ type: "user", message: { role: "user", content } })]);
+    }
+    assert.equal(await claudeContinuations(context.input), 2);
+    assert.equal(await resolveOwnerPrompt(context.input, "claude"), "Fix the thing.");
+
+    // Interrupting and then typing is the ordinary way to redirect a turn, and
+    // the harness leads that message with the same text. Everything past the
+    // marker is the owner's, so the record stays theirs and starts a new turn.
+    await appendRecords(context.input.transcript_path, [JSON.stringify({
+      type: "user",
+      origin: { kind: "human" },
+      message: { role: "user", content: "[Request interrupted by user] do the other thing instead" },
+    })]);
+    assert.equal(await claudeContinuations(context.input), 0);
+    assert.match(await resolveOwnerPrompt(context.input, "claude"), /do the other thing instead/);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("a subagent reporting back does not open a turn", { concurrency: false }, async () => {
+  // Codex has no flag for these the way Claude's task notifications do, and
+  // codexOwnerPrompt only escapes them because a notification carries no
+  // turn_id to match. Turn segmentation has no such guard, so they opened
+  // turns of their own in the history the reviewer can ask to read.
+  const context = await fixture();
+  try {
+    await appendRecords(context.input.transcript_path, [
+      { type: "turn_context", payload: { turn_id: "t1" } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Fix the thing." }] } },
+      { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Fixed." }] } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<subagent_notification>agent 3 finished</subagent_notification>" }] } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<turn_aborted>The user interrupted the previous turn on purpose.</turn_aborted>" }] } },
+      { type: "turn_context", payload: { turn_id: "t2" } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Now the other thing." }] } },
+    ].map((r) => JSON.stringify(r)));
+
+    const owners = (await listPastTurns({ ...context.input, turn_id: "t2" }, "codex"))
+      .map((turn) => turn.owner);
+    assert.ok(!owners.some((owner) => owner.startsWith("<subagent_notification>")), owners.join(" | "));
+    // The notification sat between the two prompts; the turn it used to open
+    // would have come last, pushing the real request out of that slot.
+    assert.deepEqual(owners.slice(-1), ["Fix the thing."]);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("running a command is not asking for anything", { concurrency: false }, async () => {
+  // A command the owner runs from the prompt lands as three user-role records
+  // — the echo, the output, and any error — each carrying the flags a typed
+  // prompt carries. Counted, they restart the turn; read as the request, they
+  // hand the reviewer "vscode" to judge the last message against. Same for a
+  // compaction summary, which says what it is in a field of its own.
+  const context = await claudeFixture();
+  try {
+    const owner = { type: "user", message: { role: "user", content: "Fix the thing." }, origin: { kind: "human" } };
+    const feedback = { type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback: continue" } };
+    await appendRecords(context.input.transcript_path, [owner, feedback].map((r) => JSON.stringify(r)));
+    assert.equal(await claudeContinuations(context.input), 1);
+
+    const noise = [
+      "<bash-input>vscode</bash-input>",
+      "<bash-stdout></bash-stdout><bash-stderr>vscode: command not found</bash-stderr>",
+      "<local-command-stdout>Set model to `Opus 5`</local-command-stdout>",
+      // Claude Code says it in the caveat itself: "The messages below were
+      // generated by the user while running local commands. DO NOT respond."
+      "<local-command-caveat>Caveat: The messages below were generated by the user while running local commands.</local-command-caveat>",
+    ].map((content) => JSON.stringify({ type: "user", message: { role: "user", content } }));
+    noise.push(JSON.stringify({
+      type: "user",
+      isCompactSummary: true,
+      message: { role: "user", content: "This session is being continued from a previous conversation that ran out of context." },
+    }));
+    await appendRecords(context.input.transcript_path, noise);
+
+    assert.equal(await claudeContinuations(context.input), 1);
+    assert.equal(await resolveOwnerPrompt(context.input, "claude"), "Fix the thing.");
+
+    // A slash command is the owner invoking something on purpose, so it still
+    // opens a turn: the skills among them are the whole of the request.
+    await appendRecords(context.input.transcript_path, [JSON.stringify({
+      type: "user",
+      origin: { kind: "human" },
+      message: { role: "user", content: "<command-message>simplify</command-message> <command-name>/simplify</command-name>" },
+    })]);
+    assert.equal(await claudeContinuations(context.input), 0);
+    assert.match(await resolveOwnerPrompt(context.input, "claude"), /simplify/);
+  } finally {
+    await context.cleanup();
+  }
+});
+
 test("Claude ignores orphan feedback and resets the streaming count for a new owner", async (t) => {
   const context = await claudeFixture();
   t.after(() => context.cleanup());
@@ -1096,6 +1203,25 @@ test("Grok recovers owner_prompt from prompt_history", { concurrency: false }, a
     await handleStop(input, "grok");
     const [call] = await context.calls();
     assert.match(call.args[call.args.indexOf("--single") + 1], /"owner_prompt":"Ship the hook\."/);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Grok reads the chat log's wrapper blocks as nobody's prompt", { concurrency: false }, async () => {
+  // With no prompt_history the chat log is the fallback, and what the owner
+  // typed is tagged there. The untagged blocks beside it — <user_info> and
+  // friends — are the log's own. Turn segmentation always skipped them;
+  // prompt recovery used to hand the last one to the reviewer as the request.
+  const context = await grokFixture();
+  try {
+    const { enc, input } = await grokSession(context);
+    await rm(path.join(enc, "prompt_history.jsonl"), { force: true });
+    await writeFile(path.join(path.dirname(input.transcript_path), "chat_history.jsonl"), [
+      JSON.stringify({ type: "user", content: [{ type: "text", text: "<user_query>Ship the hook.</user_query>" }] }),
+      JSON.stringify({ type: "user", content: [{ type: "text", text: "<user_info>cwd=/home/dous shell=bash</user_info>" }] }),
+    ].join("\n") + "\n");
+    assert.equal(await resolveOwnerPrompt(input, "grok"), "Ship the hook.");
   } finally {
     await context.cleanup();
   }
@@ -1835,8 +1961,9 @@ test("the shipped plugin bundles no runtime dependency", async () => {
   // the bundle matches src, not that src stayed dependency-free. The size cap
   // below is recalibrated when a feature grows src on purpose (16 KiB through
   // the quiet wait, 22 KiB with reviewer history lookup, 23 KiB with audit raw
-  // text and the stub skip, 24 KiB with the once-per-turn rescan); the
-  // dependency assertions above are the part that never moves.
+  // text and the stub skip, 24 KiB with the once-per-turn rescan, 25 KiB with
+  // the owner-authority prompt rules); the dependency assertions above are the
+  // part that never moves.
   const manifest = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8")
   );
@@ -1844,7 +1971,7 @@ test("the shipped plugin bundles no runtime dependency", async () => {
 
   const bundlePath = new URL("../plugins/keep-going/scripts/keep-going.mjs", import.meta.url);
   const bundle = await stat(bundlePath);
-  assert.ok(bundle.size < 24 * 1024, `expected bundle below 24 KiB, received ${bundle.size} bytes`);
+  assert.ok(bundle.size < 25 * 1024, `expected bundle below 25 KiB, received ${bundle.size} bytes`);
 
   const source = await readFile(bundlePath, "utf8");
   const bareImports = [...source.matchAll(/^\s*import[^\n]*?from\s+"([^"]+)"/gm)]
