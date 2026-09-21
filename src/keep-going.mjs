@@ -195,9 +195,14 @@ const VERDICTS = {
       "Look again with fresh eyes.",
     ],
   },
+  // Waiting on the owner's say-so is named here rather than left to the THINK
+  // preference below. Consent is the one thing no amount of reasoning
+  // produces, and a reviewer with no word for it reads a pending
+  // authorization as a question the agent could have answered itself.
   STOP: {
     blocks: false,
-    describe: "work is complete, or progress genuinely requires the user or an external state change.",
+    describe:
+      "work is complete, progress genuinely requires the user or an external state change, or the agent is waiting on a decision only the owner has standing to make \u2014 consent to deploy, publish, send, spend, or delete.",
   },
 };
 
@@ -268,6 +273,11 @@ ${names.map((name) => `${name} — ${VERDICTS[name].describe}`).join("\n")}
 
 Prefer THINK over STOP when the request for input looks self-resolvable by the agent.
 Do not default to any outcome or invent unstated work.
+
+Never state or imply what the owner said, meant, approved, confirmed or wants.
+The agent cannot tell your reading of the owner's words from the owner's own,
+so such a line reads to it as permission it never received. A turn that ended
+on a decision only the owner can make is STOP, not something to argue past.
 
 ${rescanGuidance}
 
@@ -1274,10 +1284,21 @@ function trailingVerdict(body) {
 const LAST_STRETCH_NOTE =
   "This turn is near its limit: tell the agent to land what is in flight rather than start anything new.";
 
+// Earlier nudges are filtered out of the transcript the reviewer reads, so
+// without this every firing looks like the first. The agent meanwhile grows
+// more insistent about why it stopped, and a reviewer that cannot see its own
+// refused attempts reads that insistence as resistance to push harder against.
+// The count is the only way it learns it is being refused rather than ignored.
+const refusalNote = (continuations) =>
+  `This turn has already been continued ${continuations} time${continuations === 1 ? "" : "s"}. `
+  + "If the agent is holding for the same stated reason as before, that reason is a real blocker — STOP.";
+
 function reviewPrompt(continuations, rescanned = false) {
   const base = rescanned ? RESCAN_SPENT_PROMPT : REVIEW_PROMPT;
-  if (continuations < CONTINUATION_CAP - LAST_STRETCH) return base;
-  return `${base}\n\n${LAST_STRETCH_NOTE}`;
+  const notes = [];
+  if (continuations > 0) notes.push(refusalNote(continuations));
+  if (continuations >= CONTINUATION_CAP - LAST_STRETCH) notes.push(LAST_STRETCH_NOTE);
+  return notes.length ? `${base}\n\n${notes.join("\n\n")}` : base;
 }
 
 // The reviewer writes the whole line for every blocking verdict. A fixed

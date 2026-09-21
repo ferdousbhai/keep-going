@@ -812,6 +812,35 @@ test("the reviewer's own line is carried through, sanitised, or truncated", () =
   });
 });
 
+test("a nudge may not speak for the owner", () => {
+  // Observed in the wild, three stops running on one turn: the reviewer read
+  // an "ok" that had answered an earlier question, called it consent to
+  // deploy, and each refusal it met came back as a stronger claim about what
+  // the owner had agreed to. The agent sees the sentence and not the reasoning
+  // behind it, so a nudge like that reads as permission it never received.
+  assert.match(REVIEW_PROMPT, /Never state or imply what the owner said/);
+  assert.match(RESCAN_SPENT_PROMPT, /Never state or imply what the owner said/);
+
+  // Consent is the one thing the agent cannot reason its way to, so the
+  // reviewer is given somewhere honest to land a turn that ends on it rather
+  // than filing it under questions the agent could have answered itself.
+  assert.match(VERDICTS.STOP.describe, /only the owner has standing to make/);
+  assert.match(REVIEW_PROMPT, /only the owner has standing to make/);
+});
+
+test("the reviewer is told when it is being refused", () => {
+  // Earlier nudges are filtered out of the transcript it reads, so without the
+  // count every firing looks like the first and a holding agent reads as a
+  // stalling one. The note is the only thing that tells it otherwise.
+  assert.doesNotMatch(reviewPrompt(0), /already been continued/);
+  assert.match(reviewPrompt(1), /already been continued 1 time\./);
+  assert.match(reviewPrompt(3), /already been continued 3 times\./);
+  assert.match(reviewPrompt(2), /that reason is a real blocker \u2014 STOP/);
+  // Near the cap it carries both notes, and the rescan variant keeps its own.
+  assert.match(reviewPrompt(CONTINUATION_CAP - 1), /already been continued[\s\S]*land what is in flight/);
+  assert.match(reviewPrompt(CONTINUATION_CAP - 1, true), /not on offer[\s\S]*already been continued/);
+});
+
 test("the fallback line rotates and the last stretch asks for a landing", () => {
   // One sentence repeated a hundred times reads as a loop, not a push.
   const reasons = Array.from(
@@ -828,7 +857,8 @@ test("the fallback line rotates and the last stretch asks for a landing", () => 
 
   // Only this side knows the cap, so it reaches the reviewer the way every
   // other hook-side fact does: in the prompt, before the line is written.
-  assert.equal(reviewPrompt(CONTINUATION_CAP - LAST_STRETCH - 1), REVIEW_PROMPT);
+  assert.equal(reviewPrompt(0), REVIEW_PROMPT);
+  assert.doesNotMatch(reviewPrompt(CONTINUATION_CAP - LAST_STRETCH - 1), /near its limit/);
   assert.match(reviewPrompt(CONTINUATION_CAP - LAST_STRETCH), /near its limit/);
   assert.match(reviewPrompt(CONTINUATION_CAP - 1), /land what is in flight/);
   assert.equal(reviewPrompt(0, true), RESCAN_SPENT_PROMPT);
