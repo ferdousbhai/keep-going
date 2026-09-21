@@ -160,7 +160,7 @@ writeFileSync(output, value);
 
   const previous = environmentSnapshot();
   process.env.KEEP_GOING_CODEX_BIN = modelMock;
-  process.env.KEEP_GOING_CODEX_MODEL = "gpt-5.6-luna";
+  process.env.KEEP_GOING_CODEX_MODEL = "gpt-5.5";
   process.env.MOCK_CALL_LOG = callLog;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
   process.env.XDG_STATE_HOME = path.join(root, "state");
@@ -256,7 +256,7 @@ if (pad > 0) process.stdout.write("y".repeat(pad));
   const previous = environmentSnapshot();
   process.env.CLAUDE_CONFIG_DIR = claudeHome;
   process.env.KEEP_GOING_CLAUDE_BIN = modelMock;
-  process.env.KEEP_GOING_CLAUDE_MODEL = "sonnet";
+  process.env.KEEP_GOING_CLAUDE_MODEL = "haiku";
   process.env.MOCK_CALL_LOG = callLog;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
   process.env.XDG_STATE_HOME = path.join(root, "state");
@@ -377,8 +377,8 @@ test("STOP accepts the stop", { concurrency: false }, async () => {
     const output = await handleStop(context.input);
     assert.deepEqual(output, {});
     const calls = await context.calls();
-    assert.deepEqual(calls.map((item) => item.model), ["gpt-5.6-luna"]);
-    assert.ok(calls[0].args.includes('model_reasoning_effort="none"'));
+    assert.deepEqual(calls.map((item) => item.model), ["gpt-5.5"]);
+    assert.ok(calls[0].args.includes('model_reasoning_effort="low"'));
     assert.ok(!calls[0].args.includes("--output-schema"));
     assert.match(calls[0].prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.match(calls[0].prompt, /"owner_prompt":"Build it now. token=\[REDACTED\]"/);
@@ -547,7 +547,7 @@ test("Claude classifies with no tools and the lowest advertised effort", { concu
     const output = await handleStop(context.input, "claude");
     assert.deepEqual(output, {});
     const [call] = await context.calls();
-    assert.equal(call.model, "sonnet");
+    assert.equal(call.model, "haiku");
     assert.equal(call.args[call.args.indexOf("--effort") + 1], "low");
     assert.ok(call.args.includes("--safe-mode"));
     assert.ok(call.args.includes("--no-session-persistence"));
@@ -563,16 +563,16 @@ test("Claude classifies with no tools and the lowest advertised effort", { concu
   }
 });
 
-test("names no model unless one is configured", { concurrency: false }, async () => {
-  // Every host picks its own reviewer when the knob is unset, the way ghost and
-  // grok always have. A default here would be this tool choosing a vendor's
-  // model on the owner's behalf, and would age: the codex one named a specific
-  // release, not a tier.
-  for (const [runner, fixtureFor, variable] of [
-    ["codex", fixture, "KEEP_GOING_CODEX_MODEL"],
-    ["claude", claudeFixture, "KEEP_GOING_CLAUDE_MODEL"],
-    ["muse", museFixture, "KEEP_GOING_MUSE_MODEL"],
-    ["grok", grokFixture, "KEEP_GOING_GROK_MODEL"],
+test("Codex and Claude review on a smaller tier unless one is configured", { concurrency: false }, async () => {
+  // A one-word verdict does not need the host's frontier default. Claude's
+  // alias tracks the latest Sonnet; Codex has no family alias, so its default
+  // names a release and ages with it. Muse and Grok have no smaller tier to
+  // name and keep their own defaults, the way Ghost's smol bridge always has.
+  for (const [runner, fixtureFor, variable, expected] of [
+    ["codex", fixture, "KEEP_GOING_CODEX_MODEL", "gpt-5.6-luna"],
+    ["claude", claudeFixture, "KEEP_GOING_CLAUDE_MODEL", "sonnet"],
+    ["muse", museFixture, "KEEP_GOING_MUSE_MODEL", undefined],
+    ["grok", grokFixture, "KEEP_GOING_GROK_MODEL", undefined],
   ]) {
     const context = await fixtureFor();
     try {
@@ -580,7 +580,8 @@ test("names no model unless one is configured", { concurrency: false }, async ()
       process.env.MOCK_REVIEW_RESPONSE = "STOP";
       await handleStop(context.input, runner);
       const [call] = await context.calls();
-      assert.ok(!call.args.includes("--model"), `${runner} passed --model with ${variable} unset`);
+      const named = call.args.includes("--model") ? call.args[call.args.indexOf("--model") + 1] : undefined;
+      assert.equal(named, expected, `${runner} reviewed on ${named} with ${variable} unset`);
     } finally {
       await context.cleanup();
     }

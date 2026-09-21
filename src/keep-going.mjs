@@ -266,10 +266,16 @@ ask yet — you can work this out." Speak to the agent. Name no task, file,
 command, or requirement its message did not already state. A longer line is
 truncated at ${NUDGE_LIMIT} characters.`;
 
-// No host is given a model it did not choose, so the flag is absent unless the
-// variable names one.
-function modelArgs(variable) {
-  const model = process.env[variable];
+// The review is a one-word verdict, so the host's frontier default is more
+// model than it needs. Codex and Claude name a smaller tier the way Ghost's
+// smol bridge does; Muse and Grok have no such tier to name, so the flag is
+// absent unless the variable names one. Claude's alias tracks the latest
+// Sonnet; Codex has no family alias, so its default is an exact release.
+const CODEX_DEFAULT_MODEL = "gpt-5.6-luna";
+const CLAUDE_DEFAULT_MODEL = "sonnet";
+
+function modelArgs(variable, fallback) {
+  const model = process.env[variable] || fallback;
   return model ? ["--model", model] : [];
 }
 
@@ -936,11 +942,13 @@ async function runCodexModel({ prompt, timeoutMs }) {
       directory,
       "--config",
       'approval_policy="never"',
+      // Codex rejects a level its model does not list. Every model it offers
+      // lists "low"; the default review model lists no "none".
       "--config",
-      'model_reasoning_effort="none"',
+      'model_reasoning_effort="low"',
       "--output-last-message",
       outputPath,
-      ...modelArgs("KEEP_GOING_CODEX_MODEL"),
+      ...modelArgs("KEEP_GOING_CODEX_MODEL", CODEX_DEFAULT_MODEL),
       "-",
     ];
     assertExitOk(await runProcess(codex, args, prompt, timeoutMs), "codex exec");
@@ -967,7 +975,7 @@ async function runClaudeModel({ prompt, timeoutMs }) {
       "dontAsk",
       "--output-format",
       "json",
-      ...modelArgs("KEEP_GOING_CLAUDE_MODEL"),
+      ...modelArgs("KEEP_GOING_CLAUDE_MODEL", CLAUDE_DEFAULT_MODEL),
     ];
     const env = { ...process.env };
     delete env.CLAUDECODE;

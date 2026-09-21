@@ -112,17 +112,24 @@ build and unit tests without Pi.
 | Variable | Default |
 | --- | --- |
 | `KEEP_GOING_{CODEX,CLAUDE,MUSE,GHOST,GROK}_BIN` | `codex`, `claude`, `muse`, `ghostd`, `grok` |
-| `KEEP_GOING_{CODEX,CLAUDE,MUSE,GROK}_MODEL` | unset; the reviewer CLI picks its default |
+| `KEEP_GOING_CODEX_MODEL` | `gpt-5.6-luna` |
+| `KEEP_GOING_CLAUDE_MODEL` | `sonnet`; the latest Sonnet |
+| `KEEP_GOING_{MUSE,GROK}_MODEL` | unset; the reviewer CLI picks its default |
 | `KEEP_GOING_PI_MODEL` | unset; Pi's active model |
 | `KEEP_GOING_QUIET_MS` | `15000`; the wait before a fresh stop is reviewed; `0` reviews at once |
 | `KEEP_GOING_TURNS` | unset; `0` disables the past-turn index |
 | `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's raw text and how the stop was decided |
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
-Reviewers run without tools at the lowest reasoning level the host offers
-(`none` on Codex and Pi, `low` on Claude and Grok; Muse at its default). Codex
-runs with `--ignore-user-config`, so `KEEP_GOING_CODEX_MODEL` is the only way
-to choose its model. Ghost's model is chosen by `ghostd hook-smol-complete`.
+Reviewers run without tools and with as little thinking as the host allows:
+`low` on Codex, Claude, and Grok; Muse at its default; Pi at off where the
+model's catalog allows it, else the lowest level the catalog lists. A one-word
+verdict does not need a frontier model, so Codex defaults to `gpt-5.6-luna`
+and Claude to `sonnet`, as Ghost reviews through `ghostd hook-smol-complete`;
+Pi has no smaller tier to name and reviews on the active model. Codex runs
+with `--ignore-user-config`, so `KEEP_GOING_CODEX_MODEL` is the only way to
+choose its model, and its default names a release, not a family, so it moves
+when a newer Luna ships.
 Muse reviews under an empty config overlay so its own Stop hook does not
 re-enter; a non-default `XDG_CONFIG_HOME` is unreachable from a hook, and the
 review then fails open.

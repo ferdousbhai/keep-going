@@ -75,12 +75,30 @@ async function abortable(work, signal) {
   }
 }
 
+// The review wants the least thinking the model allows. `false` is Pi's "off"
+// level. Anthropic and Google APIs then send no level at all, but OpenAI-style
+// APIs send the catalog's off mapping, or a literal "none" when there is no
+// mapping, which a model that lists no such level rejects. Off is requested
+// only where it sends nothing or a value the catalog vouches for; otherwise
+// "minimal", which pi-ai clamps up to the lowest level the catalog allows.
+const NONE_FALLBACK_APIS = new Set([
+  "openai-responses", "openai-codex-responses", "azure-openai-responses", "openai-completions",
+]);
+
+export function reviewReasoning(model) {
+  if (!model.reasoning) return false;
+  const off = model.thinkingLevelMap?.off;
+  if (typeof off === "string") return false;
+  if (off === null || NONE_FALLBACK_APIS.has(model.api)) return "minimal";
+  return false;
+}
+
 export async function reviewWithPi(ctx, model, { prompt, timeoutMs }, signal) {
   const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
   const response = await abortable(() => ctx.modelRegistry.complete(
     model,
     { messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }] },
-    { signal: deadline, maxTokens: 2048, cacheRetention: "none", reasoning: false },
+    { signal: deadline, maxTokens: 2048, cacheRetention: "none", reasoning: reviewReasoning(model) },
   ), deadline);
   deadline.throwIfAborted();
   if (response.stopReason !== "stop") {

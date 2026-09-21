@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import keepGoing, { reviewerModel, reviewWithPi } from "../src/pi.mjs";
+import keepGoing, { reviewerModel, reviewReasoning, reviewWithPi } from "../src/pi.mjs";
 import { CONTINUATION_CAP, handleStop } from "../src/keep-going.mjs";
 
 const text = (value) => [{ type: "text", text: value }];
@@ -101,7 +101,7 @@ test("Pi uses its active model and sends only the redacted final text", async (t
   assert.match(prompt, /"owner_prompt":"private owner request"/);
   assert.doesNotMatch(prompt, /private-value|private\/workspace/);
   assert.equal(options.maxTokens, 2048);
-  assert.equal(options.reasoning, false);
+  assert.equal(options.reasoning, false); // the fixture model does not reason
   assert.equal(f.sent.length, 0);
   const [row] = await f.audit();
   assert.equal(row.runner, "pi");
@@ -346,4 +346,20 @@ test("the Pi package ships a loadable, dependency-free extension", async () => {
   const bareImports = [...source.matchAll(/\bfrom\s*["']([^"']+)["']/g)]
     .map((match) => match[1]).filter((specifier) => !specifier.startsWith("node:"));
   assert.deepEqual(bareImports, []);
+});
+
+test("the Pi review asks for a thinking level the model's catalog allows", () => {
+  const map = (off) => ({ off, minimal: null, low: "low", medium: "medium", high: "high" });
+  for (const [model, expected, why] of [
+    [{ reasoning: false, api: "openai-responses" }, false, "no thinking to turn off"],
+    [{ reasoning: true, api: "anthropic-messages" }, false, "off disables thinking and sends no level"],
+    [{ reasoning: true, api: "anthropic-messages", thinkingLevelMap: map(null) }, "minimal", "thinking cannot be disabled"],
+    [{ reasoning: true, api: "openai-codex-responses", thinkingLevelMap: map(null) }, "minimal", "off is unsupported; pi-ai clamps to the lowest listed level"],
+    [{ reasoning: true, api: "openai-responses", thinkingLevelMap: map("none") }, false, "the catalog vouches for what off sends"],
+    [{ reasoning: true, api: "openai-responses" }, "minimal", "no mapping: off would send a literal \"none\" the model may reject"],
+    [{ reasoning: true, api: "openai-completions" }, "minimal", "same fallback on the completions API"],
+    [{ reasoning: true, api: "google-generative-ai" }, false, "off disables thinking and sends no level"],
+  ]) {
+    assert.equal(reviewReasoning(model), expected, why);
+  }
 });
