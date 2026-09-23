@@ -127,7 +127,7 @@ build and unit tests without Pi.
 | `KEEP_GOING_PI_MODEL` | unset; Pi's active model |
 | `KEEP_GOING_QUIET_MS` | `15000`; the wait before a fresh stop is reviewed; `0` reviews at once |
 | `KEEP_GOING_TURNS` | unset; `0` disables the past-turn index |
-| `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's raw text and how the stop was decided |
+| `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's raw text, how the stop was decided, and, where past turns were offered, how many (`past_turns`) and which ranges the reviewer read (`turn_requests`) |
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
 Reviewers run without tools and with as little thinking as the host allows:

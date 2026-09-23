@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 
 import {
   CONTINUATION_CAP,
+  TURN_INDEX_LIMIT,
   BLOCKING_VERDICTS,
   VERDICTS,
   LAST_STRETCH,
@@ -1810,6 +1811,197 @@ test("without past turns a TURN line is just a bad verdict", { concurrency: fals
     assert.doesNotMatch(prompts[0], /Past turns/);
   } finally {
     await context.cleanup();
+  }
+});
+
+// A Claude transcript with `count` finished turns before the current one, so
+// history requests have ranges to name.
+async function claudeHistory(context, count) {
+  const records = [];
+  for (let n = 1; n <= count; n += 1) {
+    records.push(
+      { type: "user", message: { role: "user", content: `Errand ${n}.` }, origin: { kind: "human" } },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: `Errand ${n} done.` }] } },
+    );
+  }
+  records.push(
+    { type: "user", message: { role: "user", content: "Build it now." }, origin: { kind: "human" } },
+    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Candidate final response." }] } },
+  );
+  await writeFile(context.input.transcript_path, records.map((record) => JSON.stringify(record)).join("\n"));
+}
+
+// Drive one Claude stop through scripted reviewer replies and return what the
+// audit log recorded for it, plus what the reviewer was shown.
+async function historyStop(replies, { turns = 3, env = {} } = {}) {
+  const context = await claudeFixture();
+  try {
+    await claudeHistory(context, turns);
+    Object.assign(process.env, env);
+    const prompts = [];
+    const output = await handleStop(context.input, "claude", {
+      runModel: async ({ prompt }) => {
+        prompts.push(prompt);
+        return replies.shift() ?? "STOP";
+      },
+    });
+    const rows = await auditRows();
+    assert.equal(rows.length, 1);
+    return { output, row: rows[0], prompts };
+  } finally {
+    await context.cleanup();
+  }
+}
+
+test("the audit row says history was offered and not read", { concurrency: false }, async () => {
+  const { row, prompts } = await historyStop(["STOP"]);
+  assert.equal(row.verdict, "STOP");
+  assert.equal(row.past_turns, 3);
+  assert.deepEqual(row.turn_requests, []);
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /Past turns, oldest first/);
+});
+
+test("the audit row records a history request and the verdict after it", { concurrency: false }, async () => {
+  const { output, row, prompts } = await historyStop(["TURN 2", "CONTINUE\nStill unfinished."]);
+  assert.deepEqual(output, { decision: "block", reason: "Still unfinished." });
+  assert.equal(row.verdict, "CONTINUE");
+  assert.equal(row.past_turns, 3);
+  assert.deepEqual(row.turn_requests, [{ start: 2, end: 2 }]);
+  // reviewer_output is the reply that decided the stop, not the request.
+  assert.equal(row.reviewer_output, "CONTINUE\nStill unfinished.");
+  assert.match(prompts[1], /Turn 2\nowner_prompt: Errand 2\.\nfinal_response: Errand 2 done\./);
+  assert.doesNotMatch(prompts[1], /Turn 1\n|Turn 3\n/);
+});
+
+test("history requests are logged as the ranges actually read", { concurrency: false }, async () => {
+  // -1 is the turn before this one and a backwards range is swapped: the row
+  // holds what was fulfilled, not the reviewer's spelling of it.
+  const { row, prompts } = await historyStop(["TURN -1", "TURN 3-2", "STOP"]);
+  assert.equal(row.verdict, "STOP");
+  assert.deepEqual(row.turn_requests, [{ start: 3, end: 3 }, { start: 2, end: 3 }]);
+  assert.equal(prompts.length, 3);
+  assert.match(prompts[2], /Turn 2\n[\s\S]*Turn 3\n/);
+});
+
+test("a reviewer that keeps asking fails open with every read request logged", { concurrency: false }, async () => {
+  const { output, row, prompts } = await historyStop(["TURN 1", "TURN 1", "TURN 1"]);
+  assert.match(output.systemMessage, /keep-going was skipped/);
+  assert.equal(row.verdict, "ERROR");
+  assert.equal(row.past_turns, 3);
+  assert.deepEqual(row.turn_requests, [{ start: 1, end: 1 }, { start: 1, end: 1 }]);
+  assert.equal(row.reviewer_output, "TURN 1");
+  assert.equal(prompts.length, 3);
+});
+
+test("a request for a turn that does not exist fails open and reads nothing", { concurrency: false }, async () => {
+  const { row, prompts } = await historyStop(["TURN 9"]);
+  assert.equal(row.verdict, "ERROR");
+  assert.equal(row.past_turns, 3);
+  assert.deepEqual(row.turn_requests, []);
+  assert.equal(row.reviewer_output, "TURN 9");
+  assert.equal(prompts.length, 1);
+});
+
+test("the offered count is the index, capped like the index", { concurrency: false }, async () => {
+  const { row, prompts } = await historyStop(["STOP"], { turns: TURN_INDEX_LIMIT + 5 });
+  assert.equal(row.past_turns, TURN_INDEX_LIMIT);
+  // The oldest turns fall off the index; its first entry is turn 6 of 25.
+  assert.match(prompts[0], /\n1: Errand 6\.\n/);
+});
+
+test("no history on offer leaves the audit row without history fields", { concurrency: false }, async () => {
+  // A first turn has nothing before it.
+  const first = await historyStop(["STOP"], { turns: 0 });
+  assert.equal(first.row.verdict, "STOP");
+  assert.equal("past_turns" in first.row, false);
+  assert.equal("turn_requests" in first.row, false);
+  assert.doesNotMatch(first.prompts[0], /Past turns/);
+
+  // History switched off.
+  const disabled = await historyStop(["STOP"], { env: { KEEP_GOING_TURNS: "0" } });
+  assert.equal("past_turns" in disabled.row, false);
+  assert.doesNotMatch(disabled.prompts[0], /Past turns/);
+});
+
+test("Muse, with no transcript, logs no history fields", { concurrency: false }, async () => {
+  const context = await museFixture();
+  try {
+    await handleStop(context.input, "muse", { runModel: async () => "STOP" });
+    const [row] = await auditRows();
+    assert.equal(row.verdict, "STOP");
+    assert.equal("past_turns" in row, false);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("a stop settled before review logs no history fields", { concurrency: false }, async () => {
+  const context = await claudeFixture();
+  try {
+    await claudeHistory(context, 3);
+    const cap = Array.from({ length: CONTINUATION_CAP }, () => JSON.stringify({
+      type: "user", message: { role: "user", content: "Stop hook feedback:\nKeep going." }, isMeta: true,
+    }));
+    await appendRecords(context.input.transcript_path, cap);
+    let called = false;
+    await handleStop(context.input, "claude", { runModel: async () => { called = true; return "STOP"; } });
+    const [row] = await auditRows();
+    assert.equal(called, false);
+    assert.equal(row.verdict, "CAP");
+    assert.equal("past_turns" in row, false);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Ghost and Pi log history the same way", { concurrency: false }, async () => {
+  const ghost = await ghostFixture();
+  try {
+    const sessionFile = path.join(ghost.input.ghost_home, "session.jsonl");
+    const message = (role, value) => JSON.stringify({
+      type: "message", message: { role, content: [{ type: "text", text: value }], stopReason: "stop" },
+    });
+    await writeFile(sessionFile, [
+      message("user", "First errand."),
+      message("assistant", "First errand done."),
+      message("user", "Please finish the requested change."),
+      message("assistant", "Candidate final response."),
+    ].join("\n"));
+    const replies = ["TURN 1", "STOP"];
+    await handleStop({ ...ghost.input, transcript_path: sessionFile }, "ghost", {
+      runModel: async () => replies.shift(),
+    });
+    const [row] = await auditRows();
+    assert.equal(row.past_turns, 1);
+    assert.deepEqual(row.turn_requests, [{ start: 1, end: 1 }]);
+  } finally {
+    await ghost.cleanup();
+  }
+
+  const root = await mkdtemp(path.join(tmpdir(), "pi-history-audit-"));
+  const previous = environmentSnapshot();
+  try {
+    process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
+    const replies = ["TURN -1", "THINK\nWork it out."];
+    const output = await handleStop({
+      session_id: "pi-session",
+      turn_id: "pi-turn",
+      continuation_count: 0,
+      last_assistant_message: "Candidate final response.",
+      owner_prompt: "Finish it.",
+      past_turns: [
+        { owner_prompt: "Earlier.", final_response: "Did it." },
+        { owner_prompt: "Later.", final_response: "Did that too." },
+      ],
+    }, "pi", { runModel: async () => replies.shift() });
+    assert.deepEqual(output, { decision: "block", reason: "Work it out." });
+    const [row] = await auditRows();
+    assert.equal(row.past_turns, 2);
+    assert.deepEqual(row.turn_requests, [{ start: 2, end: 2 }]);
+  } finally {
+    restoreEnvironment(previous);
+    await rm(root, { recursive: true, force: true });
   }
 });
 

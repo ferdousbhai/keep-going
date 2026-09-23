@@ -1300,7 +1300,7 @@ function hookOutputForVerdict(verdict, continuations = 0, nudge = "") {
   return { decision: "block", reason: nudge || spec.fallbacks[continuations % spec.fallbacks.length] };
 }
 
-async function recordReviewAudit(input, runner, { verdict, reason, error, countedBy, reviewerOutput }) {
+async function recordReviewAudit(input, runner, { verdict, reason, error, countedBy, reviewerOutput, pastTurns, turnRequests }) {
   const auditPath = process.env.KEEP_GOING_AUDIT_LOG;
   if (!auditPath) return;
   const entry = {
@@ -1315,6 +1315,9 @@ async function recordReviewAudit(input, runner, { verdict, reason, error, counte
     // The reviewer's own words, kept whole where the rationale keeps only the
     // nudge: a STOP row would otherwise say nothing about why the turn ended.
     ...(reviewerOutput !== undefined ? { reviewer_output: compactText(reviewerOutput, 2_000) } : {}),
+    // Whether history was on offer and what the reviewer read of it, so the
+    // log can say whether the index earns its place in the prompt.
+    ...(pastTurns ? { past_turns: pastTurns, turn_requests: turnRequests } : {}),
     // Record how the turn was counted. For tally-backed hosts, include field
     // names to help diagnose their payload format without logging its values.
     counted_by: countedBy,
@@ -1383,8 +1386,11 @@ async function handleStop(input, runner = "codex", { runModel, delay, onVerdict 
   const named = payloadTurn(input);
   // The last reviewer response, whatever it parses as: an unparseable reply
   // is the debugging evidence, so the audit row keeps it on the fail-open
-  // path as well as the verdict one.
+  // path as well as the verdict one. The history offered and read is kept
+  // on both paths for the same reason.
   let rawReview;
+  let pastTurns = [];
+  const turnRequests = [];
   try {
     // A transcript is read to count when the payload leaves the turn unnamed,
     // and to recover owner_prompt when the host does not send it. A subagent
@@ -1411,14 +1417,13 @@ async function handleStop(input, runner = "codex", { runModel, delay, onVerdict 
     // Past turns ride along only when there are any: the index tells the
     // reviewer what it may ask for, and a harness with no readable history
     // reviews exactly as before.
-    const pastTurns = await listPastTurns(input, runner);
+    pastTurns = await listPastTurns(input, runner);
     let reviewerPrompt = `${reviewPrompt(continuations, rescanned)}\n\n${JSON.stringify({
       last_assistant_message: lastAssistantMessage,
       owner_prompt: compactText(ownerPrompt, 12_000),
     })}`;
     if (pastTurns.length) reviewerPrompt += `\n\n${turnIndexSection(pastTurns)}`;
     const loopStart = Date.now();
-    let turnRequests = 0;
     for (;;) {
       const remaining = REVIEW_BUDGET_MS - (Date.now() - loopStart);
       if (remaining < REVIEW_CALL_FLOOR_MS) {
@@ -1436,12 +1441,12 @@ async function handleStop(input, runner = "codex", { runModel, delay, onVerdict 
       } catch (verdictError) {
         // Not a verdict: the one other legal move is asking for history. Ways
         // of asking that name nothing readable fail open as a bad verdict.
-        const request = pastTurns.length && turnRequests < TURN_REQUESTS_MAX
+        const request = pastTurns.length && turnRequests.length < TURN_REQUESTS_MAX
           ? parseTurnRequest(rawReview, pastTurns.length)
           : null;
         if (!request) throw verdictError;
         reviewerPrompt += `\n\n${formatTurns(pastTurns, request)}\n\nVerdict now, with the turns above in mind.`;
-        turnRequests += 1;
+        turnRequests.push(request);
       }
     }
   } catch (error) {
@@ -1453,7 +1458,7 @@ async function handleStop(input, runner = "codex", { runModel, delay, onVerdict 
       input,
       runner,
       { systemMessage: `keep-going was skipped: ${compactText(error.message, 500)}` },
-      { error: error.message, countedBy, reviewerOutput: rawReview },
+      { error: error.message, countedBy, reviewerOutput: rawReview, pastTurns: pastTurns.length, turnRequests },
     );
   }
 
@@ -1462,7 +1467,7 @@ async function handleStop(input, runner = "codex", { runModel, delay, onVerdict 
     input,
     runner,
     hookOutputForVerdict(review.verdict, continuations, review.nudge),
-    { verdict: review.verdict, countedBy, reviewerOutput: rawReview },
+    { verdict: review.verdict, countedBy, reviewerOutput: rawReview, pastTurns: pastTurns.length, turnRequests },
     countedBy === "transcript" ? continuations : null,
     review.verdict === "RESCAN",
   );
