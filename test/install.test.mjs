@@ -175,7 +175,7 @@ test("installer adds, updates, and removes Muse Code hooks", async () => {
 test("status sees plugin-registered hooks, ours and everyone else's", async () => {
   // A keep-going installed as a Claude plugin lives in no settings file, and
   // another plugin's Stop hook runs on every stop too; status reports both.
-  const { settings, claudeHome, env, cleanup } = await installHome("plugins");
+  const { claudeHome, env, cleanup } = await installHome("plugins");
   const plugins = path.join(claudeHome, "plugins");
   const install = async (name, file, hooks) => {
     const dir = path.join(plugins, "cache", name);
@@ -334,7 +334,7 @@ test("--all writes a native Grok hook beside Claude, and --uninstall --all still
 test("status reports every host, including the one it does not write", async () => {
   // Grok dispatches Claude's settings, so the report distinguishes "covered by
   // another host's file" from both "registered" and "absent".
-  const { settings, codexHome, env, cleanup } = await installHome("status");
+  const { codexHome, env, cleanup } = await installHome("status");
 
   try {
     const bare = await runInstaller(["--status"], env);

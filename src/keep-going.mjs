@@ -147,7 +147,7 @@ const RUNTIMES = {
 
 // Everything that differs per verdict, keyed once: how the prompt defines it,
 // what the reviewer is told to write after it, and what the hook falls back to
-// when the reviewer's own line is unusable. RUNTIMES does this for hosts; the
+// when the reviewer wrote no line. RUNTIMES does this for hosts; the
 // verdict is the other axis this file turns on.
 const VERDICTS = {
   CONTINUE: {

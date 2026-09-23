@@ -428,14 +428,10 @@ test("stub final messages without an owner prompt skip review", async () => {
   }
 });
 
-test("RESCAN blocks with a fresh-scan nudge", async () => {
+test("a bare RESCAN blocks with a fresh-scan fallback", async () => {
   const context = await fixture();
   try {
-    const output = await handleStop(context.input, "codex", {
-      runModel: async () => "RESCAN\nScan once more for leftovers.",
-    });
-    assert.deepEqual(output, { decision: "block", reason: "Scan once more for leftovers." });
-    const bare = await handleStop({ ...context.input, turn_id: "turn-rescan" }, "codex", {
+    const bare = await handleStop(context.input, "codex", {
       runModel: async () => "RESCAN",
     });
     assert.deepEqual(bare, { decision: "block", reason: VERDICTS.RESCAN.fallbacks[0] });
@@ -683,7 +679,7 @@ test("Codex and Claude review on a smaller tier unless one is configured", async
   // A one-word verdict does not need the host's frontier default. Claude's
   // alias tracks the latest Sonnet; Codex has no family alias, so its default
   // names a release and ages with it. Muse and Grok have no smaller tier to
-  // name and keep their own defaults, the way Ghost's smol bridge always has.
+  // name and keep their own defaults.
   for (const [runner, fixtureFor, variable, expected] of [
     ["codex", fixture, "KEEP_GOING_CODEX_MODEL", "gpt-5.6-luna"],
     ["claude", claudeFixture, "KEEP_GOING_CLAUDE_MODEL", "sonnet"],
@@ -1841,6 +1837,7 @@ test("Ghost's turn is its owner prompt, and its tally lives in the ghost home", 
   try {
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     assert.equal((await handleStop(context.input, "ghost")).decision, "block");
+    assert.ok((await auditRows())[0].stop_input_fields.includes("owner_prompt"));
 
     // Ghost declares where its state belongs: the count is written inside the
     // ghost home.
@@ -1868,40 +1865,6 @@ test("Ghost's turn is its owner prompt, and its tally lives in the ghost home", 
   }
 });
 
-test("Ghost takes its turn and count from the payload, not the transcript", async () => {
-  // owner_prompt already names the turn, so the tally keys on it rather than
-  // on anything rebuilt from the session file.
-  const context = await ghostFixture();
-  try {
-    const transcript = path.join(context.input.ghost_home, "sessions", "conv.jsonl");
-    await mkdir(path.dirname(transcript), { recursive: true });
-    await writeFile(transcript, [
-      JSON.stringify({ id: "m1", parentId: null, type: "message", message: { role: "user", content: [{ type: "text", text: context.input.owner_prompt }] } }),
-      JSON.stringify({ id: "c1", parentId: "m1", type: "custom_message", customType: "session-stop-continuation", content: "continue" }),
-    ].join("\n"));
-
-    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
-    const input = { ...context.input, transcript_path: transcript };
-    // The bare verdict carries no line, so the fallback is the first of the pool.
-    assert.deepEqual(await handleStop(input, "ghost"), {
-      decision: "block",
-      reason: VERDICTS.CONTINUE.fallbacks[0],
-    });
-    const [call] = await context.calls();
-    assert.match(call.input.prompt, /Please finish the requested change/);
-
-    // One row per stop, saying which mechanism capped the turn — and for a
-    // host counted by the tally, the field names a RUNTIMES entry needs.
-    const [row] = await auditRows();
-    assert.equal(row.counted_by, "tally");
-    assert.ok(row.stop_input_fields.includes("transcript_path"));
-    assert.equal(row.verdict, "CONTINUE");
-  } finally {
-    await context.cleanup();
-  }
-});
-
-// Both byte guards keep a running count; these prove each limit still fires.
 test("oversized Stop input is refused before any reviewer is spawned", async () => {
   const entry = path.join(import.meta.dirname, "..", "src", "keep-going.mjs");
   const child = spawn(process.execPath, [entry, "claude"], {

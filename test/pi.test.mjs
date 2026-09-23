@@ -88,7 +88,7 @@ async function until(predicate) {
   assert.fail("condition never became true");
 }
 
-test("Pi uses its active model and sends only the redacted final text", async (t) => {
+test("Pi uses its active model and sends the redacted final text and owner request, not the cwd", async (t) => {
   const f = await fixture(t);
   await f.finish(reply("Done. token=private-value"));
   assert.equal(f.calls.length, 1);
