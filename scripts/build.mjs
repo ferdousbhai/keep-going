@@ -29,7 +29,7 @@ export function stampVersion(source, version) {
 }
 
 // Both hosts run the same bundle, and the two files differ only in the root
-// variable and the trailing runner word. Neither host substitutes the other's
+// variable, the trailing runner word, and the events each host dispatches. Neither host substitutes the other's
 // variable, so a copy-paste between them fails open on every stop of whichever
 // host got the wrong one; writing both from here removes the copy-paste.
 export const HOOK_FILES = {

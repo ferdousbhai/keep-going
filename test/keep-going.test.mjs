@@ -2143,10 +2143,9 @@ test("Ghost's turn is its owner prompt, and its tally lives in the ghost home", 
   }
 });
 
-test("Ghost opens no transcript of its own", { concurrency: false }, async () => {
-  // Reading Pi's session tree rebuilt, from a format ghost chose, the turn that
-  // owner_prompt already names. The payload is the cheaper source and the only
-  // one that works for a ghost whose runtime writes no transcript at all.
+test("Ghost takes its turn and count from the payload, not the transcript", { concurrency: false }, async () => {
+  // owner_prompt already names the turn, so the tally keys on it rather than
+  // on anything rebuilt from the session file.
   const context = await ghostFixture();
   try {
     const transcript = path.join(context.input.ghost_home, "sessions", "conv.jsonl");

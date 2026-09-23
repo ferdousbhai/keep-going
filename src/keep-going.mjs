@@ -7,6 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
+import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
 const MAX_STDIN_BYTES = 1024 * 1024;
@@ -28,10 +29,6 @@ function quietDelayMs() {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) return QUIET_DELAY_MS;
   return Math.floor(parsed);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function fileSize(file) {
@@ -210,7 +207,7 @@ const VERDICT_NAMES = Object.keys(VERDICTS);
 const listVerdicts = (names) => new Intl.ListFormat("en", { type: "disjunction" }).format(names);
 
 // Validate the reviewer's tiny provider-independent protocol before translating
-// it to the host-specific Stop-hook JSON.
+// it to the Stop-hook JSON.
 const VERDICT_ALTERNATION = VERDICT_NAMES.join("|");
 const VERDICT_SEPARATOR = "[\\s:.\\u2013\\u2014-]*";
 // A verdict ends where a non-word character does, or where another verdict
@@ -798,9 +795,9 @@ async function recordedRescan(input, runner) {
 }
 
 function stopCandidateText(input) {
-  // Grok spells this one key in camelCase while sending session_id and
-  // transcript_path in snake_case; an unread message is an accepted stop, so
-  // the difference would silently disable the hook there.
+  // Grok spells this key and stopHookActive in camelCase while sending
+  // session_id and transcript_path in snake_case; an unread message is an
+  // accepted stop, so the difference would silently disable the hook there.
   const candidate = input.last_assistant_message ?? input.lastAssistantMessage;
   if (typeof candidate === "string") return candidate;
   return messageText(candidate);
