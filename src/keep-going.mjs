@@ -77,8 +77,8 @@ const ownTranscript = (input) => input.transcript_path;
 
 // Everything that differs per host, keyed once: the inputs it must supply, the
 // directory its state belongs under, the directories its transcripts may live
-// in, how its continuations are counted, how its past turns are read, and how
-// its reviewer is run. A host
+// in, how its continuations are counted, how its owner prompt and past turns
+// are read, how its reviewer is run, and which log shows a follow-up. A host
 // whose stop payload already identifies the turn needs no counter — the tally
 // is keyed on that identity. Function declarations hoist, so the counter and
 // the runners below are already bound when this is evaluated.
@@ -490,7 +490,7 @@ async function claudeContinuations(input) {
 }
 
 function lastGenuinePrompt(text) {
-  const trimmed = typeof text === "string" ? text.trim() : "";
+  const trimmed = text.trim();
   if (!trimmed || isInjectedContext(trimmed) || HOOK_PROMPT_PATTERN.test(trimmed)) return "";
   return trimmed;
 }
@@ -568,7 +568,7 @@ async function resolveOwnerPrompt(input, runner) {
   const recover = RUNTIMES[runner].ownerPrompt;
   if (!recover || input.agent_id) return "";
   try {
-    return (await recover(input)).trim();
+    return await recover(input);
   } catch {
     return "";
   }
@@ -812,13 +812,6 @@ function stopCandidateText(input) {
 // so the model call is skipped and the stop accepted.
 const VACUOUS_COMPLETIONS = new Set(["none", "done", "ok", "okay", "finished", "complete", "completed"]);
 
-function reviewlessStop(ownerPrompt, lastMessage) {
-  if (ownerPrompt) return null;
-  return VACUOUS_COMPLETIONS.has(lastMessage.trim().replace(/[.!]+$/, "").toLowerCase())
-    ? { reason: "nothing to review", countedBy: "stub" }
-    : null;
-}
-
 // setEncoding("utf8") guarantees a chunk never splits a code point, so summing
 // per-chunk lengths is exact and avoids remeasuring the whole stream each time.
 function streamCollector(limit, overflowMessage) {
@@ -994,15 +987,6 @@ async function runClaudeModel({ prompt, timeoutMs }) {
 const grokClassifierPrompt = (verdicts) =>
   `Reply with exactly one of ${listVerdicts(verdicts)} as the first line. No preamble, no analysis.`;
 
-function grokReviewerEnv(overlayHome) {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("GROK_")) delete env[key];
-  }
-  env.GROK_HOME = overlayHome;
-  return env;
-}
-
 // Nested `grok --single` otherwise inherits the parent session's home: MCP
 // servers, plugins, high reasoning, and the coding agent. That is a full
 // turn, and it times out the classifier. The overlay carries auth only, so
@@ -1044,6 +1028,8 @@ async function runGrokModel({ prompt, timeoutMs, verdicts }) {
       { encoding: "utf8", mode: 0o600 },
     );
     const grok = process.env.KEEP_GOING_GROK_BIN || "grok";
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GROK_")));
+    env.GROK_HOME = overlayHome;
     const args = [
       "--single",
       prompt,
@@ -1067,7 +1053,7 @@ async function runGrokModel({ prompt, timeoutMs, verdicts }) {
       ...modelArgs("KEEP_GOING_GROK_MODEL"),
     ];
     const result = assertExitOk(
-      await runProcess(grok, args, "", timeoutMs, grokReviewerEnv(overlayHome), directory),
+      await runProcess(grok, args, "", timeoutMs, env, directory),
       "grok",
     );
     return result.stdout;
@@ -1313,8 +1299,9 @@ async function handleStop(input, runner = "codex", { runModel, delay, onVerdict 
   }
 
   const ownerPrompt = await resolveOwnerPrompt(input, runner);
-  const settled = reviewlessStop(ownerPrompt, lastAssistantMessage);
-  if (settled) return settleStop(input, runner, {}, settled);
+  if (!ownerPrompt && VACUOUS_COMPLETIONS.has(lastAssistantMessage.trim().replace(/[.!]+$/, "").toLowerCase())) {
+    return settleStop(input, runner, {}, { reason: "nothing to review", countedBy: "stub" });
+  }
 
   let review;
   let continuations = await recordedContinuations(input, runner);

@@ -90,10 +90,6 @@ function registrationsIn(groups, event, where) {
     });
 }
 
-// Where a host looks for hooks. Mostly its own settings file — but Grok also
-// dispatches Claude's, and Claude also dispatches its plugins' — so "who
-// dispatches this stop" is a list per host rather than one path, and
-// "covered by another host's file" stops being a special case.
 function settingsSource(runner) {
   const read = async (paths) => {
     const file = TARGETS[runner](paths);

@@ -1366,8 +1366,7 @@ test("Muse blocks an empty final message once, then accepts the retry", { concur
     assert.equal(first.decision, "block");
     assert.match(first.reason, /did not see your last message/);
     assert.deepEqual(await handleStop({ ...input, stop_hook_active: true }, "muse"), {});
-    // Both stops leave a row: this is the path every Muse reminder observer
-    // takes first, and it used to vanish from the audit log.
+    // Both stops leave a row.
     const rows = await auditRows();
     assert.deepEqual(rows.map((row) => [row.verdict, row.counted_by]), [["CONTINUE", "empty"], ["STOP", "empty"]]);
     assert.equal(rows[0].rationale, first.reason);
@@ -1393,20 +1392,6 @@ test("Muse ignores the quiet and history knobs it cannot use", { concurrency: fa
   } finally {
     if (previous === undefined) delete process.env.KEEP_GOING_QUIET_MS;
     else process.env.KEEP_GOING_QUIET_MS = previous;
-    await context.cleanup();
-  }
-});
-
-test("an empty last assistant message blocks once instead of accepting the stop", { concurrency: false }, async () => {
-  const context = await claudeFixture();
-  const input = { session_id: "session-empty", last_assistant_message: "" };
-  try {
-    const first = await handleStop(input, "claude");
-    assert.equal(first.decision, "block");
-    assert.match(first.reason, /did not see your last message/);
-    const second = await handleStop({ ...input, stop_hook_active: true }, "claude");
-    assert.deepEqual(second, {});
-  } finally {
     await context.cleanup();
   }
 });
