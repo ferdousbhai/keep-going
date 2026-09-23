@@ -7,8 +7,8 @@ import test from "node:test";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 
-// Every test here needs the same isolated home: six copies of this block said
-// so. The paths are returned because tests assert against them.
+// Every test here needs the same isolated home. The paths are returned
+// because tests assert against them.
 async function installHome(label) {
   const root = await mkdtemp(path.join(tmpdir(), `keep-going-${label}-`));
   const home = path.join(root, "home");
@@ -17,8 +17,8 @@ async function installHome(label) {
   const grokHome = path.join(home, ".grok");
   const dataHome = path.join(root, "data");
   const configHome = path.join(root, "config");
-  // Every test writes or asserts against this file, and an empty directory is
-  // not a settings file, so the "does not create one" assertion still holds.
+  // Most tests write or assert against Claude's settings; an empty directory
+  // is not a settings file, so the "does not create one" assertion holds.
   await mkdir(claudeHome, { recursive: true });
   return {
     home,
@@ -173,9 +173,8 @@ test("installer adds, updates, and removes Muse Code hooks", async () => {
 });
 
 test("status sees plugin-registered hooks, ours and everyone else's", async () => {
-  // A keep-going installed as a Claude plugin lives in no settings file, so
-  // status called it unregistered; and this session found a second Stop hook
-  // from another plugin that had been running on every stop unremarked.
+  // A keep-going installed as a Claude plugin lives in no settings file, and
+  // another plugin's Stop hook runs on every stop too; status reports both.
   const { settings, claudeHome, env, cleanup } = await installHome("plugins");
   const plugins = path.join(claudeHome, "plugins");
   const install = async (name, file, hooks) => {
@@ -220,9 +219,8 @@ test("status sees plugin-registered hooks, ours and everyone else's", async () =
 });
 
 test("--link registers the checkout, and switching modes replaces rather than adds", async () => {
-  // Wiring a hook at a working tree by hand is what a maintainer wants and how
-  // this machine drifted: the hand-written entry missed an event the installer
-  // would have added. Linking is the same thing, managed.
+  // Wiring a hook at a working tree is what a maintainer wants; linking does
+  // it with every event the installer would add.
   const { settings, dataHome, env, cleanup } = await installHome("link");
   const bundled = path.join(ROOT, "plugins", "keep-going", "scripts", "keep-going.mjs");
   const copied = path.join(dataHome, "keep-going", "keep-going.mjs");
@@ -256,9 +254,8 @@ test("--link registers the checkout, and switching modes replaces rather than ad
 });
 
 test("a registration naming the wrong runner is replaced, not preserved forever", async () => {
-  // --status counted this as a duplicate while the installer, which required
-  // the runner word to match, refused to strip it — so re-running the tool
-  // could never fix what the tool was reporting.
+  // Any keep-going registration is ours whatever its runner word, so
+  // re-running the installer fixes what --status reports.
   const { settings, env, cleanup } = await installHome("wrongrunner");
   try {
     await writeFile(settings, JSON.stringify({
@@ -281,9 +278,8 @@ test("a registration naming the wrong runner is replaced, not preserved forever"
 });
 
 test("a covered host is still checked against its own runner", async () => {
-  // Grok is exempt from the wrong-runtime warning for one reason: a claude
-  // hook reaching it through Claude's settings is correct. Writing that as
-  // "never warn about grok" excused the mis-wiring in grok's own file too.
+  // A claude hook reaching Grok through Claude's settings is correct; one in
+  // Grok's own file naming the wrong runner is still a warning.
   const { grokHome, env, cleanup } = await installHome("coveredrunner");
   const grokHook = path.join(grokHome, "hooks", "keep-going.json");
   try {
@@ -311,8 +307,7 @@ test("a covered host is still checked against its own runner", async () => {
 test("--all writes a native Grok hook beside Claude, and --uninstall --all still clears it", async () => {
   // Dual users need Grok's own file even though Grok also scans Claude's
   // settings. The borrowed copy yields, so --status must not call that a
-  // double review. Removal has to stay exhaustive, or an --all uninstall
-  // leaves behind what an older --all install wrote.
+  // double review. An --all uninstall removes every file --all writes.
   const { settings, grokHome, env, cleanup } = await installHome("all");
   const grokHook = path.join(grokHome, "hooks", "keep-going.json");
   try {
@@ -337,9 +332,8 @@ test("--all writes a native Grok hook beside Claude, and --uninstall --all still
 });
 
 test("installing strips a hand-wired hook wherever it points", async () => {
-  // --status reported these as duplicates while the installer, which matched
-  // exact paths it had written, could not remove them. The remedy was hand
-  // editing, which is the thing this tool exists to avoid.
+  // A registration is ours by script name, not by a path the installer wrote,
+  // so a hand-wired one is stripped like any other.
   const { settings, env, cleanup } = await installHome("handwired");
   try {
     await writeFile(settings, JSON.stringify({
@@ -358,10 +352,9 @@ test("installing strips a hand-wired hook wherever it points", async () => {
   }
 });
 
-test("status reports every host, including the two it does not write", async () => {
-  // Grok dispatching Claude's settings is what made a hook that was listed as
-  // enabled do nothing at all for a day, so the report has to distinguish
-  // "covered by another host's file" from both "registered" and "absent".
+test("status reports every host, including the one it does not write", async () => {
+  // Grok dispatches Claude's settings, so the report distinguishes "covered by
+  // another host's file" from both "registered" and "absent".
   const { settings, codexHome, env, cleanup } = await installHome("status");
 
   try {

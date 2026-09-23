@@ -287,12 +287,6 @@ function modelArgs(variable, fallback) {
   return model ? ["--model", model] : [];
 }
 
-// GROK_HOOK_EVENT is set only by Grok's hook runner, never by Claude Code.
-function resolveRunner(requested) {
-  if (process.env.GROK_HOOK_EVENT) return "grok";
-  return requested;
-}
-
 // With a native Grok hook installed, the Claude-settings copy Grok also
 // dispatches yields, so the stop is reviewed once.
 async function yieldsToGrokNative(requested) {
@@ -329,7 +323,6 @@ function redactSensitive(value) {
 }
 
 function compactText(value, limit) {
-  if (typeof value !== "string") return "";
   const redacted = redactSensitive(value);
   if (redacted.length <= limit) return redacted;
   const head = Math.floor(limit * 0.7);
@@ -429,11 +422,7 @@ async function* jsonLines(file, range = {}) {
 const HOOK_PROMPT_PATTERN = /^\s*Stop hook feedback\b/;
 
 async function allowedTranscriptPath(input, runner) {
-  const transcriptPath = input.transcript_path;
-  if (typeof transcriptPath !== "string" || !transcriptPath) {
-    throw new Error("Stop input is missing transcript_path");
-  }
-  const candidate = await realpath(transcriptPath);
+  const candidate = await realpath(input.transcript_path);
 
   for (const root of RUNTIMES[runner].roots()) {
     try {
@@ -986,8 +975,8 @@ const grokClassifierPrompt = (verdicts) =>
 
 // Nested `grok --single` otherwise inherits the parent session's home: MCP
 // servers, plugins, high reasoning, and the coding agent. That is a full
-// turn, and it times out the classifier. The overlay carries auth only, so
-// grok picks its own default model with no tools and --effort low (the lowest
+// turn, and it times out the classifier. The overlay carries auth and a
+// config that turns off the Claude and Cursor scans, so grok picks its own default model with no tools and --effort low (the lowest
 // level this CLI advertises; it has no none). --single
 // still dispatches no stop hook, so the reviewer cannot trip the hook that
 // spawned it.
@@ -1271,7 +1260,8 @@ async function recordedContinuations(input, runner) {
 
 async function handleStop(input, runner = "codex", { runModel, delay, onVerdict } = {}) {
   if (await yieldsToGrokNative(runner)) return {};
-  runner = resolveRunner(runner);
+  // GROK_HOOK_EVENT is set only by Grok's hook runner, never by Claude Code.
+  if (process.env.GROK_HOOK_EVENT) runner = "grok";
   const runtime = RUNTIMES[runner];
   if (!runtime) throw new Error(`Unsupported keep-going runtime: ${runner}`);
   for (const key of runtime.requires) {
@@ -1431,7 +1421,6 @@ export {
   parseTurnRequest,
   turnIndexSection,
   formatTurns,
-  resolveRunner,
   yieldsToGrokNative,
   resolveOwnerPrompt,
 };

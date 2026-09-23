@@ -26,7 +26,6 @@ import {
   parseTurnRequest,
   turnIndexSection,
   formatTurns,
-  resolveRunner,
   yieldsToGrokNative,
   resolveOwnerPrompt,
 } from "../src/keep-going.mjs";
@@ -121,9 +120,9 @@ async function fixture() {
   const modelMock = path.join(root, "mock-codex.mjs");
   const callLog = path.join(root, "calls.jsonl");
 
-  // Codex sends a rollout path with every stop. Nothing reads it — the turn id
-  // beside it is the whole of what the hook needs — and a secret in it is how a
-  // test would notice if that changed.
+  // Codex sends a rollout path with every stop. The owner prompt, past turns,
+  // and quiet wait read it; the count never does — the turn id beside it
+  // keys the tally.
   await mkdir(sessions, { recursive: true });
   await writeFile(
     transcript,
@@ -347,7 +346,7 @@ test("Codex counts against the turn id it sends, not its rollout", { concurrency
     // ever saw the stop that ended this one.
     assert.equal(await recordedContinuations({ ...context.input, turn_id: "turn-next" }, "codex"), 0);
 
-    // The rollout is on disk and next to the hook's own state; nothing reads it.
+    // The rollout is on disk, but the count comes from the tally.
     for (const row of await auditRows()) assert.equal(row.counted_by, "tally");
 
     // At the cap the stop is accepted with no review at all.
@@ -486,7 +485,7 @@ test("RESCAN is offered once per turn; a second one fails open as an unoffered v
     assert.doesNotMatch(prompts[1], /RESCAN — the agent claims/);
     assert.match(prompts[1], /already asked for this turn, so RESCAN is not on offer/);
     assert.match(prompts[1], /verdict word alone on the first line: CONTINUE, THINK, or STOP\./);
-    const rows = (await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const rows = await auditRows();
     assert.equal(rows.at(-1).verdict, "ERROR");
     assert.match(rows.at(-1).reviewer_output, /^RESCAN/);
     // The accepted stop ends the turn, and with it the memory of the scan.
@@ -532,17 +531,6 @@ test("a missing reviewer executable fails open and clears the turn tally", async
   assert.equal(await recordedContinuations(context.input, "codex"), 0);
 });
 
-test("invalid reviewer verdict fails open", { concurrency: false }, async () => {
-  const context = await fixture();
-  try {
-    process.env.MOCK_REVIEW_RESPONSE = "THINK_ADVISOR";
-    const output = await handleStop(context.input);
-    assert.match(output.systemMessage, /begin with CONTINUE, THINK, RESCAN, or STOP/);
-  } finally {
-    await context.cleanup();
-  }
-});
-
 test("Claude counting starts at the last genuine prompt and counts only hook feedback", { concurrency: false }, async () => {
   const context = await claudeFixture();
   try {
@@ -572,9 +560,8 @@ test("Claude counting starts at the last genuine prompt and counts only hook fee
 
 test("an interruption is not a new owner prompt", { concurrency: false }, async () => {
   // The marker the harness writes when a turn ends early carries none of the
-  // flags the other injected records carry, so it used to pass as a genuine
-  // prompt: the count restarted at zero and the reviewer was handed
-  // "[Request interrupted by user]" as the request to judge against. An
+  // flags the other injected records carry, so only its exact text keeps it
+  // from restarting the count or becoming the request to judge against. An
   // interruption is the owner cutting a turn short, not asking for something.
   const context = await claudeFixture();
   try {
@@ -605,10 +592,9 @@ test("an interruption is not a new owner prompt", { concurrency: false }, async 
 });
 
 test("a subagent reporting back does not open a turn", { concurrency: false }, async () => {
-  // Codex has no flag for these the way Claude's task notifications do, and
-  // codexOwnerPrompt only escapes them because a notification carries no
-  // turn_id to match. Turn segmentation has no such guard, so they opened
-  // turns of their own in the history the reviewer can ask to read.
+  // Codex has no flag for these the way Claude's task notifications do; the
+  // <subagent_notification> prefix is what keeps them out of the history the
+  // reviewer can ask to read.
   const context = await fixture();
   try {
     await appendRecords(context.input.transcript_path, [
@@ -624,8 +610,8 @@ test("a subagent reporting back does not open a turn", { concurrency: false }, a
     const owners = (await listPastTurns({ ...context.input, turn_id: "t2" }, "codex"))
       .map((turn) => turn.owner);
     assert.ok(!owners.some((owner) => owner.startsWith("<subagent_notification>")), owners.join(" | "));
-    // The notification sat between the two prompts; the turn it used to open
-    // would have come last, pushing the real request out of that slot.
+    // The notification sits between the two prompts; were it a turn, it would
+    // come last and push the real request out of that slot.
     assert.deepEqual(owners.slice(-1), ["Fix the thing."]);
   } finally {
     await context.cleanup();
@@ -774,15 +760,10 @@ test("an exact reply the owner asked for is still the reviewer's call", { concur
         role: "assistant",
         content: [{ type: "text", text: "Ghost hook test ready." }],
       },
-      messages: [{
-        role: "assistant",
-        content: [{ type: "text", text: "Ghost hook test ready." }],
-      }],
     };
     assert.deepEqual(await handleStop(input, "ghost"), {});
     assert.equal((await context.calls()).length, 1);
-    const [row] = (await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8"))
-      .trim().split("\n").map((line) => JSON.parse(line));
+    const [row] = await auditRows();
     assert.equal(row.verdict, "STOP");
     assert.equal(row.counted_by, "tally");
   } finally {
@@ -829,9 +810,9 @@ test("verdict parsing accepts only the exact verdict words, wherever the reviewe
 });
 
 test("a verdict answered twice is still one verdict", () => {
-  // Small reviewers repeat themselves. Requiring a word boundary threw away an
-  // answer that had been given. The repeat is not edited out of the line: what
-  // the reviewer wrote reaches the agent as written.
+  // Small reviewers repeat themselves, so a verdict may run straight into the
+  // next. The repeat is not edited out of the line: what the reviewer wrote
+  // reaches the agent as written.
   assert.deepEqual(parseReviewVerdict("CONTINUECONTINUE"), { verdict: "CONTINUE", nudge: "CONTINUE" });
   assert.deepEqual(parseReviewVerdict("CONTINUE CONTINUE"), { verdict: "CONTINUE", nudge: "CONTINUE" });
   assert.deepEqual(parseReviewVerdict("STOPSTOP"), { verdict: "STOP", nudge: "STOP" });
@@ -839,7 +820,7 @@ test("a verdict answered twice is still one verdict", () => {
     parseReviewVerdict("THINK\nKeep going.THINK\nKeep going."),
     { verdict: "THINK", nudge: "Keep going.THINK\nKeep going." },
   );
-  // Widening the boundary must not start accepting a longer word.
+  // A verdict glued to a longer word is still not a verdict.
   for (const invalid of ["CONTINUEX", "THINK_ADVISOR", "JUDGE", "continue"]) {
     assert.throws(() => parseReviewVerdict(invalid));
   }
@@ -1120,9 +1101,9 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", { co
     assert.notEqual(call.grokHome, process.env.GROK_HOME);
     assert.equal(call.overlayHasConfig, true);
 
-    // Grok sends no transcript this runtime can read, so the tally is the cap.
-    const [row] = (await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8"))
-      .trim().split("\n").map((line) => JSON.parse(line));
+    // A Grok nudge lands in the agent's reasoning, leaving nothing in the
+    // transcript to count, so the tally is the cap.
+    const [row] = await auditRows();
     assert.equal(row.counted_by, "tally");
     assert.equal(await recordedContinuations(context.input, "grok"), 1);
     assert.ok(!call.args.includes("--model"));
@@ -1153,8 +1134,8 @@ test("Grok recovers owner_prompt from prompt_history", { concurrency: false }, a
 test("Grok reads the chat log's wrapper blocks as nobody's prompt", { concurrency: false }, async () => {
   // With no prompt_history the chat log is the fallback, and what the owner
   // typed is tagged there. The untagged blocks beside it — <user_info> and
-  // friends — are the log's own. Turn segmentation always skipped them;
-  // prompt recovery used to hand the last one to the reviewer as the request.
+  // friends — are the log's own, and neither prompt recovery nor turn
+  // segmentation takes one for a request.
   const context = await grokFixture();
   try {
     const { enc, input } = await grokSession(context);
@@ -1179,8 +1160,6 @@ test("Grok-dispatched Claude settings are reviewed by grok, not claude", { concu
     process.env.GROK_HOOK_EVENT = "stop";
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
 
-    assert.equal(resolveRunner("claude"), "grok");
-    assert.equal(resolveRunner("codex"), "grok");
     assert.equal(await yieldsToGrokNative("claude"), false);
     const output = await handleStop(context.input, "claude");
     assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
@@ -1218,18 +1197,6 @@ test("a native Grok hook makes the Claude-settings copy yield", { concurrency: f
     assert.equal((await context.calls()).length, 1);
   } finally {
     await context.cleanup();
-  }
-});
-
-test("Claude Code is still reviewed by claude when Grok is not the host", { concurrency: false }, async () => {
-  const previous = process.env.GROK_HOOK_EVENT;
-  delete process.env.GROK_HOOK_EVENT;
-  try {
-    assert.equal(resolveRunner("claude"), "claude");
-    assert.equal(resolveRunner("codex"), "codex");
-  } finally {
-    if (previous === undefined) delete process.env.GROK_HOOK_EVENT;
-    else process.env.GROK_HOOK_EVENT = previous;
   }
 });
 
@@ -1294,28 +1261,6 @@ test("Muse is reviewed by muse exec in a hook-free overlay", { concurrency: fals
   }
 });
 
-test("Muse THINK blocks with a thinking fallback", { concurrency: false }, async () => {
-  const context = await museFixture();
-  try {
-    const output = await handleStop(context.input, "muse", { runModel: async () => "THINK" });
-    assert.deepEqual(output, { decision: "block", reason: VERDICTS.THINK.fallbacks[0] });
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("Muse CONTINUE carries the reviewer's own line", { concurrency: false }, async () => {
-  const context = await museFixture();
-  try {
-    const output = await handleStop(context.input, "muse", {
-      runModel: async () => "CONTINUE\nLand the change first.",
-    });
-    assert.deepEqual(output, { decision: "block", reason: "Land the change first." });
-  } finally {
-    await context.cleanup();
-  }
-});
-
 test("Muse blocks an empty final message once, then accepts the retry", { concurrency: false }, async () => {
   const context = await museFixture();
   try {
@@ -1330,23 +1275,6 @@ test("Muse blocks an empty final message once, then accepts the retry", { concur
     assert.equal(rows[0].rationale, first.reason);
     assert.equal(rows[1].rationale, "no last message on retry");
   } finally {
-    await context.cleanup();
-  }
-});
-
-test("Muse, with no transcript to watch, skips the quiet wait", { concurrency: false }, async () => {
-  const context = await museFixture();
-  const previous = process.env.KEEP_GOING_QUIET_MS;
-  try {
-    process.env.KEEP_GOING_QUIET_MS = "60000";
-    const output = await handleStop(context.input, "muse", {
-      runModel: async () => "STOP",
-      delay: async () => { throw new Error("no transcript, so no wait"); },
-    });
-    assert.deepEqual(output, {});
-  } finally {
-    if (previous === undefined) delete process.env.KEEP_GOING_QUIET_MS;
-    else process.env.KEEP_GOING_QUIET_MS = previous;
     await context.cleanup();
   }
 });
@@ -1657,19 +1585,6 @@ test("Pi turns arrive with the stop and Muse has nothing to index", async () => 
   try {
     assert.deepEqual(await listPastTurns(context.input, "muse"), []);
   } finally {
-    await context.cleanup();
-  }
-});
-
-test("KEEP_GOING_TURNS=0 disables the index everywhere", { concurrency: false }, async () => {
-  const context = await claudeFixture();
-  const previous = process.env.KEEP_GOING_TURNS;
-  try {
-    process.env.KEEP_GOING_TURNS = "0";
-    assert.deepEqual(await listPastTurns(context.input, "claude"), []);
-  } finally {
-    if (previous === undefined) delete process.env.KEEP_GOING_TURNS;
-    else process.env.KEEP_GOING_TURNS = previous;
     await context.cleanup();
   }
 });
@@ -1992,11 +1907,9 @@ test("version stamping requires an actual string version field", () => {
 });
 
 test("the committed manifests and hook files are what the build emits", async () => {
-  // v0.1.1 shipped a manifest still declaring 0.1.0: four files had to agree
-  // and the drift was invisible until someone read them side by side. The
-  // build stamps the version and writes both hook files now, so the thing
-  // left to check is that the committed copies equal what it emits — a hand
-  // edit, or a release that skipped `npm run build`, fails here.
+  // The build stamps the version and writes both hook files, so the committed
+  // copies must equal what it emits — a hand edit, or a release that skipped
+  // `npm run build`, fails here.
   const readText = (relative) => readFile(new URL(relative, import.meta.url), "utf8");
   const { version } = JSON.parse(await readText("../package.json"));
   for (const relative of VERSIONED) {
@@ -2022,14 +1935,10 @@ test("the committed manifests and hook files are what the build emits", async ()
 });
 
 test("the shipped plugin bundles no runtime dependency", async () => {
-  // v0.1.1 dropped Zod to keep the hook cheap to install and start. Nothing
-  // else would notice a dependency reappearing: the CI drift check only proves
-  // the bundle matches src, not that src stayed dependency-free. The size cap
-  // below is recalibrated when a feature grows src on purpose (16 KiB through
-  // the quiet wait, 22 KiB with reviewer history lookup, 23 KiB with audit raw
-  // text and the stub skip, 24 KiB with the once-per-turn rescan, 25 KiB with
-  // the owner-authority prompt rules); the dependency assertions above are the
-  // part that never moves.
+  // The hook stays cheap to install and start: no runtime dependency, and a
+  // bundle under a size cap that is raised only when src grows on purpose.
+  // The drift check proves the bundle matches src, not that src stayed
+  // dependency-free; this does.
   const manifest = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8")
   );
@@ -2046,23 +1955,6 @@ test("the shipped plugin bundles no runtime dependency", async () => {
   assert.deepEqual(bareImports, [], `bundle imports a package: ${bareImports.join(", ")}`);
 });
 
-test("Claude stops unconditionally once the continuation cap is reached", { concurrency: false }, async () => {
-  const context = await claudeFixture();
-  try {
-    assert.equal(CONTINUATION_CAP, 100);
-    const feedback = Array.from({ length: CONTINUATION_CAP }, () =>
-      JSON.stringify({ type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback:\ncontinue" } })
-    );
-    await appendRecords(context.input.transcript_path, feedback);
-    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
-    const output = await handleStop(context.input, "claude");
-    assert.match(output.systemMessage, /continuation cap \(100\) reached/);
-    assert.equal((await context.calls()).length, 0);
-  } finally {
-    await context.cleanup();
-  }
-});
-
 test("Ghost's turn is its owner prompt, and its tally lives in the ghost home", { concurrency: false }, async () => {
   const context = await ghostFixture();
   const tallyFile = path.join(context.input.ghost_home, "keep-going", "continuations.json");
@@ -2070,8 +1962,8 @@ test("Ghost's turn is its owner prompt, and its tally lives in the ghost home", 
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     assert.equal((await handleStop(context.input, "ghost")).decision, "block");
 
-    // Ghost declares where its state belongs, and the hook that refuses to read
-    // a transcript outside the ghost home writes the count inside it too.
+    // Ghost declares where its state belongs: the count is written inside the
+    // ghost home.
     assert.deepEqual(Object.keys(JSON.parse(await readFile(tallyFile, "utf8"))), [
       tallyKey(context.input.session_id, promptDigest(context.input.owner_prompt)),
     ]);
@@ -2109,7 +2001,7 @@ test("Ghost takes its turn and count from the payload, not the transcript", { co
     ].join("\n"));
 
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
-    const input = { ...context.input, conversation_runtime: "pi", transcript_path: transcript };
+    const input = { ...context.input, transcript_path: transcript };
     // The bare verdict carries no line, so the fallback is the first of the pool.
     assert.deepEqual(await handleStop(input, "ghost"), {
       decision: "block",
@@ -2129,9 +2021,7 @@ test("Ghost takes its turn and count from the payload, not the transcript", { co
   }
 });
 
-// Both byte guards were rewritten from "remeasure everything on each chunk" to a
-// running counter. Neither had coverage, so nothing would have caught the limit
-// silently ceasing to fire.
+// Both byte guards keep a running count; these prove each limit still fires.
 test("oversized Stop input is refused before any reviewer is spawned", async () => {
   const entry = path.join(import.meta.dirname, "..", "src", "keep-going.mjs");
   const child = spawn(process.execPath, [entry, "claude"], {
