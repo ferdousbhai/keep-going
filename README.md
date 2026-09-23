@@ -131,7 +131,7 @@ build and unit tests without Pi.
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
 Reviewers run without tools — Muse, which has no such switch, without web
-tools in an empty scratch directory — and with as little thinking as the host allows:
+tools in a scratch directory — and with as little thinking as the host allows:
 `low` on Codex, Claude, and Grok; Muse at its default; Pi at off where the
 model's catalog allows it, else the lowest level the catalog lists. A one-word
 verdict does not need a frontier model, so Codex defaults to `gpt-5.6-luna`

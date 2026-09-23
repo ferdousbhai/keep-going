@@ -1151,8 +1151,8 @@ function parseReviewVerdict(text, offered = VERDICT_NAMES) {
   return { verdict: match[1], nudge: redactSensitive(match[2]).trim() };
 }
 
-// Grok's default agent writes a sentence before the verdict. The first line
-// that is a verdict is the answer; preamble is discarded.
+// A reviewer may write a sentence before the verdict. The first line that is
+// a verdict is the answer; preamble is discarded.
 function verdictAfterPreamble(body) {
   const lines = body.split(/\n/);
   for (let i = 1; i < lines.length; i++) {
@@ -1163,7 +1163,7 @@ function verdictAfterPreamble(body) {
   return null;
 }
 
-// Same agent often glues the word on: "I'll inspect the workspace.STOP"
+// Or glue the verdict onto that sentence: "I'll inspect the workspace.STOP"
 function trailingVerdict(body) {
   const match = new RegExp(
     `(?:^|[^A-Za-z_])(${VERDICT_ALTERNATION})${VERDICT_SEPARATOR}$`,

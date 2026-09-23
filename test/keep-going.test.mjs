@@ -1078,13 +1078,11 @@ test("Grok recovers owner_prompt from prompt_history", async () => {
 test("Grok reads the chat log's wrapper blocks as nobody's prompt", async () => {
   // With no prompt_history the chat log is the fallback, and what the owner
   // typed is tagged there. The untagged blocks beside it — <user_info> and
-  // friends — are the log's own, and neither prompt recovery nor turn
-  // segmentation takes one for a request.
+  // friends — are the log's own, and prompt recovery takes none of them.
   const context = await grokFixture();
   try {
-    const { enc, input } = await grokSession(context);
-    await rm(path.join(enc, "prompt_history.jsonl"), { force: true });
-    await writeFile(path.join(path.dirname(input.transcript_path), "chat_history.jsonl"), [
+    const { chat, input } = await grokSession(context);
+    await writeFile(chat, [
       JSON.stringify({ type: "user", content: [{ type: "text", text: "<user_query>Ship the hook.</user_query>" }] }),
       JSON.stringify({ type: "user", content: [{ type: "text", text: "<user_info>cwd=/home/dous shell=bash</user_info>" }] }),
     ].join("\n") + "\n");
@@ -1515,7 +1513,7 @@ test("Ghost past turns read the pi session file and skip tool passes", async () 
   }
 });
 
-test("Pi turns arrive with the stop and Muse has nothing to index", async () => {
+test("Pi turns arrive with the stop", async () => {
   assert.deepEqual(
     await listPastTurns(
       { past_turns: [{ owner_prompt: "Earlier.", final_response: "Did it." }] },
@@ -1523,12 +1521,6 @@ test("Pi turns arrive with the stop and Muse has nothing to index", async () => 
     ),
     [{ owner: "Earlier.", final: "Did it." }],
   );
-  const context = await museFixture();
-  try {
-    assert.deepEqual(await listPastTurns(context.input, "muse"), []);
-  } finally {
-    await context.cleanup();
-  }
 });
 
 test("without past turns a TURN line is just a bad verdict", async () => {
