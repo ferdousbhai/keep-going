@@ -44,17 +44,6 @@ export function hookFile(runner) {
   return `${JSON.stringify(config, null, 2)}\n`;
 }
 
-async function emit() {
-  const { version } = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
-  for (const relative of VERSIONED) {
-    const file = path.join(root, relative);
-    await writeFile(file, stampVersion(await readFile(file, "utf8"), version));
-  }
-  for (const runner of Object.keys(HOOK_FILES)) {
-    await writeFile(path.join(root, HOOK_FILES[runner].file), hookFile(runner));
-  }
-}
-
 // The test imports the definitions above to prove the committed files still
 // match them, so building only happens when this file is the entrypoint.
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -71,5 +60,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     build({ ...options, entryPoints: [path.join(root, "src", "pi.mjs")], outfile: path.join(root, "extensions", "keep-going.js") }),
   ]);
   await chmod(bundle, 0o755);
-  await emit();
+  const { version } = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+  for (const relative of VERSIONED) {
+    const file = path.join(root, relative);
+    await writeFile(file, stampVersion(await readFile(file, "utf8"), version));
+  }
+  for (const runner of Object.keys(HOOK_FILES)) {
+    await writeFile(path.join(root, HOOK_FILES[runner].file), hookFile(runner));
+  }
 }

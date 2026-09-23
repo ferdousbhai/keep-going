@@ -221,13 +221,6 @@ async function reportStatus(paths) {
 
 const coveredBy = (host) => SOURCES[host].find((source) => source.host !== host)?.host ?? null;
 
-function selectedRuntimes(args) {
-  const all = args.includes("--all");
-  // --all includes grok even beside claude: its native file is what reviews on
-  // Grok, and the Claude-settings copy yields there.
-  return Object.keys(TARGETS).filter((name) => all || args.includes(`--${name}`));
-}
-
 function shellQuote(value) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
@@ -261,11 +254,6 @@ async function writeJsonAtomic(file, value) {
   } finally {
     await rm(temporary, { force: true }).catch(() => {});
   }
-}
-
-function installedCommand(hookFile, runner, auditLog) {
-  const prefix = auditLog ? `KEEP_GOING_AUDIT_LOG=${shellQuote(auditLog)} ` : "";
-  return `${prefix}${shellQuote(process.execPath)} ${shellQuote(hookFile)} ${runner}`;
 }
 
 function auditLogOption(args) {
@@ -328,7 +316,10 @@ async function main() {
   }
 
   const uninstall = args.includes("--uninstall");
-  const runtimes = selectedRuntimes(args);
+  // --all includes grok even beside claude: its native file is what reviews on
+  // Grok, and the Claude-settings copy yields there.
+  const all = args.includes("--all");
+  const runtimes = Object.keys(TARGETS).filter((name) => all || args.includes(`--${name}`));
   if (runtimes.length === 0) {
     throw new Error(`Select ${new Intl.ListFormat("en", { type: "disjunction" }).format([...Object.keys(TARGETS).map((name) => `--${name}`), "--all"])}.\n\n${usage()}`);
   }
@@ -339,6 +330,7 @@ async function main() {
   // replaces the registration instead of leaving both to review every stop.
   const link = args.includes("--link");
   const auditLog = auditLogOption(args);
+  const auditPrefix = auditLog ? `KEEP_GOING_AUDIT_LOG=${shellQuote(auditLog)} ` : "";
   const copiedHook = path.join(dataHome, "keep-going", "keep-going.mjs");
   const hookFile = link ? BUNDLED_HOOK : copiedHook;
 
@@ -366,7 +358,7 @@ async function main() {
     }
     await writeJsonAtomic(
       settingsFile,
-      updateHookConfig(config, HOSTS[runner].events, installedCommand(hookFile, runner, auditLog), runner, uninstall),
+      updateHookConfig(config, HOSTS[runner].events, `${auditPrefix}${shellQuote(process.execPath)} ${shellQuote(hookFile)} ${runner}`, runner, uninstall),
     );
     process.stdout.write(`${uninstall ? "Removed" : "Installed"} ${runner} hook in ${settingsFile}\n`);
   }

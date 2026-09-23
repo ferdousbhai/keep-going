@@ -38,9 +38,9 @@ asked for a line about landing what is in flight, and past the cap the stop is
 accepted unreviewed. From the first continuation it is told how many the turn
 has already had — earlier nudges are filtered out of the transcript it reads,
 so a stop it keeps refusing would otherwise look like a first attempt. The count is a tally per session and turn under
-`$XDG_STATE_HOME/keep-going` (the ghost home for Ghost). Where the stop names
-no turn, as on Claude Code, it is read from the transcript; Pi counts
-follow-ups on the session branch. Subagents on Claude Code and Muse are
+`$XDG_STATE_HOME/keep-going` (the ghost home for Ghost). On Claude Code, whose
+stop names no turn, it is read from the transcript; Pi counts follow-ups on the
+session branch. Subagents on Claude Code and Muse are
 reviewed on the same terms, each with its own count.
 
 A fresh stop waits fifteen seconds first; if the owner's next message lands
@@ -50,7 +50,8 @@ as Claude Code landing the final assistant message after Stop has fired, do
 not. Subagent stops skip the wait. The reviewer may reply `TURN n` or
 `TURN x-y` (up to five turns) to read earlier turns before verdicting, at most
 twice per stop. Muse sends no transcript, so there the stop is reviewed at
-once from the current turn alone.
+once from the current turn alone; Pi reviews at once too, from the turns its
+branch holds.
 
 ## Install
 
@@ -92,7 +93,7 @@ Installer flags:
   the only environment Muse passes to a hook. Reinstalling without it drops
   the setting. Codex's plugin and Pi read the variable from the shell instead.
 - `--status` prints where keep-going is registered for the CLI hosts, any
-  missing event, other plugins on the same stop, and any double review.
+  missing event, other hooks on the same stop, and any double review.
 - `--uninstall` with a host flag removes it. The plugin: `claude plugin
   uninstall keep-going`.
 

@@ -1252,7 +1252,7 @@ async function recordReviewAudit(input, runner, { verdict, reason, error, counte
   }
 }
 
-// Every exit of handleStop makes the same two writes: the turn state, which
+// Every settled stop makes the same two writes: the turn state, which
 // a stop let through clears and a block advances, and the audit row. One
 // helper makes both so no exit can forget either: a forgotten first write
 // carries a count into a turn that never earned it, disarming the cap.

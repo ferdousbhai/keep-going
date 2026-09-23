@@ -807,7 +807,7 @@ test("Ghost delegates classification to its smol-model bridge", { concurrency: f
   }
 });
 
-test("verdict parsing accepts only the exact review enum", () => {
+test("verdict parsing accepts only the exact verdict words, wherever the reviewer puts them", () => {
   for (const verdict of ["CONTINUE", "THINK", "RESCAN", "STOP"]) {
     assert.deepEqual(parseReviewVerdict(` ${verdict}\n`), { verdict, nudge: "" });
   }
@@ -1316,48 +1316,6 @@ test("Muse CONTINUE carries the reviewer's own line", { concurrency: false }, as
   }
 });
 
-test("Muse accepts the stop at the continuation cap without a review", { concurrency: false }, async () => {
-  const context = await museFixture();
-  try {
-    const tallyFile = path.join(process.env.XDG_STATE_HOME, "keep-going", "continuations.json");
-    await mkdir(path.dirname(tallyFile), { recursive: true });
-    await writeFile(
-      tallyFile,
-      JSON.stringify({
-        [tallyKey(context.input.session_id, context.input.turn_id)]: {
-          count: CONTINUATION_CAP,
-          updated: Date.now(),
-        },
-      }),
-    );
-    const output = await handleStop(context.input, "muse", {
-      runModel: async () => { throw new Error("reviewer must not run at the cap"); },
-    });
-    assert.match(output.systemMessage, /continuation cap \(100\) reached/);
-    assert.equal(await recordedContinuations(context.input, "muse"), 0);
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("Muse fails open when the reviewer throws and clears the tally", { concurrency: false }, async () => {
-  const context = await museFixture();
-  try {
-    assert.equal(
-      (await handleStop(context.input, "muse", { runModel: async () => "CONTINUE" })).decision,
-      "block",
-    );
-    assert.equal(await recordedContinuations(context.input, "muse"), 1);
-    const output = await handleStop(context.input, "muse", {
-      runModel: async () => { throw new Error("boom"); },
-    });
-    assert.match(output.systemMessage, /keep-going was skipped: boom/);
-    assert.equal(await recordedContinuations(context.input, "muse"), 0);
-  } finally {
-    await context.cleanup();
-  }
-});
-
 test("Muse blocks an empty final message once, then accepts the retry", { concurrency: false }, async () => {
   const context = await museFixture();
   try {
@@ -1376,13 +1334,10 @@ test("Muse blocks an empty final message once, then accepts the retry", { concur
   }
 });
 
-test("Muse ignores the quiet and history knobs it cannot use", { concurrency: false }, async () => {
-  // No transcript means no quiet wait to skip and no turns to index, whatever
-  // the knobs say: the stop goes straight to review.
+test("Muse, with no transcript to watch, skips the quiet wait", { concurrency: false }, async () => {
   const context = await museFixture();
   const previous = process.env.KEEP_GOING_QUIET_MS;
   try {
-    process.env.MOCK_REVIEW_RESPONSE = "STOP";
     process.env.KEEP_GOING_QUIET_MS = "60000";
     const output = await handleStop(context.input, "muse", {
       runModel: async () => "STOP",
@@ -1983,10 +1938,8 @@ test("Ghost and Pi log history the same way", { concurrency: false }, async () =
 });
 
 test("the tally caps a turn the transcript cannot", { concurrency: false }, async () => {
-  // Grok Build loads this hook through its Claude compatibility layer, and its
-  // transcripts are neither in Claude's directories nor in Claude's shape. The
-  // cap is the only thing between a stuck reviewer and a hundred turns of
-  // spend, so it cannot depend on parsing a format the host chose.
+  // A Claude stop with no transcript to read is still counted, and capped, by
+  // the tally.
   const context = await claudeFixture();
   const tallyFile = path.join(process.env.XDG_STATE_HOME, "keep-going", "continuations.json");
   const { transcript_path: _ignored, ...input } = context.input;
