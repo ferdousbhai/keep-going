@@ -2,7 +2,6 @@
 // registration of this hook shares. Two files write hooks — the build emits
 // the plugin's, the installer writes the settings — and a host that dispatches
 // two events has to be registered for both by whichever one a user chose.
-// Adding SubagentStop took two edits in two commits before this existed.
 export const HOSTS = {
   codex: { events: ["Stop"] },
   // A Stop registration is rewritten to SubagentStop only for hooks a session
@@ -15,8 +14,8 @@ export const HOSTS = {
 };
 
 // The hook waits on a reviewer model call, so it has to outlast one.
-export const HOOK_TIMEOUT = 240;
-export const STATUS_MESSAGE = "Deciding whether to keep going";
+const HOOK_TIMEOUT = 240;
+const STATUS_MESSAGE = "Deciding whether to keep going";
 
 // The shape itself, not just the constants in it: the build writes the
 // plugin's registration and the installer writes the settings one, and they

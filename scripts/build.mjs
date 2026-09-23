@@ -12,8 +12,7 @@ const bundle = path.join(root, "plugins", "keep-going", "scripts", "keep-going.m
 
 // The manifests stay hand-written — description, keywords, category and the
 // interface copy are human-facing text a generator would only flatten — so the
-// build owns one field of each. v0.1.1 shipped a manifest still declaring
-// 0.1.0 because a release meant editing that field in four files by hand.
+// build owns one field of each, so a release edits the version once.
 export const VERSIONED = [
   "plugins/keep-going/.codex-plugin/plugin.json",
   "plugins/keep-going/.claude-plugin/plugin.json",

@@ -352,15 +352,12 @@ test("Pi reviewer has a hard timeout and accepts no late result", async (t) => {
   assert.equal(f.calls[0][2].signal.aborted, true);
 });
 
-test("Pi core requires a valid native count and fails open without a native reviewer", async (t) => {
+test("Pi core fails open without a native reviewer", async (t) => {
   await fixture(t);
-  // An owner prompt is supplied so the input reaches the paths under test: an
-  // owner-less "Done." now takes the stub skip instead.
+  // An owner prompt is supplied so the input reaches the review: an owner-less
+  // "Done." takes the stub skip.
   const input = { session_id: "s", turn_id: "u", last_assistant_message: "Done.", owner_prompt: "Calculate 2 + 2.", continuation_count: 0 };
   assert.match((await handleStop(input, "pi")).systemMessage, /native extension/);
-  for (const count of [undefined, -1, 0.5, NaN]) {
-    await assert.rejects(handleStop({ ...input, continuation_count: count }, "pi"), /continuation_count/);
-  }
 });
 
 test("the Pi package ships a loadable, dependency-free extension", async () => {

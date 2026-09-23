@@ -108,8 +108,7 @@ function settingsSource(runner) {
 }
 
 // Claude Code plugins register hooks from their own install directory, which
-// no settings file mentions — so a keep-going installed that way looked
-// unregistered, and every other plugin's Stop hook was invisible.
+// no settings file mentions, so the plugins' own manifests are read too.
 async function claudePluginSource(paths) {
   const root = path.join(claudeConfigDir(paths.userHome), "plugins");
   const installed = await readJson(path.join(root, "installed_plugins.json"), null);
@@ -152,7 +151,6 @@ async function codexSource(paths) {
 }
 
 claudePluginSource.host = "claude";
-claudePluginSource.where = (paths) => path.join(claudeConfigDir(paths.userHome), "plugins");
 codexSource.host = "codex";
 codexSource.where = codexConfig;
 
@@ -171,15 +169,10 @@ const SOURCES = {
 // A host reached through another host's file usually runs that file's runtime,
 // so the runner is worth naming when it is not the host. Grok is the exception:
 // it dispatches Claude's settings but reviews with grok.
-function dispatchedRunner(host, runner) {
-  if (host === "grok" && runner === "claude") return "grok";
-  return runner;
-}
-
 function describeWhere(ours, host) {
   return [...new Set(ours.map((hook) => {
-    const reviewer = dispatchedRunner(host, hook.runner);
-    return reviewer && reviewer !== host ? `${hook.where} (reviewed by ${hook.runner})` : hook.where;
+    const reviewer = host === "grok" && hook.runner === "claude" ? "grok" : hook.runner;
+    return reviewer !== host ? `${hook.where} (reviewed by ${hook.runner})` : hook.where;
   }))].join(", ");
 }
 

@@ -9,10 +9,8 @@ import { spawn } from "node:child_process";
 import {
   CONTINUATION_CAP,
   TURN_INDEX_LIMIT,
-  BLOCKING_VERDICTS,
   VERDICTS,
   LAST_STRETCH,
-  QUIET_DELAY_MS,
   quietDelayMs,
   REVIEW_PROMPT,
   claudeContinuations,
@@ -855,9 +853,8 @@ test("the reviewer's own line reaches the agent as written, secrets aside", () =
   );
   assert.equal(verdict, "CONTINUE");
   assert.equal(nudge, "Three files into the rename and the last one is small.");
-  // Both blocking verdicts ship this line and nothing else: THINK's fixed
-  // preamble is gone, so the reviewer writes the whole message either way.
-  for (const blocking of BLOCKING_VERDICTS) {
+  // Every blocking verdict ships the reviewer's line and nothing else.
+  for (const blocking of Object.keys(VERDICTS).filter((name) => VERDICTS[name].blocks)) {
     assert.deepEqual(hookOutputForVerdict(blocking, 0, nudge), { decision: "block", reason: nudge });
   }
 
@@ -1596,7 +1593,6 @@ test("a stop with no transcript to watch is reviewed at once", { concurrency: fa
 test("the quiet wait defaults to fifteen seconds and parses defensively", () => {
   const previous = process.env.KEEP_GOING_QUIET_MS;
   try {
-    assert.equal(QUIET_DELAY_MS, 15_000);
     delete process.env.KEEP_GOING_QUIET_MS;
     assert.equal(quietDelayMs(), 15_000);
     process.env.KEEP_GOING_QUIET_MS = "5000";

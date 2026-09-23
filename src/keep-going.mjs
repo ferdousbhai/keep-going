@@ -46,8 +46,7 @@ async function fileSize(file) {
 // typing lets the stop through unreviewed. True only when the owner's log
 // gained a record that opens a turn — the host writes to the same file while
 // the hook runs: Claude Code lands the final assistant message itself, then
-// hook summaries and housekeeping records, after Stop has fired, so growth
-// alone said "follow-up" on most stops and let them through unreviewed. A
+// hook summaries and housekeeping records, after Stop has fired. A
 // retry already waited once, a subagent's owner is the parent that is waiting
 // on it, and a host with no owner log to watch cannot show a follow-up, so
 // all three skip the wait.
@@ -88,12 +87,7 @@ const RUNTIMES = {
   // on the active session branch. No subprocess or separate tally is needed.
   pi: {
     requires: ["session_id", "turn_id"],
-    count: (input) => {
-      if (!Number.isSafeInteger(input.continuation_count) || input.continuation_count < 0) {
-        throw new Error("Pi stop input is missing a valid continuation_count");
-      }
-      return input.continuation_count;
-    },
+    count: (input) => input.continuation_count,
     pastTurns: piPastTurns,
   },
   codex: {
@@ -213,7 +207,6 @@ const VERDICTS = {
 };
 
 const VERDICT_NAMES = Object.keys(VERDICTS);
-const BLOCKING_VERDICTS = VERDICT_NAMES.filter((name) => VERDICTS[name].blocks);
 const listVerdicts = (names) => new Intl.ListFormat("en", { type: "disjunction" }).format(names);
 
 // Validate the reviewer's tiny provider-independent protocol before translating
@@ -221,8 +214,7 @@ const listVerdicts = (names) => new Intl.ListFormat("en", { type: "disjunction" 
 const VERDICT_ALTERNATION = VERDICT_NAMES.join("|");
 const VERDICT_SEPARATOR = "[\\s:.\\u2013\\u2014-]*";
 // A verdict ends where a non-word character does, or where another verdict
-// begins. A small reviewer often answers twice — "CONTINUECONTINUE" — and
-// requiring a word boundary there threw away an answer it had actually given.
+// begins: a small reviewer often answers twice — "CONTINUECONTINUE".
 const REVIEW_VERDICT_PATTERN = new RegExp(
   `^(${VERDICT_ALTERNATION})(?=$|[^A-Za-z_]|${VERDICT_ALTERNATION})${VERDICT_SEPARATOR}([\\s\\S]*)$`,
 );
@@ -243,10 +235,6 @@ const TURN_FINAL_CHARS = 4_000;
 // the hook timeout that hosts enforce above this process.
 const REVIEW_BUDGET_MS = 200_000;
 const REVIEW_CALL_FLOOR_MS = 15_000;
-
-function turnsEnabled() {
-  return process.env.KEEP_GOING_TURNS !== "0";
-}
 
 const RESCAN_GUIDANCE = `Prefer RESCAN over STOP when the message claims open-ended work is done —
 finding every issue, fixing them all, cleaning up — and a fresh pass could
@@ -302,18 +290,16 @@ function modelArgs(variable, fallback) {
   return model ? ["--model", model] : [];
 }
 
-// Grok dispatches ~/.claude/settings.json, so a Claude install's command still
-// ends in `claude`. The host actually running the agent is the reviewer:
 // GROK_HOOK_EVENT is set only by Grok's hook runner, never by Claude Code.
 function resolveRunner(requested) {
   if (process.env.GROK_HOOK_EVENT) return "grok";
   return requested;
 }
 
-// Dual install writes Grok's own file and still leaves the Claude-settings copy
-// for Claude Code. Grok would dispatch both; the borrowed copy yields so the
-// native grok hook is the one review.
-async function grokNativeKeepGoingPresent() {
+// With a native Grok hook installed, the Claude-settings copy Grok also
+// dispatches yields, so the stop is reviewed once.
+async function yieldsToGrokNative(requested) {
+  if (!process.env.GROK_HOOK_EVENT || requested === "grok") return false;
   try {
     const file = path.join(process.env.GROK_HOME || path.join(homedir(), ".grok"), "hooks", "keep-going.json");
     const config = JSON.parse(await readFile(file, "utf8"));
@@ -322,7 +308,6 @@ async function grokNativeKeepGoingPresent() {
     return groups.some((group) =>
       (Array.isArray(group?.hooks) ? group.hooks : []).some((hook) => {
         const command = hook?.command;
-        if (typeof command !== "string") return false;
         if (!/keep-going\.mjs\b/.test(command)) return false;
         return command.trimEnd().split(/\s+/).at(-1) === "grok";
       }),
@@ -330,11 +315,6 @@ async function grokNativeKeepGoingPresent() {
   } catch {
     return false;
   }
-}
-
-async function yieldsToGrokNative(requested) {
-  if (!process.env.GROK_HOOK_EVENT || requested === "grok") return false;
-  return grokNativeKeepGoingPresent();
 }
 
 function redactSensitive(value) {
@@ -424,9 +404,7 @@ const INJECTED_PREFIXES = [
   "<in-app-browser-context>",
   "<task-notification>",
   // A finished subagent reporting back. Codex has no flag for it the way
-  // Claude's task notifications do, and nothing else excludes it from turn
-  // segmentation, so it opened turns of its own in the history the reviewer
-  // browses — a third of them, across most sessions that used subagents.
+  // Claude's task notifications do, so only this keeps it from opening turns.
   "<subagent_notification>",
 ];
 
@@ -461,7 +439,6 @@ async function allowedTranscriptPath(input, runner) {
   const candidate = await realpath(transcriptPath);
 
   for (const root of RUNTIMES[runner].roots()) {
-    if (typeof root !== "string" || !root) continue;
     try {
       const resolvedRoot = await realpath(root);
       if (candidate === resolvedRoot || candidate.startsWith(`${resolvedRoot}${path.sep}`)) return candidate;
@@ -541,7 +518,7 @@ async function codexOwnerPrompt(input) {
   return lastTranscriptMatch(await allowedTranscriptPath(input, "codex"), (record) => {
     const payload = record?.payload;
     if (record?.type !== "response_item" || payload?.type !== "message" || payload?.role !== "user") return "";
-    if (turnId && payload.internal_chat_message_metadata_passthrough?.turn_id !== turnId) return "";
+    if (payload.internal_chat_message_metadata_passthrough?.turn_id !== turnId) return "";
     return lastGenuinePrompt(messageText(payload));
   });
 }
@@ -569,7 +546,7 @@ async function grokOwnerPrompt(input) {
   try {
     const last = await lastTranscriptMatch(path.join(cwdDir, "prompt_history.jsonl"), (record) => {
       if (record?.is_bash) return "";
-      if (sessionId && record?.session_id && record.session_id !== sessionId) return "";
+      if (record?.session_id && record.session_id !== sessionId) return "";
       return typeof record?.prompt === "string" ? record.prompt.trim() : "";
     });
     if (last) return last;
@@ -654,7 +631,7 @@ function ghostTurn(record) {
   const message = record.message;
   if (message?.role === "user" && message.attribution !== "agent") {
     const text = lastGenuinePrompt(messageText(message));
-    return text && !HOOK_PROMPT_PATTERN.test(text) ? { open: text } : null;
+    return text ? { open: text } : null;
   }
   if (message?.role === "assistant" && message.stopReason !== "toolUse") {
     const text = messageText(message).trim();
@@ -678,9 +655,7 @@ function codexTurn(record) {
   if (payload?.type !== "message") return null;
   if (payload.role === "user") {
     const text = lastGenuinePrompt(messageText(payload));
-    // A past continuation's hook feedback would otherwise overwrite the
-    // turn's real request; it is feedback, not a prompt.
-    return text && !HOOK_PROMPT_PATTERN.test(text) ? { open: text } : null;
+    return text ? { open: text } : null;
   }
   if (payload.role === "assistant") {
     const text = messageText(payload).trim();
@@ -693,10 +668,8 @@ async function codexPastTurns(input) {
   const segments = await readTurns(await allowedTranscriptPath(input, "codex"), codexTurn);
   const named = segments.filter((segment) => segment.owner);
   let currentIndex = named.length - 1;
-  if (typeof input.turn_id === "string" && input.turn_id) {
-    const found = named.findLastIndex((segment) => segment.id === input.turn_id);
-    if (found >= 0) currentIndex = found;
-  }
+  const found = named.findLastIndex((segment) => segment.id === input.turn_id);
+  if (found >= 0) currentIndex = found;
   return named.slice(0, currentIndex).map(({ owner, final }) => ({ owner, final }));
 }
 
@@ -706,17 +679,9 @@ async function grokPastTurns(input) {
   return segments.slice(0, -1);
 }
 
+// Ghost hands the hook the runtime's own pi session file as the transcript.
 async function ghostPastTurns(input) {
-  // Ghost hands the hook the runtime's own pi session file as the transcript.
-  if (typeof input.transcript_path !== "string" || !input.transcript_path) return [];
-  let file;
-  try {
-    file = await realpath(input.transcript_path);
-  } catch {
-    return [];
-  }
-  const segments = await readTurns(file, ghostTurn);
-  return segments.slice(0, -1);
+  return (await readTurns(input.transcript_path, ghostTurn)).slice(0, -1);
 }
 
 // The extension owns the branch, so it sends the turns down with the stop
@@ -727,7 +692,7 @@ function piPastTurns(input) {
 
 async function listPastTurns(input, runner) {
   const read = RUNTIMES[runner].pastTurns;
-  if (!turnsEnabled() || !read) return [];
+  if (process.env.KEEP_GOING_TURNS === "0" || !read) return [];
   try {
     return (await read(input)).slice(-TURN_INDEX_LIMIT);
   } catch {
@@ -766,15 +731,13 @@ function turnKey(input) {
   return `${input.session_id}\u0000${payloadTurn(input)}`;
 }
 
-// Garbage collection rather than scoping, now that the key says which turn a
-// count belongs to: an interrupted turn never comes back for its entry to be
+// Garbage collection: an interrupted turn never comes back for its entry to be
 // cleared, and the file would otherwise keep one per turn forever.
 const TALLY_IDLE_MS = 30 * 60_000;
 
 async function readTally(file) {
   try {
     const parsed = JSON.parse(await readFile(file, "utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const fresh = {};
     for (const [key, entry] of Object.entries(parsed)) {
       if (Number.isInteger(entry?.count) && Date.now() - entry.updated < TALLY_IDLE_MS) {
@@ -1047,7 +1010,7 @@ function grokReviewerEnv(overlayHome) {
 // level this CLI advertises; it has no none). --single
 // still dispatches no stop hook, so the reviewer cannot trip the hook that
 // spawned it.
-async function runGrokModel({ prompt, timeoutMs, verdicts = VERDICT_NAMES }) {
+async function runGrokModel({ prompt, timeoutMs, verdicts }) {
   return inTemporaryDirectory("grok", async (directory) => {
     const overlayHome = path.join(directory, "home");
     await mkdir(path.join(overlayHome, "hooks"), { recursive: true });
@@ -1168,12 +1131,6 @@ async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
   return envelope.text;
 }
 
-// The reviewer's own words reach the agent as written, secrets aside. An empty
-// line falls back to a generic one.
-function sanitizeNudge(value) {
-  return redactSensitive(value).trim();
-}
-
 const TURN_REQUEST_PATTERN = /^TURN\s+(-?\d+)(?:\s*-\s*(-?\d+))?\s*$/i;
 
 // A history request names past turns 1-based, oldest first; negative counts
@@ -1186,7 +1143,6 @@ function parseTurnRequest(text, count) {
   const at = (n) => (n < 0 ? count + n + 1 : n);
   let start = at(Number(match[1]));
   let end = match[2] === undefined ? start : at(Number(match[2]));
-  if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
   if (start > end) [start, end] = [end, start];
   if (start < 1 || end > count || end - start + 1 > TURNS_PER_REQUEST) return null;
   return { start, end };
@@ -1199,7 +1155,7 @@ function oneLine(value, limit) {
 
 function turnIndexSection(turns) {
   const lines = turns.map((turn, index) =>
-    `${index + 1}: ${oneLine(turn.owner, TURN_INDEX_CHARS) || "(no prompt recorded)"}`);
+    `${index + 1}: ${oneLine(turn.owner, TURN_INDEX_CHARS)}`);
   return [
     `Past turns, oldest first. To read full text before verdicting, reply TURN n or TURN x-y (at most ${TURNS_PER_REQUEST} turns), e.g. TURN ${turns.length}. Then verdict as usual.`,
     ...lines,
@@ -1226,7 +1182,8 @@ function parseReviewVerdict(text, offered = VERDICT_NAMES) {
   if (!offered.includes(match[1])) {
     throw new Error(`Reviewer answered ${match[1]}, which was not offered on this stop; expected ${listVerdicts(offered)}`);
   }
-  return { verdict: match[1], nudge: sanitizeNudge(match[2]) };
+  // The reviewer's own words reach the agent as written, secrets aside.
+  return { verdict: match[1], nudge: redactSensitive(match[2]).trim() };
 }
 
 // Grok's default agent writes a sentence before the verdict. The first line
@@ -1278,7 +1235,7 @@ function reviewPrompt(continuations, rescanned = false) {
 // a hundred continuations do not carry one identical sentence.
 function hookOutputForVerdict(verdict, continuations = 0, nudge = "") {
   const spec = VERDICTS[verdict];
-  if (!spec?.blocks) return {};
+  if (!spec.blocks) return {};
   return { decision: "block", reason: nudge || spec.fallbacks[continuations % spec.fallbacks.length] };
 }
 
@@ -1288,10 +1245,10 @@ async function recordReviewAudit(input, runner, { verdict, reason, error, counte
   const entry = {
     timestamp: new Date().toISOString(),
     runner,
-    ...(typeof input?.reviewer_model === "string" ? { reviewer_model: input.reviewer_model } : {}),
-    session_id: input?.session_id ?? null,
-    turn_id: input?.turn_id ?? null,
-    cwd: typeof input?.cwd === "string" ? input.cwd : null,
+    ...(typeof input.reviewer_model === "string" ? { reviewer_model: input.reviewer_model } : {}),
+    session_id: input.session_id ?? null,
+    turn_id: input.turn_id ?? null,
+    cwd: typeof input.cwd === "string" ? input.cwd : null,
     verdict: error ? "ERROR" : verdict,
     rationale: error ? compactText(String(error), 2_000) : reason ?? "",
     // The reviewer's own words, kept whole where the rationale keeps only the
@@ -1303,7 +1260,7 @@ async function recordReviewAudit(input, runner, { verdict, reason, error, counte
     // Record how the turn was counted. For tally-backed hosts, include field
     // names to help diagnose their payload format without logging its values.
     counted_by: countedBy,
-    ...(countedBy === "tally" ? { stop_input_fields: Object.keys(input ?? {}).sort() } : {}),
+    ...(countedBy === "tally" ? { stop_input_fields: Object.keys(input).sort() } : {}),
   };
   try {
     await appendFile(auditPath, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
@@ -1314,9 +1271,8 @@ async function recordReviewAudit(input, runner, { verdict, reason, error, counte
 
 // Every exit of handleStop makes the same two writes: the turn state, which
 // a stop let through clears and a block advances, and the audit row. One
-// helper makes both so no exit can forget either. Forgetting the first is how
-// the cap gets disarmed, the count surviving into a turn that never earned
-// it; forgetting the second is how a whole path vanished from the log.
+// helper makes both so no exit can forget either: a forgotten first write
+// carries a count into a turn that never earned it, disarming the cap.
 async function settleStop(input, runner, output, audit, exact = null, rescan = false) {
   const blocked = output.decision === "block";
   await recordTurnState(input, runner, blocked, exact, rescan);
@@ -1374,10 +1330,10 @@ async function handleStop(input, runner = "codex", { runModel, delay, onVerdict 
   let pastTurns = [];
   const turnRequests = [];
   try {
-    // A transcript is read to count when the payload leaves the turn unnamed,
-    // and to recover owner_prompt when the host does not send it. A subagent
-    // names its turn, and its parent's transcript holds the parent's messages.
-    if (!named && runtime.count && typeof input.transcript_path === "string" && input.transcript_path) {
+    // A transcript is read to count when the payload leaves the turn unnamed.
+    // A subagent names its turn, and its parent's transcript holds the
+    // parent's messages.
+    if (!named && runtime.count) {
       try {
         continuations = await runtime.count(input);
         countedBy = "transcript";
@@ -1398,7 +1354,7 @@ async function handleStop(input, runner = "codex", { runModel, delay, onVerdict 
     if (!run) throw new Error(`${runner} review requires its native extension`);
     // Past turns ride along only when there are any: the index tells the
     // reviewer what it may ask for, and a harness with no readable history
-    // reviews exactly as before.
+    // reviews from the current turn alone.
     pastTurns = await listPastTurns(input, runner);
     let reviewerPrompt = `${reviewPrompt(continuations, rescanned)}\n\n${JSON.stringify({
       last_assistant_message: lastAssistantMessage,
@@ -1472,10 +1428,8 @@ const entry = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).hre
 if (import.meta.url === entry) await main();
 
 export {
-  BLOCKING_VERDICTS,
   CONTINUATION_CAP,
   TURN_INDEX_LIMIT,
-  QUIET_DELAY_MS,
   quietDelayMs,
   REVIEW_PROMPT,
   RESCAN_SPENT_PROMPT,

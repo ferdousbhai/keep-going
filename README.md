@@ -102,8 +102,7 @@ Pi runs keep-going as an extension. It reviews only a normal final text
 response; tool turns, aborted responses, and turns with queued messages are
 left alone. A blocking verdict queues one visible follow-up. The reviewer is a
 direct, tool-free call to Pi's active model — or `KEEP_GOING_PI_MODEL`, an
-exact `provider/model-id` — with the provider's default inference settings and
-Pi's own authentication.
+exact `provider/model-id` — with Pi's own authentication.
 
 `/keep-going on|off|status` controls the current session; `off` also cancels a
 review in progress. Escape cancels the review with the run; new input, a model
@@ -130,15 +129,16 @@ build and unit tests without Pi.
 | `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's raw text, how the stop was decided, and, where past turns were offered, how many (`past_turns`) and which ranges the reviewer read (`turn_requests`) |
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
-Reviewers run without tools and with as little thinking as the host allows:
+Reviewers run without tools — Muse, which has no such switch, without web
+tools in an empty scratch directory — and with as little thinking as the host allows:
 `low` on Codex, Claude, and Grok; Muse at its default; Pi at off where the
 model's catalog allows it, else the lowest level the catalog lists. A one-word
 verdict does not need a frontier model, so Codex defaults to `gpt-5.6-luna`
 and Claude to `sonnet`, as Ghost reviews through `ghostd hook-smol-complete`;
 Pi has no smaller tier to name and reviews on the active model. Codex runs
 with `--ignore-user-config`, so `KEEP_GOING_CODEX_MODEL` is the only way to
-choose its model, and its default names a release, not a family, so it moves
-when a newer Luna ships.
+choose its model, and its default names a release, not a family, so it is
+bumped by hand when a newer Luna ships.
 Muse reviews under an empty config overlay so its own Stop hook does not
 re-enter; a non-default `XDG_CONFIG_HOME` is unreachable from a hook, and the
 review then fails open.
