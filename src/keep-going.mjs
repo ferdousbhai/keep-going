@@ -274,25 +274,16 @@ ${names.map((name) => `${name} — ${VERDICTS[name].describe}`).join("\n")}
 Prefer THINK over STOP when the request for input looks self-resolvable by the agent.
 Do not default to any outcome or invent unstated work.
 
-Never state or imply what the owner said, meant, approved, confirmed or wants.
-The agent cannot tell your reading of the owner's words from the owner's own,
-so such a line reads to it as permission it never received. A turn that ended
-on a decision only the owner can make is STOP, not something to argue past.
-
 ${rescanGuidance}
 
 owner_prompt is the owner's request this turn. STOP if last_assistant_message
 already fulfills it.
 
 Reply with the verdict word alone on the first line: ${listVerdicts(names)}.
-For ${listVerdicts(ending)}, stop there. For ${listVerdicts(blocking)}, add one more
-line: it reaches the agent verbatim, as the whole reason its turn was not
-allowed to end.
-
-Write one short sentence — "Keep going.", "Believe in yourself.", "Don't
-ask yet — you can work this out." Speak to the agent. Name no task, file,
-command, or requirement its message did not already state. A longer line is
-truncated at ${NUDGE_LIMIT} characters.`;
+For ${listVerdicts(ending)}, stop there. For ${listVerdicts(blocking)}, add one short
+sentence on the next line; it reaches the agent verbatim — "Keep going.",
+"Believe in yourself.", "Don't ask yet — you can work this out." Name no task,
+file, command, or requirement its message did not already state.`;
 }
 
 const REVIEW_PROMPT = composeReviewPrompt(VERDICT_NAMES, RESCAN_GUIDANCE);

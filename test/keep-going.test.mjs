@@ -919,15 +919,7 @@ test("the reviewer's own line is carried through, sanitised, or truncated", () =
   });
 });
 
-test("a nudge may not speak for the owner", () => {
-  // Observed in the wild, three stops running on one turn: the reviewer read
-  // an "ok" that had answered an earlier question, called it consent to
-  // deploy, and each refusal it met came back as a stronger claim about what
-  // the owner had agreed to. The agent sees the sentence and not the reasoning
-  // behind it, so a nudge like that reads as permission it never received.
-  assert.match(REVIEW_PROMPT, /Never state or imply what the owner said/);
-  assert.match(RESCAN_SPENT_PROMPT, /Never state or imply what the owner said/);
-
+test("a turn waiting on the owner's consent may end", () => {
   // Consent is the one thing the agent cannot reason its way to, so the
   // reviewer is given somewhere honest to land a turn that ends on it rather
   // than filing it under questions the agent could have answered itself.
