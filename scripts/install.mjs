@@ -234,10 +234,8 @@ const coveredBy = (host) => SOURCES[host].find((source) => source.host !== host)
 
 function selectedRuntimes(args) {
   const all = args.includes("--all");
-  // Grok scans Claude's settings, but dual users still get a native Grok hook:
-  // that file is what reviews on Grok, and it is the only coverage if the scan
-  // is off. --all used to skip grok to avoid a double review; the borrowed copy
-  // now yields instead.
+  // --all includes grok even beside claude: its native file is what reviews on
+  // Grok, and the Claude-settings copy yields there.
   return Object.keys(TARGETS).filter((name) => all || args.includes(`--${name}`));
 }
 
@@ -308,9 +306,9 @@ function removeInstalledHooks(groups) {
 function updateHookConfig(config, events, command, runner, uninstall) {
   const hooks = isJsonObject(config.hooks) ? { ...config.hooks } : {};
   for (const event of events) {
-    // Earlier releases installed under different names, and a hand-wired hook
-    // points wherever its author chose. Strip them all, or an upgrade leaves
-    // one beside the new one and the reviewer runs twice on every stop.
+    // A copy at an old path or a hand-wired hook points wherever it was put.
+    // Strip them all, or the new one lands beside it and every stop is
+    // reviewed twice.
     const groups = removeInstalledHooks(hooks[event]);
     if (!uninstall) {
       groups.push(hookEntry(command));

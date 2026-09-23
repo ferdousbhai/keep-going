@@ -310,16 +310,13 @@ function resolveRunner(requested) {
   return requested;
 }
 
-function grokNativeHookFile() {
-  return path.join(process.env.GROK_HOME || path.join(homedir(), ".grok"), "hooks", "keep-going.json");
-}
-
 // Dual install writes Grok's own file and still leaves the Claude-settings copy
 // for Claude Code. Grok would dispatch both; the borrowed copy yields so the
 // native grok hook is the one review.
 async function grokNativeKeepGoingPresent() {
   try {
-    const config = JSON.parse(await readFile(grokNativeHookFile(), "utf8"));
+    const file = path.join(process.env.GROK_HOME || path.join(homedir(), ".grok"), "hooks", "keep-going.json");
+    const config = JSON.parse(await readFile(file, "utf8"));
     const groups = config?.hooks?.Stop;
     if (!Array.isArray(groups)) return false;
     return groups.some((group) =>
@@ -722,16 +719,10 @@ async function ghostPastTurns(input) {
   return segments.slice(0, -1);
 }
 
+// The extension owns the branch, so it sends the turns down with the stop
+// instead of the hook re-reading a file it cannot see.
 function piPastTurns(input) {
-  // The extension owns the branch, so it sends the turns down with the stop
-  // instead of the hook re-reading a file it cannot see.
-  if (!Array.isArray(input.past_turns)) return [];
-  return input.past_turns
-    .filter((turn) =>
-      turn && typeof turn.owner_prompt === "string" && turn.owner_prompt.trim() &&
-      typeof turn.final_response === "string",
-    )
-    .map((turn) => ({ owner: turn.owner_prompt, final: turn.final_response }));
+  return (input.past_turns ?? []).map((turn) => ({ owner: turn.owner_prompt, final: turn.final_response }));
 }
 
 async function listPastTurns(input, runner) {
@@ -852,15 +843,6 @@ function stopCandidateText(input) {
   return messageText(candidate);
 }
 
-function normalizeReply(text) {
-  return String(text)
-    .trim()
-    .replace(/\s+/g, " ")
-    .replace(/^["'`]+|["'`]+$/g, "")
-    .replace(/[.!?]+$/g, "")
-    .trim();
-}
-
 // A final message that asserts nothing beyond completion in a single token —
 // the shape internal observer subagents stop with ("None", "Done."). With no
 // owner prompt to match it against, a reviewer could only ever verdict STOP,
@@ -869,7 +851,7 @@ const VACUOUS_COMPLETIONS = new Set(["none", "done", "ok", "okay", "finished", "
 
 function reviewlessStop(ownerPrompt, lastMessage) {
   if (ownerPrompt) return null;
-  return VACUOUS_COMPLETIONS.has(normalizeReply(lastMessage).toLowerCase())
+  return VACUOUS_COMPLETIONS.has(lastMessage.trim().replace(/[.!]+$/, "").toLowerCase())
     ? { reason: "nothing to review", countedBy: "stub" }
     : null;
 }

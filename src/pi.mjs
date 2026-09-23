@@ -1,4 +1,4 @@
-import { handleStop, TURN_INDEX_LIMIT } from "./keep-going.mjs";
+import { handleStop } from "./keep-going.mjs";
 
 const NUDGE = "keep-going";
 const REVIEW = "keep-going-review";
@@ -14,12 +14,10 @@ const textOf = (message) => (message.content ?? [])
 const lastAssistant = (branch) => branch.findLast((entry) =>
   entry.type === "message" && entry.message.role === "assistant");
 
-const HOOK_FEEDBACK_PATTERN = /^\s*Stop hook feedback\b/;
-
 // Turns before the one under review, oldest first, for the reviewer's TURN
 // requests. Segments open at user messages; tool-only assistant traffic has
-// no text and never becomes a final. Hook feedback is a continuation of its
-// turn, never a turn of its own.
+// no text and never becomes a final. A nudge is a custom message, not a user
+// one, so it never opens a turn.
 function pastTurnsFromBranch(branch, ownerIndex) {
   const turns = [];
   let current = null;
@@ -27,7 +25,7 @@ function pastTurnsFromBranch(branch, ownerIndex) {
     if (entry?.type !== "message") continue;
     if (entry.message?.role === "user") {
       const owner = textOf(entry.message).trim();
-      if (!owner || HOOK_FEEDBACK_PATTERN.test(owner)) continue;
+      if (!owner) continue;
       current = { owner_prompt: owner, final_response: "" };
       turns.push(current);
     } else if (entry.message?.role === "assistant" && current) {
@@ -35,7 +33,7 @@ function pastTurnsFromBranch(branch, ownerIndex) {
       if (text) current.final_response = text;
     }
   }
-  return turns.slice(-TURN_INDEX_LIMIT);
+  return turns;
 }
 
 function enabled(ctx) {

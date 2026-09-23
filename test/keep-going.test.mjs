@@ -1711,10 +1711,6 @@ test("Ghost past turns read the pi session file and skip tool passes", { concurr
 
 test("Pi turns arrive with the stop and Muse has nothing to index", async () => {
   assert.deepEqual(
-    await listPastTurns({ past_turns: [{ owner_prompt: "  ", final_response: "x" }, null] }, "pi"),
-    [],
-  );
-  assert.deepEqual(
     await listPastTurns(
       { past_turns: [{ owner_prompt: "Earlier.", final_response: "Did it." }] },
       "pi",
