@@ -28,10 +28,8 @@ told the scan was already asked for and chooses among the other three. A
 through the way an unparseable verdict does, with a warning to the owner.
 
 The first three block the stop (in Pi, queue a follow-up) with a line the
-reviewer writes for the occasion. That line never speaks for the owner: the
-reviewer is told not to state what they said, meant or approved, because the
-agent sees the sentence and not the reading behind it, and a turn that ended on
-a decision only the owner can make is `STOP` rather than something to push past. Everything else lets the stop through: a
+reviewer writes for the occasion, speaking for the owner: a question the agent
+could have answered itself is answered there. Everything else lets the stop through: a
 missing binary, a timeout, an unparseable verdict, a final message that is the
 exact reply the owner asked for, or a bare completion token (`Done.`) with no
 owner prompt to weigh it against.
