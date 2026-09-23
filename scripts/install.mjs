@@ -67,21 +67,14 @@ const TARGETS = {
     path.join(process.env.GROK_HOME || path.join(userHome, ".grok"), "hooks", "keep-going.json"),
 };
 
-// Any keep-going registration, not just one this installer wrote: a hook wired
-// by hand to a working tree counts, and so does a stale one left at a path the
-// installer no longer uses. Matching the script name rather than a known path
-// is the point.
-const OUR_SCRIPTS = ["keep-going.mjs", "unblock.mjs", "stop-review.mjs"];
-
 // One test for "this registration is ours", shared by the report and by the
-// installer that has to strip it. They were two expressions that agreed by
-// coincidence and then stopped: a hook left pointing at the wrong runner was
-// counted as a duplicate by one and preserved forever by the other, and a
-// hook under an older script name was filed as somebody else's. The runner is
+// installer that has to strip it: any command naming keep-going.mjs, not just
+// one this installer wrote — a hook wired by hand to a working tree counts, and
+// so does a stale one at a path the installer no longer uses. The runner is
 // read off the command rather than being part of the identity, because inside
 // a file this installer owns, any keep-going registration is one of ours.
 function ourRunner(command) {
-  if (typeof command !== "string" || !OUR_SCRIPTS.some((script) => command.includes(script))) return null;
+  if (typeof command !== "string" || !command.includes("keep-going.mjs")) return null;
   return command.trimEnd().split(/\s+/).at(-1);
 }
 

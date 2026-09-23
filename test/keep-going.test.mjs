@@ -11,7 +11,6 @@ import {
   BLOCKING_VERDICTS,
   VERDICTS,
   LAST_STRETCH,
-  NUDGE_LIMIT,
   QUIET_DELAY_MS,
   quietDelayMs,
   REVIEW_PROMPT,
@@ -30,7 +29,6 @@ import {
   formatTurns,
   resolveRunner,
   yieldsToGrokNative,
-  lastMessageFulfillsOwnerPrompt,
   resolveOwnerPrompt,
 } from "../src/keep-going.mjs";
 import { HOOK_FILES, VERSIONED, hookFile, stampVersion } from "../scripts/build.mjs";
@@ -766,38 +764,10 @@ process.exitCode = 1;
   }
 });
 
-test("an exact required reply fulfills the owner prompt without a reviewer", () => {
-  assert.equal(
-    lastMessageFulfillsOwnerPrompt(
-      "Do not use tools or change any files. Reply with exactly this one line and nothing else: Ghost hook test ready.",
-      "Ghost hook test ready.",
-    ),
-    true,
-  );
-  assert.equal(
-    lastMessageFulfillsOwnerPrompt(
-      "Deployment verification for Ghost 0.4.0. Reply exactly: Ghost 0.4.0 ready.",
-      "Ghost 0.4.0 ready.",
-    ),
-    true,
-  );
-  assert.equal(
-    lastMessageFulfillsOwnerPrompt("Please finish the requested change.", "Candidate final response."),
-    false,
-  );
-  assert.equal(
-    lastMessageFulfillsOwnerPrompt(
-      "Do not use tools. Reply with only the word WIP and then stop. We still need the full implementation after that.",
-      "WIP",
-    ),
-    true,
-  );
-});
-
-test("Ghost accepts a stop whose last message is the exact required reply", { concurrency: false }, async () => {
+test("an exact reply the owner asked for is still the reviewer's call", { concurrency: false }, async () => {
   const context = await ghostFixture();
   try {
-    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
     const input = {
       ...context.input,
       owner_prompt: "Do not use tools. Reply with exactly this one line and nothing else: Ghost hook test ready.",
@@ -811,11 +781,11 @@ test("Ghost accepts a stop whose last message is the exact required reply", { co
       }],
     };
     assert.deepEqual(await handleStop(input, "ghost"), {});
-    assert.deepEqual(await context.calls(), []);
+    assert.equal((await context.calls()).length, 1);
     const [row] = (await readFile(process.env.KEEP_GOING_AUDIT_LOG, "utf8"))
       .trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(row.verdict, "STOP");
-    assert.equal(row.counted_by, "owner_prompt");
+    assert.equal(row.counted_by, "tally");
   } finally {
     await context.cleanup();
   }
@@ -860,27 +830,23 @@ test("verdict parsing accepts only the exact review enum", () => {
 });
 
 test("a verdict answered twice is still one verdict", () => {
-  // Small reviewers repeat themselves. Measured on ghost's free-tier model,
-  // roughly one reply in seven came back doubled. Requiring a word boundary
-  // threw away an answer that had been given, and the separated form was worse
-  // than that: it parsed, and the agent was sent back with "CONTINUE." as its
-  // encouragement.
-  for (const doubled of ["CONTINUECONTINUE", "CONTINUE.CONTINUE.", "CONTINUE CONTINUE"]) {
-    assert.deepEqual(parseReviewVerdict(doubled), { verdict: "CONTINUE", nudge: "" });
-  }
-  assert.deepEqual(parseReviewVerdict("STOPSTOP"), { verdict: "STOP", nudge: "" });
-  // A real line still survives beside the verdict.
-  assert.deepEqual(parseReviewVerdict("CONTINUE Keep going."), {
-    verdict: "CONTINUE",
-    nudge: "Keep going.",
-  });
+  // Small reviewers repeat themselves. Requiring a word boundary threw away an
+  // answer that had been given. The repeat is not edited out of the line: what
+  // the reviewer wrote reaches the agent as written.
+  assert.deepEqual(parseReviewVerdict("CONTINUECONTINUE"), { verdict: "CONTINUE", nudge: "CONTINUE" });
+  assert.deepEqual(parseReviewVerdict("CONTINUE CONTINUE"), { verdict: "CONTINUE", nudge: "CONTINUE" });
+  assert.deepEqual(parseReviewVerdict("STOPSTOP"), { verdict: "STOP", nudge: "STOP" });
+  assert.deepEqual(
+    parseReviewVerdict("THINK\nKeep going.THINK\nKeep going."),
+    { verdict: "THINK", nudge: "Keep going.THINK\nKeep going." },
+  );
   // Widening the boundary must not start accepting a longer word.
   for (const invalid of ["CONTINUEX", "THINK_ADVISOR", "JUDGE", "continue"]) {
     assert.throws(() => parseReviewVerdict(invalid));
   }
 });
 
-test("the reviewer's own line is carried through, sanitised, or truncated", () => {
+test("the reviewer's own line reaches the agent as written, secrets aside", () => {
   // The reviewer writes the whole blocking message, so a line that arrives
   // unusable has to fall back rather than ship empty.
   const { verdict, nudge } = parseReviewVerdict(
@@ -894,9 +860,9 @@ test("the reviewer's own line is carried through, sanitised, or truncated", () =
     assert.deepEqual(hookOutputForVerdict(blocking, 0, nudge), { decision: "block", reason: nudge });
   }
 
-  // Separators are stripped and the line is flattened, so a multi-line reply
-  // cannot forge transcript structure in the message the agent receives.
-  assert.equal(parseReviewVerdict("CONTINUE \u2014 keep\n  at it").nudge, "keep at it");
+  // The separator after the verdict belongs to the verdict; the line keeps its
+  // own shape.
+  assert.equal(parseReviewVerdict("CONTINUE \u2014 keep\n  at it").nudge, "keep\n  at it");
   assert.equal(parseReviewVerdict("CONTINUE: nearly there").nudge, "nearly there");
 
   // Secrets the reviewer echoes back never reach the agent's next turn.
@@ -905,14 +871,9 @@ test("the reviewer's own line is carried through, sanitised, or truncated", () =
     /token=\[REDACTED\]/,
   );
 
-  // A speech rather than a sentence is truncated to the budget, keeping its
-  // point instead of falling back to a generic line.
-  const long = "go on and on ".repeat(60);
-  assert.ok(long.length > NUDGE_LIMIT);
-  const kept = parseReviewVerdict(`CONTINUE\n${long}`).nudge;
-  assert.ok(kept.length <= NUDGE_LIMIT);
-  assert.ok(kept.startsWith("go on and on"));
-  assert.notEqual(kept, VERDICTS.CONTINUE.fallbacks[0]);
+  // A speech rather than a sentence is carried whole.
+  const long = "go on and on ".repeat(60).trim();
+  assert.equal(parseReviewVerdict(`CONTINUE\n${long}`).nudge, long);
   assert.deepEqual(hookOutputForVerdict("CONTINUE", 0, ""), {
     decision: "block",
     reason: VERDICTS.CONTINUE.fallbacks[0],
@@ -972,16 +933,7 @@ test("the fallback line rotates and the last stretch asks for a landing", () => 
   );
 });
 
-test("the hook never asks for a register it does not keep itself", () => {
-  // The reviewer writes the whole blocking message against a budget this side
-  // enforces, so every line the hook itself supplies — the prompt's examples,
-  // the fallbacks, and the composed reason — has to fit that same budget.
-  for (const example of REVIEW_PROMPT.match(/"[^"]+"/g) ?? []) {
-    assert.ok(example.length - 2 <= NUDGE_LIMIT, example);
-  }
-  for (const spec of Object.values(VERDICTS)) {
-    for (const line of spec.fallbacks ?? []) assert.ok(line.length <= NUDGE_LIMIT, line);
-  }
+test("each verdict the parser accepts is one the prompt asks for", () => {
   // Each verdict the parser accepts has to be a verdict the prompt asks for.
   for (const verdict of Object.keys(VERDICTS)) {
     assert.match(REVIEW_PROMPT, new RegExp(`^${verdict} \\u2014 `, "m"));

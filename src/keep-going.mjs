@@ -78,7 +78,8 @@ const ownTranscript = (input) => input.transcript_path;
 
 // Everything that differs per host, keyed once: the inputs it must supply, the
 // directory its state belongs under, the directories its transcripts may live
-// in, how its continuations are counted, and how its reviewer is run. A host
+// in, how its continuations are counted, how its past turns are read, and how
+// its reviewer is run. A host
 // whose stop payload already identifies the turn needs no counter — the tally
 // is keyed on that identity. Function declarations hoist, so the counter and
 // the runners below are already bound when this is evaluated.
@@ -93,12 +94,14 @@ const RUNTIMES = {
       }
       return input.continuation_count;
     },
+    pastTurns: piPastTurns,
   },
   codex: {
     requires: ["turn_id", "session_id"],
     state: xdgStateHome,
     roots: () => [path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "sessions")],
     ownerPrompt: codexOwnerPrompt,
+    pastTurns: codexPastTurns,
     run: runCodexModel,
     followUp: { file: ownTranscript, turn: codexTurn },
   },
@@ -108,19 +111,21 @@ const RUNTIMES = {
     roots: () => [path.join(process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), ".claude"), "projects")],
     count: claudeContinuations,
     ownerPrompt: claudeOwnerPrompt,
+    pastTurns: claudePastTurns,
     run: runClaudeModel,
     followUp: { file: ownTranscript, turn: claudeTurn },
   },
   ghost: {
     requires: ["session_id", "owner_prompt", "ghost_home"],
     state: (input) => input.ghost_home,
+    pastTurns: ghostPastTurns,
     run: runGhostModel,
     followUp: { file: ownTranscript, turn: ghostTurn },
   },
   // Muse names its turn, so the tally keys on it wherever it is sent. Only
   // session_id is required: the hook contract is unpublished and a stop that
   // stopped naming its turn should still be reviewed and capped per session,
-  // not refused outright.
+  // not refused outright. It sends no transcript, so it has no past turns.
   muse: {
     requires: ["session_id"],
     state: xdgStateHome,
@@ -140,6 +145,7 @@ const RUNTIMES = {
     state: xdgStateHome,
     roots: () => [path.join(process.env.GROK_HOME || path.join(homedir(), ".grok"), "sessions")],
     ownerPrompt: grokOwnerPrompt,
+    pastTurns: grokPastTurns,
     run: runGrokModel,
     followUp: {
       file: (input) => (typeof input.transcript_path === "string" ? grokChatHistory(input.transcript_path) : null),
@@ -208,7 +214,6 @@ const VERDICTS = {
 
 const VERDICT_NAMES = Object.keys(VERDICTS);
 const BLOCKING_VERDICTS = VERDICT_NAMES.filter((name) => VERDICTS[name].blocks);
-const ENDING_VERDICTS = VERDICT_NAMES.filter((name) => !VERDICTS[name].blocks);
 const listVerdicts = (names) => new Intl.ListFormat("en", { type: "disjunction" }).format(names);
 
 // Validate the reviewer's tiny provider-independent protocol before translating
@@ -221,13 +226,7 @@ const VERDICT_SEPARATOR = "[\\s:.\\u2013\\u2014-]*";
 const REVIEW_VERDICT_PATTERN = new RegExp(
   `^(${VERDICT_ALTERNATION})(?=$|[^A-Za-z_]|${VERDICT_ALTERNATION})${VERDICT_SEPARATOR}([\\s\\S]*)$`,
 );
-// A repeat of the verdict is not a nudge. Left in, the agent is sent back with
-// "CONTINUE." as its encouragement.
-const VERDICT_ECHO = new RegExp(`^(?:${VERDICT_ALTERNATION})${VERDICT_SEPARATOR}`);
 
-// The reviewer's line reaches the agent verbatim, so it is bounded — but
-// truncated, not dropped, so a pointed line keeps its point.
-const NUDGE_LIMIT = 500;
 
 // History lookup the reviewer can request before verdicting. The reviewer
 // stays tool-free: it replies TURN n (or TURN x-y) and the hook fulfills the
@@ -327,7 +326,7 @@ async function grokNativeKeepGoingPresent() {
       (Array.isArray(group?.hooks) ? group.hooks : []).some((hook) => {
         const command = hook?.command;
         if (typeof command !== "string") return false;
-        if (!/(?:keep-going|unblock|stop-review)\.mjs\b/.test(command)) return false;
+        if (!/keep-going\.mjs\b/.test(command)) return false;
         return command.trimEnd().split(/\s+/).at(-1) === "grok";
       }),
     );
@@ -732,29 +731,14 @@ function piPastTurns(input) {
       turn && typeof turn.owner_prompt === "string" && turn.owner_prompt.trim() &&
       typeof turn.final_response === "string",
     )
-    .map((turn) => ({ owner: turn.owner_prompt, final: turn.final_response }))
-    .slice(-TURN_INDEX_LIMIT);
+    .map((turn) => ({ owner: turn.owner_prompt, final: turn.final_response }));
 }
 
 async function listPastTurns(input, runner) {
-  if (!turnsEnabled()) return [];
+  const read = RUNTIMES[runner].pastTurns;
+  if (!turnsEnabled() || !read) return [];
   try {
-    switch (runner) {
-      case "claude":
-        return (await claudePastTurns(input)).slice(-TURN_INDEX_LIMIT);
-      case "codex":
-        return (await codexPastTurns(input)).slice(-TURN_INDEX_LIMIT);
-      case "grok":
-        return (await grokPastTurns(input)).slice(-TURN_INDEX_LIMIT);
-      case "ghost":
-        return (await ghostPastTurns(input)).slice(-TURN_INDEX_LIMIT);
-      case "pi":
-        return piPastTurns(input);
-      default:
-        // Muse sends no transcript, so there is nothing to index: the review
-        // runs exactly as it did before turns existed.
-        return [];
-    }
+    return (await read(input)).slice(-TURN_INDEX_LIMIT);
   } catch {
     return [];
   }
@@ -883,43 +867,11 @@ function normalizeReply(text) {
 // so the model call is skipped and the stop accepted.
 const VACUOUS_COMPLETIONS = new Set(["none", "done", "ok", "okay", "finished", "complete", "completed"]);
 
-// Stops that need no reviewer: the reply the owner asked for verbatim, or a
-// bare completion token with no prompt to weigh it against. Each rule names
-// the audit mechanism that accepted the stop.
 function reviewlessStop(ownerPrompt, lastMessage) {
-  if (ownerPrompt) {
-    return lastMessageFulfillsOwnerPrompt(ownerPrompt, lastMessage)
-      ? { reason: "last message fulfills owner_prompt", countedBy: "owner_prompt" }
-      : null;
-  }
+  if (ownerPrompt) return null;
   return VACUOUS_COMPLETIONS.has(normalizeReply(lastMessage).toLowerCase())
     ? { reason: "nothing to review", countedBy: "stub" }
     : null;
-}
-
-function exactReplyCandidates(ownerPrompt) {
-  const prompt = ownerPrompt.trim();
-  const found = [];
-  for (const re of [/"([^"\n]+)"/g, /'([^'\n]+)'/g, /`([^`\n]+)`/g]) {
-    for (const match of prompt.matchAll(re)) found.push(match[1]);
-  }
-  const after = prompt.match(
-    /\b(?:reply(?:\s+with)?(?:\s+exactly)?|exactly(?:\s+this(?:\s+one)?\s+line(?:\s+and\s+nothing\s+else)?)?)\s*:\s*(.+)\s*$/i,
-  );
-  if (after) found.push(after[1]);
-  const onlyWord = prompt.match(/\breply\s+with\s+only(?:\s+the\s+word)?\s+([^\s.:,]+)/i);
-  if (onlyWord) found.push(onlyWord[1]);
-  const onlyColon = prompt.match(/\breply\s+with\s+only\s*:\s*(.+?)(?:\s+and\s+then\s+stop|\s*$)/i);
-  if (onlyColon) found.push(onlyColon[1]);
-  return [...new Set(found.map(normalizeReply).filter(Boolean))];
-}
-
-// Ghost's smol reviewer treats a one-line exact reply as unfinished. If the
-// owner asked for a specific line and the agent said that line, the turn is over.
-function lastMessageFulfillsOwnerPrompt(ownerPrompt, lastMessage) {
-  const last = normalizeReply(lastMessage);
-  if (!last) return false;
-  return exactReplyCandidates(ownerPrompt).some((wanted) => wanted === last);
 }
 
 // setEncoding("utf8") guarantees a chunk never splits a code point, so summing
@@ -1234,11 +1186,10 @@ async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
   return envelope.text;
 }
 
-// The reviewer's own words carry into the agent's next turn, so they are
-// redacted, flattened to one line, and truncated to the budget. An empty
-// line still falls back to a generic one.
+// The reviewer's own words reach the agent as written, secrets aside. An empty
+// line falls back to a generic one.
 function sanitizeNudge(value) {
-  return oneLine(value, NUDGE_LIMIT).trimEnd();
+  return redactSensitive(value).trim();
 }
 
 const TURN_REQUEST_PATTERN = /^TURN\s+(-?\d+)(?:\s*-\s*(-?\d+))?\s*$/i;
@@ -1289,14 +1240,11 @@ function parseReviewVerdict(text, offered = VERDICT_NAMES) {
   if (!match) {
     throw new Error(`Reviewer output must begin with ${listVerdicts(offered)}`);
   }
-  // Every verdict word is still recognised, so an echo of a withdrawn one is
-  // stripped like any other; but a withdrawn one as the answer is no answer.
+  // A verdict withdrawn on this stop is no answer.
   if (!offered.includes(match[1])) {
     throw new Error(`Reviewer answered ${match[1]}, which was not offered on this stop; expected ${listVerdicts(offered)}`);
   }
-  let rest = match[2];
-  while (VERDICT_ECHO.test(rest)) rest = rest.replace(VERDICT_ECHO, "");
-  return { verdict: match[1], nudge: sanitizeNudge(rest) };
+  return { verdict: match[1], nudge: sanitizeNudge(match[2]) };
 }
 
 // Grok's default agent writes a sentence before the verdict. The first line
@@ -1320,8 +1268,8 @@ function trailingVerdict(body) {
 }
 
 // Near the cap the reviewer is told to write a different line, rather than
-// having one appended to the line it wrote: hook-side facts reach it the one
-// way NUDGE_LIMIT already does, and the message stays within the budget.
+// having one appended to the line it wrote: hook-side facts reach it in the
+// prompt, before the line is written.
 const LAST_STRETCH_NOTE =
   "This turn is near its limit: tell the agent to land what is in flight rather than start anything new.";
 
@@ -1546,7 +1494,6 @@ export {
   RESCAN_SPENT_PROMPT,
   RESCAN_SPENT_VERDICTS,
   VERDICTS,
-  NUDGE_LIMIT,
   LAST_STRETCH,
   claudeContinuations,
   recordedContinuations,
@@ -1561,6 +1508,5 @@ export {
   formatTurns,
   resolveRunner,
   yieldsToGrokNative,
-  lastMessageFulfillsOwnerPrompt,
   resolveOwnerPrompt,
 };

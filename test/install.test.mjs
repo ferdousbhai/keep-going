@@ -57,39 +57,6 @@ function runInstaller(args, env) {
   });
 }
 
-for (const legacyName of ["unblock", "stop-review"]) {
-  test(`installing over a ${legacyName} hook replaces it instead of doubling up`, async () => {
-    // Each rename moved the hook to <data>/<name>/<name>.mjs and the registration
-    // names that path. removeInstalledHooks matches on the path, so without
-    // stripping the old one an upgrade leaves both registered and the reviewer
-    // runs twice on every stop.
-    const { settings, dataHome, env, cleanup } = await installHome("upgrade");
-    try {
-      const legacy = path.join(dataHome, legacyName, `${legacyName}.mjs`);
-      await writeFile(settings, JSON.stringify({
-        hooks: {
-          Stop: [{
-            hooks: [{
-              type: "command",
-              command: `'${process.execPath}' '${legacy}' claude`,
-            }],
-          }],
-        },
-      }));
-
-      const result = await runInstaller(["--claude"], env);
-      assert.equal(result.code, 0, result.stderr);
-
-      const claude = JSON.parse(await readFile(settings, "utf8"));
-      const commands = claude.hooks.Stop.flatMap((group) => group.hooks.map((h) => h.command));
-      assert.equal(commands.length, 1, `expected one Stop hook, got ${JSON.stringify(commands)}`);
-      assert.match(commands[0], /keep-going\.mjs' claude$/);
-    } finally {
-      await cleanup();
-    }
-  });
-}
-
 test("installer adds, updates, and removes Claude Code, Ghost, and Grok hooks", async () => {
   const { settings, home, dataHome, configHome, env, cleanup } = await installHome("install");
   try {

@@ -30,9 +30,8 @@ through the way an unparseable verdict does, with a warning to the owner.
 The first three block the stop (in Pi, queue a follow-up) with a line the
 reviewer writes for the occasion, speaking for the owner: a question the agent
 could have answered itself is answered there. Everything else lets the stop through: a
-missing binary, a timeout, an unparseable verdict, a final message that is the
-exact reply the owner asked for, or a bare completion token (`Done.`) with no
-owner prompt to weigh it against.
+missing binary, a timeout, an unparseable verdict, or a bare completion token
+(`Done.`) with no owner prompt to weigh it against.
 
 At most 100 continuations per owner turn; over the last 10 the reviewer is
 asked for a line about landing what is in flight, and past the cap the stop is
@@ -143,6 +142,3 @@ when a newer Luna ships.
 Muse reviews under an empty config overlay so its own Stop hook does not
 re-enter; a non-default `XDG_CONFIG_HOME` is unreachable from a hook, and the
 review then fails open.
-
-`UNBLOCK_*`, `STOP_REVIEW_*`, and `CODEX_STOP_REVIEW_*` stopped resolving in
-0.4.0; the installer removes those registrations.
