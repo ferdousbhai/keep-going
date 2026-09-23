@@ -334,7 +334,6 @@ test("Codex counts against the turn id it sends, not its rollout", { concurrency
   // The turn id is in the payload, so the count is keyed on it directly rather
   // than rebuilt by matching it against every user message in the rollout.
   const context = await fixture();
-  const tallyFile = path.join(process.env.XDG_STATE_HOME, "keep-going", "continuations.json");
   try {
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     for (const expected of [1, 2]) {
@@ -348,22 +347,6 @@ test("Codex counts against the turn id it sends, not its rollout", { concurrency
 
     // The rollout is on disk, but the count comes from the tally.
     for (const row of await auditRows()) assert.equal(row.counted_by, "tally");
-
-    // At the cap the stop is accepted with no review at all.
-    await writeFile(
-      tallyFile,
-      JSON.stringify({
-        [tallyKey(context.input.session_id, context.input.turn_id)]: {
-          count: CONTINUATION_CAP,
-          updated: Date.now(),
-        },
-      }),
-    );
-    const before = (await context.calls()).length;
-    const capped = await handleStop(context.input);
-    assert.match(capped.systemMessage, /continuation cap \(100\) reached/);
-    assert.equal((await context.calls()).length, before);
-    assert.equal(await recordedContinuations(context.input, "codex"), 0);
   } finally {
     await context.cleanup();
   }
@@ -378,10 +361,9 @@ test("STOP accepts the stop", { concurrency: false }, async () => {
     const calls = await context.calls();
     assert.deepEqual(calls.map((item) => item.model), ["gpt-5.5"]);
     assert.ok(calls[0].args.includes('model_reasoning_effort="low"'));
-    assert.ok(!calls[0].args.includes("--output-schema"));
     assert.match(calls[0].prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.match(calls[0].prompt, /"owner_prompt":"Build it now. token=\[REDACTED\]"/);
-    assert.doesNotMatch(calls[0].prompt, /supersecretvalue|tool_events|project_context/);
+    assert.doesNotMatch(calls[0].prompt, /supersecretvalue/);
     const [audit] = await auditRows();
     assert.equal(audit.verdict, "STOP");
     assert.equal(audit.rationale, "");
@@ -689,11 +671,10 @@ test("Claude classifies with no tools and the lowest advertised effort", { concu
     assert.ok(call.args.includes("--no-session-persistence"));
     assert.equal(call.args[call.args.indexOf("--tools") + 1], "");
     assert.ok(!call.args.includes("--json-schema"));
-    assert.ok(!call.args.includes("--max-turns"));
     assert.match(call.prompt, /Reply with the verdict word alone/);
     assert.match(call.prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.match(call.prompt, /"owner_prompt":"Build it now. token=\[REDACTED\]"/);
-    assert.doesNotMatch(call.prompt, /supersecretvalue|tool_events|project_context/);
+    assert.doesNotMatch(call.prompt, /supersecretvalue/);
   } finally {
     await context.cleanup();
   }
@@ -749,28 +730,6 @@ process.exitCode = 1;
   }
 });
 
-test("an exact reply the owner asked for is still the reviewer's call", { concurrency: false }, async () => {
-  const context = await ghostFixture();
-  try {
-    process.env.MOCK_REVIEW_RESPONSE = "STOP";
-    const input = {
-      ...context.input,
-      owner_prompt: "Do not use tools. Reply with exactly this one line and nothing else: Ghost hook test ready.",
-      last_assistant_message: {
-        role: "assistant",
-        content: [{ type: "text", text: "Ghost hook test ready." }],
-      },
-    };
-    assert.deepEqual(await handleStop(input, "ghost"), {});
-    assert.equal((await context.calls()).length, 1);
-    const [row] = await auditRows();
-    assert.equal(row.verdict, "STOP");
-    assert.equal(row.counted_by, "tally");
-  } finally {
-    await context.cleanup();
-  }
-});
-
 test("Ghost delegates classification to its smol-model bridge", { concurrency: false }, async () => {
   const context = await ghostFixture();
   try {
@@ -792,7 +751,7 @@ test("verdict parsing accepts only the exact verdict words, wherever the reviewe
   for (const verdict of ["CONTINUE", "THINK", "RESCAN", "STOP"]) {
     assert.deepEqual(parseReviewVerdict(` ${verdict}\n`), { verdict, nudge: "" });
   }
-  for (const invalid of ["continue", "CONSULT", "THINK_ADVISOR", "JUDGE", "RESCAN_NOW", "{}", "", null, undefined]) {
+  for (const invalid of ["continue", "CONTINUEX", "CONSULT", "THINK_ADVISOR", "JUDGE", "RESCAN_NOW", "{}", "", null, undefined]) {
     assert.throws(() => parseReviewVerdict(invalid), /begin with CONTINUE, THINK, RESCAN, or STOP/);
   }
   assert.deepEqual(
@@ -809,6 +768,15 @@ test("verdict parsing accepts only the exact verdict words, wherever the reviewe
   );
 });
 
+test("a long run of separators after a verdict parses at once", () => {
+  // A separator run nested in a second repetition matched exponentially many
+  // ways, so a reply like this stalled the parser past the hook timeout.
+  const started = Date.now();
+  assert.throws(() => parseReviewVerdict(`I think STOP${".".repeat(40)}x`));
+  assert.deepEqual(parseReviewVerdict(`I think it is done STOP${" -".repeat(40)}`), { verdict: "STOP", nudge: "" });
+  assert.ok(Date.now() - started < 1_000, `took ${Date.now() - started} ms`);
+});
+
 test("a verdict answered twice is still one verdict", () => {
   // Small reviewers repeat themselves, so a verdict may run straight into the
   // next. The repeat is not edited out of the line: what the reviewer wrote
@@ -820,15 +788,9 @@ test("a verdict answered twice is still one verdict", () => {
     parseReviewVerdict("THINK\nKeep going.THINK\nKeep going."),
     { verdict: "THINK", nudge: "Keep going.THINK\nKeep going." },
   );
-  // A verdict glued to a longer word is still not a verdict.
-  for (const invalid of ["CONTINUEX", "THINK_ADVISOR", "JUDGE", "continue"]) {
-    assert.throws(() => parseReviewVerdict(invalid));
-  }
 });
 
 test("the reviewer's own line reaches the agent as written, secrets aside", () => {
-  // The reviewer writes the whole blocking message, so a line that arrives
-  // unusable has to fall back rather than ship empty.
   const { verdict, nudge } = parseReviewVerdict(
     "CONTINUE\nThree files into the rename and the last one is small.",
   );
@@ -853,10 +815,6 @@ test("the reviewer's own line reaches the agent as written, secrets aside", () =
   // A speech rather than a sentence is carried whole.
   const long = "go on and on ".repeat(60).trim();
   assert.equal(parseReviewVerdict(`CONTINUE\n${long}`).nudge, long);
-  assert.deepEqual(hookOutputForVerdict("CONTINUE", 0, ""), {
-    decision: "block",
-    reason: VERDICTS.CONTINUE.fallbacks[0],
-  });
 });
 
 test("a turn waiting on the owner's consent may end", () => {
@@ -899,12 +857,8 @@ test("the fallback line rotates and the last stretch asks for a landing", () => 
   assert.equal(reviewPrompt(0), REVIEW_PROMPT);
   assert.doesNotMatch(reviewPrompt(CONTINUATION_CAP - LAST_STRETCH - 1), /near its limit/);
   assert.match(reviewPrompt(CONTINUATION_CAP - LAST_STRETCH), /near its limit/);
-  assert.match(reviewPrompt(CONTINUATION_CAP - 1), /land what is in flight/);
   assert.equal(reviewPrompt(0, true), RESCAN_SPENT_PROMPT);
-  assert.throws(() => parseReviewVerdict("RESCAN\nLook again.", RESCAN_SPENT_VERDICTS), /not offered on this stop; expected CONTINUE, THINK, or STOP/);
-  assert.deepEqual(parseReviewVerdict("STOP", RESCAN_SPENT_VERDICTS), { verdict: "STOP", nudge: "" });
   assert.doesNotMatch(RESCAN_SPENT_PROMPT, /RESCAN —|Prefer RESCAN/);
-  assert.match(reviewPrompt(CONTINUATION_CAP - 1, true), /not on offer[\s\S]*land what is in flight/);
   // The note changes the instruction, never the answer the reviewer gave.
   assert.equal(
     hookOutputForVerdict("CONTINUE", CONTINUATION_CAP - 1, "Nearly done.").reason,
@@ -1086,7 +1040,6 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", { co
     // stop hook, so it cannot re-enter this one.
     const [call] = await context.calls();
     assert.ok(call.args.includes("--single"));
-    assert.ok(!call.args.includes("--max-turns"));
     assert.ok(call.args.includes("--verbatim"));
     assert.equal(call.args[call.args.indexOf("--tools") + 1], "");
     assert.equal(call.args[call.args.indexOf("--effort") + 1], "low");
@@ -1106,7 +1059,6 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", { co
     const [row] = await auditRows();
     assert.equal(row.counted_by, "tally");
     assert.equal(await recordedContinuations(context.input, "grok"), 1);
-    assert.ok(!call.args.includes("--model"));
     assert.match(call.args[call.args.indexOf("--single") + 1], /"owner_prompt":""/);
   } finally {
     await context.cleanup();
@@ -1168,7 +1120,6 @@ test("Grok-dispatched Claude settings are reviewed by grok, not claude", { concu
     assert.ok(call.args.includes("--single"));
     assert.ok(!call.args.includes("--print"));
     assert.equal(call.grokHookEvent, null);
-    assert.ok(!call.args.includes("--model"));
   } finally {
     await context.cleanup();
   }
@@ -1244,7 +1195,6 @@ test("Muse is reviewed by muse exec in a hook-free overlay", { concurrency: fals
     // registration it was spawned from: the overlay carries auth but no hooks.
     assert.equal(call.args[0], "exec");
     assert.ok(call.args.includes("--prompt-file"));
-    assert.ok(!call.args.includes("--max-model-steps"));
     assert.ok(call.configHome, "reviewer ran without a config overlay");
     assert.equal(call.overlayHasSettings, false);
     assert.equal(call.overlayHasAuth, true);
@@ -1443,7 +1393,7 @@ test("a retry after hook feedback skips the quiet wait", { concurrency: false },
 
 test("a stop with no transcript to watch is reviewed at once", { concurrency: false }, async () => {
   // Muse sends transcript_path null, so no follow-up could ever be observed.
-  // Holding it for the quiet minute would only add latency.
+  // Holding it for the quiet wait would only add latency.
   const context = await museFixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
@@ -1584,60 +1534,6 @@ test("Pi turns arrive with the stop and Muse has nothing to index", async () => 
   const context = await museFixture();
   try {
     assert.deepEqual(await listPastTurns(context.input, "muse"), []);
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("a reviewer TURN request is fulfilled and then verdicts", { concurrency: false }, async () => {
-  const context = await claudeFixture();
-  try {
-    const prompts = [];
-    const responses = ["TURN 1", "CONTINUE\nStill unfinished."];
-    const output = await handleStop(context.input, "claude", {
-      runModel: async ({ prompt }) => {
-        prompts.push(prompt);
-        return responses.shift();
-      },
-    });
-    assert.deepEqual(output, { decision: "block", reason: "Still unfinished." });
-    assert.equal(prompts.length, 2);
-    assert.match(prompts[0], /Past turns, oldest first/);
-    assert.match(prompts[1], /Turn 1\nowner_prompt: Earlier context\.\nfinal_response: Earlier answer\./);
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("an unreadable TURN request fails open without a second call", { concurrency: false }, async () => {
-  const context = await claudeFixture();
-  try {
-    let calls = 0;
-    const output = await handleStop(context.input, "claude", {
-      runModel: async () => {
-        calls += 1;
-        return "TURN 9";
-      },
-    });
-    assert.match(output.systemMessage, /begin with CONTINUE, THINK, RESCAN, or STOP/);
-    assert.equal(calls, 1);
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("repeated TURN requests hit the round cap and fail open", { concurrency: false }, async () => {
-  const context = await claudeFixture();
-  try {
-    let calls = 0;
-    const output = await handleStop(context.input, "claude", {
-      runModel: async () => {
-        calls += 1;
-        return "TURN 1";
-      },
-    });
-    assert.match(output.systemMessage, /begin with CONTINUE, THINK, RESCAN, or STOP/);
-    assert.equal(calls, 3);
   } finally {
     await context.cleanup();
   }

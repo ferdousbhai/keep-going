@@ -152,8 +152,8 @@ codexSource.where = codexConfig;
 
 // Who dispatches a host's stops. Mostly its own file; Grok also dispatches
 // Claude's, and Claude also dispatches its plugins'. A host whose list names
-// another host is covered by it, which is the one fact --all, the note it
-// prints, and the wrong-runtime warning all need.
+// another host is covered by it, which is what the install note and the
+// wrong-runtime warning need.
 const SOURCES = {
   claude: [settingsSource("claude"), claudePluginSource],
   muse: [settingsSource("muse")],

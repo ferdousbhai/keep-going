@@ -1120,14 +1120,9 @@ function parseTurnRequest(text, count) {
   return { start, end };
 }
 
-function oneLine(value, limit) {
-  const line = redactSensitive(String(value ?? "")).replace(/\s+/g, " ").trim();
-  return line.length <= limit ? line : line.slice(0, limit);
-}
-
 function turnIndexSection(turns) {
   const lines = turns.map((turn, index) =>
-    `${index + 1}: ${oneLine(turn.owner, TURN_INDEX_CHARS)}`);
+    `${index + 1}: ${redactSensitive(turn.owner).replace(/\s+/g, " ").trim().slice(0, TURN_INDEX_CHARS)}`);
   return [
     `Past turns, oldest first. To read full text before verdicting, reply TURN n or TURN x-y (at most ${TURNS_PER_REQUEST} turns), e.g. TURN ${turns.length}. Then verdict as usual.`,
     ...lines,
@@ -1173,7 +1168,7 @@ function verdictAfterPreamble(body) {
 // Same agent often glues the word on: "I'll inspect the workspace.STOP"
 function trailingVerdict(body) {
   const match = new RegExp(
-    `(?:^|[^A-Za-z_])(${VERDICT_ALTERNATION})(?:${VERDICT_SEPARATOR})*$`,
+    `(?:^|[^A-Za-z_])(${VERDICT_ALTERNATION})${VERDICT_SEPARATOR}$`,
   ).exec(body);
   return match ? [match[0], match[1], ""] : null;
 }

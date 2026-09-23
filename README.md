@@ -140,6 +140,6 @@ Pi has no smaller tier to name and reviews on the active model. Codex runs
 with `--ignore-user-config`, so `KEEP_GOING_CODEX_MODEL` is the only way to
 choose its model, and its default names a release, not a family, so it is
 bumped by hand when a newer Luna ships.
-Muse reviews under an empty config overlay so its own Stop hook does not
+Muse reviews under a config overlay with no settings, so its own Stop hook does not
 re-enter; a non-default `XDG_CONFIG_HOME` is unreachable from a hook, and the
 review then fails open.

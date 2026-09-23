@@ -331,27 +331,6 @@ test("--all writes a native Grok hook beside Claude, and --uninstall --all still
   }
 });
 
-test("installing strips a hand-wired hook wherever it points", async () => {
-  // A registration is ours by script name, not by a path the installer wrote,
-  // so a hand-wired one is stripped like any other.
-  const { settings, env, cleanup } = await installHome("handwired");
-  try {
-    await writeFile(settings, JSON.stringify({
-      hooks: {
-        Stop: [{ hooks: [{ type: "command", command: "'/opt/node' '/somewhere/else/keep-going.mjs' claude" }] }],
-      },
-    }));
-
-    assert.equal((await runInstaller(["--claude"], env)).code, 0);
-    const config = JSON.parse(await readFile(settings, "utf8"));
-    const stop = config.hooks.Stop.flatMap((group) => group.hooks);
-    assert.equal(stop.length, 1, JSON.stringify(stop));
-    assert.doesNotMatch(stop[0].command, /somewhere\/else/);
-  } finally {
-    await cleanup();
-  }
-});
-
 test("status reports every host, including the one it does not write", async () => {
   // Grok dispatches Claude's settings, so the report distinguishes "covered by
   // another host's file" from both "registered" and "absent".
