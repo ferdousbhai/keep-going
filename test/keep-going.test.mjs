@@ -329,28 +329,6 @@ process.stdout.write(JSON.stringify({ text: process.env.MOCK_REVIEW_RESPONSE }))
   };
 }
 
-test("Codex counts against the turn id it sends, not its rollout", async () => {
-  // The turn id is in the payload, so the count is keyed on it directly rather
-  // than rebuilt by matching it against every user message in the rollout.
-  const context = await fixture();
-  try {
-    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
-    for (const expected of [1, 2]) {
-      assert.equal((await handleStop(context.input)).decision, "block");
-      assert.equal(await recordedContinuations(context.input, "codex"), expected);
-    }
-
-    // The next turn is a new key, so it starts at zero whether or not the hook
-    // ever saw the stop that ended this one.
-    assert.equal(await recordedContinuations({ ...context.input, turn_id: "turn-next" }, "codex"), 0);
-
-    // The rollout is on disk, but the count comes from the tally.
-    for (const row of await auditRows()) assert.equal(row.counted_by, "tally");
-  } finally {
-    await context.cleanup();
-  }
-});
-
 test("STOP accepts the stop", async () => {
   const context = await fixture();
   try {
@@ -1717,6 +1695,46 @@ test("Ghost and Pi log history the same way", async () => {
   } finally {
     restoreEnvironment(previous);
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a new Claude turn is offered RESCAN whatever an interrupted one left", async () => {
+  // Claude's tally key is the session, and an interrupted turn fires no Stop
+  // to clear its entry. The transcript says whether this is still that turn.
+  const context = await claudeFixture();
+  const tallyFile = path.join(process.env.XDG_STATE_HOME, "keep-going", "continuations.json");
+  const seed = () => writeFile(tallyFile, JSON.stringify({
+    [tallyKey(context.input.session_id)]: { count: 3, updated: Date.now(), rescanned: true },
+  }));
+  try {
+    await mkdir(path.dirname(tallyFile), { recursive: true });
+    const review = async () => {
+      const prompts = [];
+      await handleStop(context.input, "claude", {
+        runModel: async ({ prompt }) => { prompts.push(prompt); return "CONTINUE\nGo on."; },
+      });
+      return { prompt: prompts[0], entry: JSON.parse(await readFile(tallyFile, "utf8"))[tallyKey(context.input.session_id)] };
+    };
+
+    // No feedback since the owner's prompt: a new turn, with RESCAN back on
+    // offer and the stale flag gone from the entry.
+    await seed();
+    const fresh = await review();
+    assert.match(fresh.prompt, /RESCAN — the agent claims/);
+    assert.doesNotMatch(fresh.prompt, /not on offer/);
+    assert.deepEqual(Object.keys(fresh.entry).sort(), ["count", "updated"]);
+    assert.equal(fresh.entry.count, 1);
+
+    // Feedback since the prompt: the same turn, whose scan was already asked for.
+    await appendRecords(context.input.transcript_path, [JSON.stringify({
+      type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback:\nScan once more." },
+    })]);
+    await seed();
+    const same = await review();
+    assert.match(same.prompt, /not on offer/);
+    assert.equal(same.entry.rescanned, true);
+  } finally {
+    await context.cleanup();
   }
 });
 

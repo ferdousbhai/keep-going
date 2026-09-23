@@ -768,7 +768,7 @@ async function recordTurnState(input, runner, blocked, exact = null, rescan = fa
     // from it rather than incremented past its own stale value — otherwise the
     // number the hook falls back to is one it has been drifting all turn.
     const from = exact ?? tally[key]?.count ?? 0;
-    const rescanned = tally[key]?.rescanned === true || rescan;
+    const rescanned = (exact !== 0 && tally[key]?.rescanned === true) || rescan;
     tally[key] = { count: from + 1, updated: Date.now(), ...(rescanned ? { rescanned } : {}) };
   }
   await writeTally(file, tally);
@@ -974,10 +974,10 @@ const grokClassifierPrompt = (verdicts) =>
 // Nested `grok --single` otherwise inherits the parent session's home: MCP
 // servers, plugins, high reasoning, and the coding agent. That is a full
 // turn, and it times out the classifier. The overlay carries auth and a
-// config that turns off the Claude and Cursor scans, so grok picks its own default model with no tools and --effort low (the lowest
-// level this CLI advertises; it has no none). --single
-// still dispatches no stop hook, so the reviewer cannot trip the hook that
-// spawned it.
+// config that turns off the Claude and Cursor scans; the flags run it with no
+// tools and --effort low (the lowest level this CLI advertises; it has no
+// none). --single dispatches no stop hook, so the reviewer cannot trip the
+// hook that spawned it.
 async function runGrokModel({ prompt, timeoutMs, verdicts }) {
   return inTemporaryDirectory("grok", async (directory) => {
     const overlayHome = path.join(directory, "home");
@@ -990,8 +990,9 @@ async function runGrokModel({ prompt, timeoutMs, verdicts }) {
     } catch {
       // Same as Muse: a missing credential fails the review open below.
     }
-    // Grok still scans ~/.claude and ~/.cursor when GROK_HOME has no config.
-    // That would re-enter this hook from inside the reviewer.
+    // Grok still scans ~/.claude and ~/.cursor when GROK_HOME has no config,
+    // loading their hooks, MCP servers, skills, agents, and rules into the
+    // reviewer.
     await writeFile(
       path.join(overlayHome, "config.toml"),
       [
@@ -1285,8 +1286,7 @@ async function handleStop(input, runner = "codex", { runModel, delay, onVerdict 
 
   let review;
   let continuations = await recordedContinuations(input, runner);
-  const rescanned = await recordedRescan(input, runner);
-  const offered = rescanned ? RESCAN_SPENT_VERDICTS : VERDICT_NAMES;
+  let rescanned = await recordedRescan(input, runner);
   let countedBy = runtime.state ? "tally" : "session";
   const named = payloadTurn(input);
   // The last reviewer response, whatever it parses as: an unparseable reply
@@ -1304,6 +1304,9 @@ async function handleStop(input, runner = "codex", { runModel, delay, onVerdict 
       try {
         continuations = await runtime.count(input);
         countedBy = "transcript";
+        // No feedback since the owner's last prompt is a new turn, whatever
+        // an interrupted turn left in the session's tally entry.
+        if (continuations === 0) rescanned = false;
       } catch {
         // A transcript in a shape or a place this runtime does not know is the
         // ordinary case on a host we have not taught it yet. The tally already
@@ -1317,6 +1320,7 @@ async function handleStop(input, runner = "codex", { runModel, delay, onVerdict 
       return settleStop(input, runner, capped, { verdict: "CAP", reason: capped.systemMessage, countedBy });
     }
 
+    const offered = rescanned ? RESCAN_SPENT_VERDICTS : VERDICT_NAMES;
     const run = runModel ?? runtime.run;
     if (!run) throw new Error(`${runner} review requires its native extension`);
     // Past turns ride along only when there are any: the index tells the
