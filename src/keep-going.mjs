@@ -123,7 +123,7 @@ const RUNTIMES = {
     run: runMuseModel,
   },
   // Grok dispatches hooks it finds in ~/.claude/settings.json as well as its
-  // own. A Claude install's command still ends in `claude`, so resolveRunner
+  // own. A Claude install's command still ends in `claude`, so handleStop
   // remaps to this runtime whenever GROK_HOOK_EVENT is set — unless a native
   // Grok hook is present, in which case the Claude copy yields. Dual install
   // writes ~/.grok/hooks/keep-going.json so Grok is covered even if that scan
@@ -215,7 +215,6 @@ const VERDICT_SEPARATOR = "[\\s:.\\u2013\\u2014-]*";
 const REVIEW_VERDICT_PATTERN = new RegExp(
   `^(${VERDICT_ALTERNATION})(?=$|[^A-Za-z_]|${VERDICT_ALTERNATION})${VERDICT_SEPARATOR}([\\s\\S]*)$`,
 );
-
 
 // History lookup the reviewer can request before verdicting. The reviewer
 // stays tool-free: it replies TURN n (or TURN x-y) and the hook fulfills the
@@ -966,9 +965,8 @@ async function runClaudeModel({ prompt, timeoutMs }) {
   });
 }
 
-// Grok's default system prompt is a coding agent. Without this, --single
-// writes analysis before STOP and the hook fails open.
-// The verdicts on offer this stop, so the system prompt never lists one the
+// Grok's default system prompt is a coding agent; this one keeps --single to
+// the verdict. The verdicts on offer this stop, so the system prompt never lists one the
 // user prompt has withdrawn.
 const grokClassifierPrompt = (verdicts) =>
   `Reply with exactly one of ${listVerdicts(verdicts)} as the first line. No preamble, no analysis.`;
@@ -1402,7 +1400,6 @@ export {
   quietDelayMs,
   REVIEW_PROMPT,
   RESCAN_SPENT_PROMPT,
-  RESCAN_SPENT_VERDICTS,
   VERDICTS,
   LAST_STRETCH,
   claudeContinuations,

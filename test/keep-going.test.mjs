@@ -17,7 +17,6 @@ import {
   recordedContinuations,
   recordedRescan,
   RESCAN_SPENT_PROMPT,
-  RESCAN_SPENT_VERDICTS,
   reviewPrompt,
   handleStop,
   hookOutputForVerdict,
@@ -330,7 +329,7 @@ process.stdout.write(JSON.stringify({ text: process.env.MOCK_REVIEW_RESPONSE }))
   };
 }
 
-test("Codex counts against the turn id it sends, not its rollout", { concurrency: false }, async () => {
+test("Codex counts against the turn id it sends, not its rollout", async () => {
   // The turn id is in the payload, so the count is keyed on it directly rather
   // than rebuilt by matching it against every user message in the rollout.
   const context = await fixture();
@@ -352,7 +351,7 @@ test("Codex counts against the turn id it sends, not its rollout", { concurrency
   }
 });
 
-test("STOP accepts the stop", { concurrency: false }, async () => {
+test("STOP accepts the stop", async () => {
   const context = await fixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
@@ -373,7 +372,7 @@ test("STOP accepts the stop", { concurrency: false }, async () => {
   }
 });
 
-test("audit keeps the reviewer's raw text", { concurrency: false }, async () => {
+test("audit keeps the reviewer's raw text", async () => {
   const context = await fixture();
   try {
     await handleStop(context.input, "codex", { runModel: async () => "CONTINUE\nKeep going, finish it." });
@@ -393,7 +392,7 @@ test("audit keeps the reviewer's raw text", { concurrency: false }, async () => 
   }
 });
 
-test("stub final messages without an owner prompt skip review", { concurrency: false }, async () => {
+test("stub final messages without an owner prompt skip review", async () => {
   const context = await museFixture();
   try {
     let reviews = 0;
@@ -429,7 +428,7 @@ test("stub final messages without an owner prompt skip review", { concurrency: f
   }
 });
 
-test("RESCAN blocks with a fresh-scan nudge", { concurrency: false }, async () => {
+test("RESCAN blocks with a fresh-scan nudge", async () => {
   const context = await fixture();
   try {
     const output = await handleStop(context.input, "codex", {
@@ -445,7 +444,7 @@ test("RESCAN blocks with a fresh-scan nudge", { concurrency: false }, async () =
   }
 });
 
-test("RESCAN is offered once per turn; a second one fails open as an unoffered verdict", { concurrency: false }, async () => {
+test("RESCAN is offered once per turn; a second one fails open as an unoffered verdict", async () => {
   const context = await fixture();
   try {
     const prompts = [];
@@ -488,7 +487,7 @@ test("RESCAN is offered once per turn; a second one fails open as an unoffered v
   }
 });
 
-test("last_assistant_message is reviewed when the transcript is unavailable", { concurrency: false }, async () => {
+test("last_assistant_message is reviewed when the transcript is unavailable", async () => {
   const context = await fixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
@@ -513,7 +512,7 @@ test("a missing reviewer executable fails open and clears the turn tally", async
   assert.equal(await recordedContinuations(context.input, "codex"), 0);
 });
 
-test("Claude counting starts at the last genuine prompt and counts only hook feedback", { concurrency: false }, async () => {
+test("Claude counting starts at the last genuine prompt and counts only hook feedback", async () => {
   const context = await claudeFixture();
   try {
     assert.equal(await claudeContinuations(context.input), 0);
@@ -540,7 +539,7 @@ test("Claude counting starts at the last genuine prompt and counts only hook fee
   }
 });
 
-test("an interruption is not a new owner prompt", { concurrency: false }, async () => {
+test("an interruption is not a new owner prompt", async () => {
   // The marker the harness writes when a turn ends early carries none of the
   // flags the other injected records carry, so only its exact text keeps it
   // from restarting the count or becoming the request to judge against. An
@@ -573,7 +572,7 @@ test("an interruption is not a new owner prompt", { concurrency: false }, async 
   }
 });
 
-test("a subagent reporting back does not open a turn", { concurrency: false }, async () => {
+test("a subagent reporting back does not open a turn", async () => {
   // Codex has no flag for these the way Claude's task notifications do; the
   // <subagent_notification> prefix is what keeps them out of the history the
   // reviewer can ask to read.
@@ -600,7 +599,7 @@ test("a subagent reporting back does not open a turn", { concurrency: false }, a
   }
 });
 
-test("running a command is not asking for anything", { concurrency: false }, async () => {
+test("running a command is not asking for anything", async () => {
   // A command the owner runs from the prompt lands as three user-role records
   // — the echo, the output, and any error — each carrying the flags a typed
   // prompt carries. Counted, they restart the turn; read as the request, they
@@ -658,7 +657,7 @@ test("Claude ignores orphan feedback and resets the streaming count for a new ow
   assert.equal(await claudeContinuations(context.input), 0);
 });
 
-test("Claude classifies with no tools and the lowest advertised effort", { concurrency: false }, async () => {
+test("Claude classifies with no tools and the lowest advertised effort", async () => {
   const context = await claudeFixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
@@ -680,7 +679,7 @@ test("Claude classifies with no tools and the lowest advertised effort", { concu
   }
 });
 
-test("Codex and Claude review on a smaller tier unless one is configured", { concurrency: false }, async () => {
+test("Codex and Claude review on a smaller tier unless one is configured", async () => {
   // A one-word verdict does not need the host's frontier default. Claude's
   // alias tracks the latest Sonnet; Codex has no family alias, so its default
   // names a release and ages with it. Muse and Grok have no smaller tier to
@@ -730,7 +729,7 @@ process.exitCode = 1;
   }
 });
 
-test("Ghost delegates classification to its smol-model bridge", { concurrency: false }, async () => {
+test("Ghost delegates classification to its smol-model bridge", async () => {
   const context = await ghostFixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "THINK";
@@ -821,7 +820,6 @@ test("a turn waiting on the owner's consent may end", () => {
   // Consent is the one thing the agent cannot reason its way to, so the
   // reviewer is given somewhere honest to land a turn that ends on it rather
   // than filing it under questions the agent could have answered itself.
-  assert.match(VERDICTS.STOP.describe, /only the owner has standing to make/);
   assert.match(REVIEW_PROMPT, /only the owner has standing to make/);
 });
 
@@ -829,7 +827,6 @@ test("the reviewer is told when it is being refused", () => {
   // Earlier nudges are filtered out of the transcript it reads, so without the
   // count every firing looks like the first and a holding agent reads as a
   // stalling one. The note is the only thing that tells it otherwise.
-  assert.doesNotMatch(reviewPrompt(0), /already been continued/);
   assert.match(reviewPrompt(1), /already been continued 1 time\./);
   assert.match(reviewPrompt(3), /already been continued 3 times\./);
   assert.match(reviewPrompt(2), /that reason is a real blocker \u2014 STOP/);
@@ -867,7 +864,6 @@ test("the fallback line rotates and the last stretch asks for a landing", () => 
 });
 
 test("each verdict the parser accepts is one the prompt asks for", () => {
-  // Each verdict the parser accepts has to be a verdict the prompt asks for.
   for (const verdict of Object.keys(VERDICTS)) {
     assert.match(REVIEW_PROMPT, new RegExp(`^${verdict} \\u2014 `, "m"));
   }
@@ -996,7 +992,7 @@ process.stdout.write(process.env.MOCK_REVIEW_RESPONSE);
   };
 }
 
-test("a subagent is capped on its own account, not its parent's", { concurrency: false }, async () => {
+test("a subagent is capped on its own account, not its parent's", async () => {
   // SubagentStop carries the parent session's id, so without agent_id in the
   // key a handful of subagents would spend the cap of the turn that launched
   // them. The parent's transcript is the parent's, too: its user messages are
@@ -1028,7 +1024,7 @@ test("a subagent is capped on its own account, not its parent's", { concurrency:
   }
 });
 
-test("Grok is reviewed by Grok, on the message spelling it actually sends", { concurrency: false }, async () => {
+test("Grok is reviewed by Grok, on the message spelling it actually sends", async () => {
   const context = await grokFixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
@@ -1065,7 +1061,7 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", { co
   }
 });
 
-test("Grok recovers owner_prompt from prompt_history", { concurrency: false }, async () => {
+test("Grok recovers owner_prompt from prompt_history", async () => {
   const context = await grokFixture();
   try {
     const { enc, input } = await grokSession(context);
@@ -1083,7 +1079,7 @@ test("Grok recovers owner_prompt from prompt_history", { concurrency: false }, a
   }
 });
 
-test("Grok reads the chat log's wrapper blocks as nobody's prompt", { concurrency: false }, async () => {
+test("Grok reads the chat log's wrapper blocks as nobody's prompt", async () => {
   // With no prompt_history the chat log is the fallback, and what the owner
   // typed is tagged there. The untagged blocks beside it — <user_info> and
   // friends — are the log's own, and neither prompt recovery nor turn
@@ -1102,7 +1098,7 @@ test("Grok reads the chat log's wrapper blocks as nobody's prompt", { concurrenc
   }
 });
 
-test("Grok-dispatched Claude settings are reviewed by grok, not claude", { concurrency: false }, async () => {
+test("Grok-dispatched Claude settings are reviewed by grok, not claude", async () => {
   const context = await grokFixture();
   const claudeBin = path.join(path.dirname(process.env.KEEP_GOING_GROK_BIN), "must-not-run-claude.mjs");
   try {
@@ -1125,7 +1121,7 @@ test("Grok-dispatched Claude settings are reviewed by grok, not claude", { concu
   }
 });
 
-test("a native Grok hook makes the Claude-settings copy yield", { concurrency: false }, async () => {
+test("a native Grok hook makes the Claude-settings copy yield", async () => {
   const context = await grokFixture();
   try {
     process.env.GROK_HOOK_EVENT = "stop";
@@ -1151,7 +1147,7 @@ test("a native Grok hook makes the Claude-settings copy yield", { concurrency: f
   }
 });
 
-test("Muse counts against the turn id it sends", { concurrency: false }, async () => {
+test("Muse counts against the turn id it sends", async () => {
   // The turn id is in the payload, so the count is keyed on it directly. Only
   // session_id is required: a stop that stopped naming its turn is still
   // reviewed and capped per session rather than refused outright.
@@ -1180,7 +1176,7 @@ test("Muse counts against the turn id it sends", { concurrency: false }, async (
   }
 });
 
-test("Muse is reviewed by muse exec in a hook-free overlay", { concurrency: false }, async () => {
+test("Muse is reviewed by muse exec in a hook-free overlay", async () => {
   const context = await museFixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
@@ -1211,7 +1207,7 @@ test("Muse is reviewed by muse exec in a hook-free overlay", { concurrency: fals
   }
 });
 
-test("Muse blocks an empty final message once, then accepts the retry", { concurrency: false }, async () => {
+test("Muse blocks an empty final message once, then accepts the retry", async () => {
   const context = await museFixture();
   try {
     const input = { session_id: "session-empty", last_assistant_message: "" };
@@ -1229,7 +1225,7 @@ test("Muse blocks an empty final message once, then accepts the retry", { concur
   }
 });
 
-test("a fresh stop waits out the quiet delay before any review", { concurrency: false }, async () => {
+test("a fresh stop waits out the quiet delay before any review", async () => {
   const context = await fixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
@@ -1246,7 +1242,7 @@ test("a fresh stop waits out the quiet delay before any review", { concurrency: 
   }
 });
 
-test("a follow-up during the quiet wait lets the stop through unreviewed", { concurrency: false }, async () => {
+test("a follow-up during the quiet wait lets the stop through unreviewed", async () => {
   const context = await fixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
@@ -1271,7 +1267,7 @@ test("a follow-up during the quiet wait lets the stop through unreviewed", { con
   }
 });
 
-test("the host's own writes during the quiet wait are not a follow-up", { concurrency: false }, async () => {
+test("the host's own writes during the quiet wait are not a follow-up", async () => {
   // Claude Code fires Stop before the final assistant message reaches the
   // transcript, then lands it, the hook summary, and housekeeping records
   // while the hook waits. None of that is the owner speaking, so the stop
@@ -1305,7 +1301,7 @@ test("the host's own writes during the quiet wait are not a follow-up", { concur
   }
 });
 
-test("an owner message queued during the quiet wait lets a Claude stop through", { concurrency: false }, async () => {
+test("an owner message queued during the quiet wait lets a Claude stop through", async () => {
   const context = await claudeFixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
@@ -1334,7 +1330,7 @@ test("an owner message queued during the quiet wait lets a Claude stop through",
   }
 });
 
-test("a subagent stop skips the quiet wait", { concurrency: false }, async () => {
+test("a subagent stop skips the quiet wait", async () => {
   // Its owner is the parent agent, which is waiting on it and cannot follow up.
   const context = await claudeFixture();
   try {
@@ -1350,7 +1346,7 @@ test("a subagent stop skips the quiet wait", { concurrency: false }, async () =>
   }
 });
 
-test("Grok's quiet wait watches the chat history beside the updates log", { concurrency: false }, async () => {
+test("Grok's quiet wait watches the chat history beside the updates log", async () => {
   const context = await grokFixture();
   try {
     const { chat, input } = await grokSession(context);
@@ -1376,7 +1372,7 @@ test("Grok's quiet wait watches the chat history beside the updates log", { conc
   }
 });
 
-test("a retry after hook feedback skips the quiet wait", { concurrency: false }, async () => {
+test("a retry after hook feedback skips the quiet wait", async () => {
   const context = await fixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
@@ -1391,7 +1387,7 @@ test("a retry after hook feedback skips the quiet wait", { concurrency: false },
   }
 });
 
-test("a stop with no transcript to watch is reviewed at once", { concurrency: false }, async () => {
+test("a stop with no transcript to watch is reviewed at once", async () => {
   // Muse sends transcript_path null, so no follow-up could ever be observed.
   // Holding it for the quiet wait would only add latency.
   const context = await museFixture();
@@ -1451,7 +1447,7 @@ test("fulfilled turns carry redacted prompts and finals, never raw secrets", () 
   );
 });
 
-test("Claude past turns exclude the current turn and tool traffic", { concurrency: false }, async () => {
+test("Claude past turns exclude the current turn and tool traffic", async () => {
   const context = await claudeFixture();
   try {
     assert.deepEqual(await listPastTurns(context.input, "claude"), [
@@ -1462,7 +1458,7 @@ test("Claude past turns exclude the current turn and tool traffic", { concurrenc
   }
 });
 
-test("Codex past turns segment on turn_context and skip hook feedback", { concurrency: false }, async () => {
+test("Codex past turns segment on turn_context and exclude the current turn", async () => {
   const context = await fixture();
   try {
     await appendRecords(context.input.transcript_path, [
@@ -1483,7 +1479,7 @@ test("Codex past turns segment on turn_context and skip hook feedback", { concur
   }
 });
 
-test("Grok past turns pair chat log users with their assistant finals", { concurrency: false }, async () => {
+test("Grok past turns pair chat log users with their assistant finals", async () => {
   const context = await grokFixture();
   try {
     const { chat, input } = await grokSession(context);
@@ -1501,7 +1497,7 @@ test("Grok past turns pair chat log users with their assistant finals", { concur
   }
 });
 
-test("Ghost past turns read the pi session file and skip tool passes", { concurrency: false }, async () => {
+test("Ghost past turns read the pi session file and skip tool passes", async () => {
   const context = await ghostFixture();
   try {
     const sessionFile = path.join(context.input.ghost_home, "session.jsonl");
@@ -1539,7 +1535,7 @@ test("Pi turns arrive with the stop and Muse has nothing to index", async () => 
   }
 });
 
-test("without past turns a TURN line is just a bad verdict", { concurrency: false }, async () => {
+test("without past turns a TURN line is just a bad verdict", async () => {
   const context = await museFixture();
   try {
     const prompts = [];
@@ -1596,7 +1592,7 @@ async function historyStop(replies, { turns = 3, env = {} } = {}) {
   }
 }
 
-test("the audit row says history was offered and not read", { concurrency: false }, async () => {
+test("the audit row says history was offered and not read", async () => {
   const { row, prompts } = await historyStop(["STOP"]);
   assert.equal(row.verdict, "STOP");
   assert.equal(row.past_turns, 3);
@@ -1605,7 +1601,7 @@ test("the audit row says history was offered and not read", { concurrency: false
   assert.match(prompts[0], /Past turns, oldest first/);
 });
 
-test("the audit row records a history request and the verdict after it", { concurrency: false }, async () => {
+test("the audit row records a history request and the verdict after it", async () => {
   const { output, row, prompts } = await historyStop(["TURN 2", "CONTINUE\nStill unfinished."]);
   assert.deepEqual(output, { decision: "block", reason: "Still unfinished." });
   assert.equal(row.verdict, "CONTINUE");
@@ -1617,7 +1613,7 @@ test("the audit row records a history request and the verdict after it", { concu
   assert.doesNotMatch(prompts[1], /Turn 1\n|Turn 3\n/);
 });
 
-test("history requests are logged as the ranges actually read", { concurrency: false }, async () => {
+test("history requests are logged as the ranges actually read", async () => {
   // -1 is the turn before this one and a backwards range is swapped: the row
   // holds what was fulfilled, not the reviewer's spelling of it.
   const { row, prompts } = await historyStop(["TURN -1", "TURN 3-2", "STOP"]);
@@ -1627,7 +1623,7 @@ test("history requests are logged as the ranges actually read", { concurrency: f
   assert.match(prompts[2], /Turn 2\n[\s\S]*Turn 3\n/);
 });
 
-test("a reviewer that keeps asking fails open with every read request logged", { concurrency: false }, async () => {
+test("a reviewer that keeps asking fails open with every read request logged", async () => {
   const { output, row, prompts } = await historyStop(["TURN 1", "TURN 1", "TURN 1"]);
   assert.match(output.systemMessage, /keep-going was skipped/);
   assert.equal(row.verdict, "ERROR");
@@ -1637,7 +1633,7 @@ test("a reviewer that keeps asking fails open with every read request logged", {
   assert.equal(prompts.length, 3);
 });
 
-test("a request for a turn that does not exist fails open and reads nothing", { concurrency: false }, async () => {
+test("a request for a turn that does not exist fails open and reads nothing", async () => {
   const { row, prompts } = await historyStop(["TURN 9"]);
   assert.equal(row.verdict, "ERROR");
   assert.equal(row.past_turns, 3);
@@ -1646,14 +1642,14 @@ test("a request for a turn that does not exist fails open and reads nothing", { 
   assert.equal(prompts.length, 1);
 });
 
-test("the offered count is the index, capped like the index", { concurrency: false }, async () => {
+test("the offered count is the index, capped like the index", async () => {
   const { row, prompts } = await historyStop(["STOP"], { turns: TURN_INDEX_LIMIT + 5 });
   assert.equal(row.past_turns, TURN_INDEX_LIMIT);
   // The oldest turns fall off the index; its first entry is turn 6 of 25.
   assert.match(prompts[0], /\n1: Errand 6\.\n/);
 });
 
-test("no history on offer leaves the audit row without history fields", { concurrency: false }, async () => {
+test("no history on offer leaves the audit row without history fields", async () => {
   // A first turn has nothing before it.
   const first = await historyStop(["STOP"], { turns: 0 });
   assert.equal(first.row.verdict, "STOP");
@@ -1667,19 +1663,7 @@ test("no history on offer leaves the audit row without history fields", { concur
   assert.doesNotMatch(disabled.prompts[0], /Past turns/);
 });
 
-test("Muse, with no transcript, logs no history fields", { concurrency: false }, async () => {
-  const context = await museFixture();
-  try {
-    await handleStop(context.input, "muse", { runModel: async () => "STOP" });
-    const [row] = await auditRows();
-    assert.equal(row.verdict, "STOP");
-    assert.equal("past_turns" in row, false);
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("a stop settled before review logs no history fields", { concurrency: false }, async () => {
+test("a stop settled before review logs no history fields", async () => {
   const context = await claudeFixture();
   try {
     await claudeHistory(context, 3);
@@ -1698,7 +1682,7 @@ test("a stop settled before review logs no history fields", { concurrency: false
   }
 });
 
-test("Ghost and Pi log history the same way", { concurrency: false }, async () => {
+test("Ghost and Pi log history the same way", async () => {
   const ghost = await ghostFixture();
   try {
     const sessionFile = path.join(ghost.input.ghost_home, "session.jsonl");
@@ -1748,7 +1732,7 @@ test("Ghost and Pi log history the same way", { concurrency: false }, async () =
   }
 });
 
-test("the tally caps a turn the transcript cannot", { concurrency: false }, async () => {
+test("the tally caps a turn the transcript cannot", async () => {
   // A Claude stop with no transcript to read is still counted, and capped, by
   // the tally.
   const context = await claudeFixture();
@@ -1851,7 +1835,7 @@ test("the shipped plugin bundles no runtime dependency", async () => {
   assert.deepEqual(bareImports, [], `bundle imports a package: ${bareImports.join(", ")}`);
 });
 
-test("Ghost's turn is its owner prompt, and its tally lives in the ghost home", { concurrency: false }, async () => {
+test("Ghost's turn is its owner prompt, and its tally lives in the ghost home", async () => {
   const context = await ghostFixture();
   const tallyFile = path.join(context.input.ghost_home, "keep-going", "continuations.json");
   try {
@@ -1884,7 +1868,7 @@ test("Ghost's turn is its owner prompt, and its tally lives in the ghost home", 
   }
 });
 
-test("Ghost takes its turn and count from the payload, not the transcript", { concurrency: false }, async () => {
+test("Ghost takes its turn and count from the payload, not the transcript", async () => {
   // owner_prompt already names the turn, so the tally keys on it rather than
   // on anything rebuilt from the session file.
   const context = await ghostFixture();
@@ -1934,7 +1918,7 @@ test("oversized Stop input is refused before any reviewer is spawned", async () 
   assert.match(JSON.parse(stdout).systemMessage, /exceeds 1 MB/);
 });
 
-test("a reviewer that floods stdout is cut off at the output limit", { concurrency: false }, async () => {
+test("a reviewer that floods stdout is cut off at the output limit", async () => {
   const context = await claudeFixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";

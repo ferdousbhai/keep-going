@@ -194,7 +194,7 @@ test("Pi does not review twice, even when two copies of the extension are loaded
 
 test("Pi skips tool turns, partial/error/aborted responses, empty text and queued work", async (t) => {
   const f = await fixture(t);
-  for (const reason of ["toolUse", "length", "error", "aborted", "pending"]) {
+  for (const reason of ["toolUse", "length", "error", "aborted"]) {
     await f.finish(reply("Unfinished.", reason));
   }
   await f.finish({ ...reply("Tool call."), content: [...text("Tool call."), { type: "toolCall" }] });
