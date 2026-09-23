@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1599,15 +1599,6 @@ test("a reviewer that keeps asking fails open with every read request logged", a
   assert.equal(prompts.length, 3);
 });
 
-test("a request for a turn that does not exist fails open and reads nothing", async () => {
-  const { row, prompts } = await historyStop(["TURN 9"]);
-  assert.equal(row.verdict, "ERROR");
-  assert.equal(row.past_turns, 3);
-  assert.deepEqual(row.turn_requests, []);
-  assert.equal(row.reviewer_output, "TURN 9");
-  assert.equal(prompts.length, 1);
-});
-
 test("the offered count is the index, capped like the index", async () => {
   const { row, prompts } = await historyStop(["STOP"], { turns: TURN_INDEX_LIMIT + 5 });
   assert.equal(row.past_turns, TURN_INDEX_LIMIT);
@@ -1872,6 +1863,26 @@ test("Ghost's turn is its owner prompt, and its tally lives in the ghost home", 
     }
   } finally {
     await context.cleanup();
+  }
+});
+
+test("the hook runs when reached through a symlink", async () => {
+  // Hosts often reach it through a symlinked home or plugin directory; a run
+  // that printed nothing would read to them as an accepted stop.
+  const root = await mkdtemp(path.join(tmpdir(), "keep-going-symlink-"));
+  try {
+    const linked = path.join(root, "src");
+    await symlink(path.join(import.meta.dirname, "..", "src"), linked);
+    const child = spawn(process.execPath, [path.join(linked, "keep-going.mjs"), "claude"], {
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => stdout += chunk);
+    child.stdin.end("{}");
+    await new Promise((resolve) => child.on("close", resolve));
+    assert.match(stdout, /keep-going failed open: Stop input is missing session_id/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

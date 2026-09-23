@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { chmod, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -46,7 +46,7 @@ export function hookFile(runner) {
 
 // The test imports the definitions above to prove the committed files still
 // match them, so building only happens when this file is the entrypoint.
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && await realpath(process.argv[1]).catch(() => "") === fileURLToPath(import.meta.url)) {
   const options = {
     bundle: true,
     platform: "node",

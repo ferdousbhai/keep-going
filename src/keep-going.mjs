@@ -1106,7 +1106,7 @@ const TURN_REQUEST_PATTERN = /^TURN\s+(-?\d+)(?:\s*-\s*(-?\d+))?\s*$/i;
 
 // A history request names past turns 1-based, oldest first; negative counts
 // back from the previous turn, so -1 is the turn just before this one. Out
-// of range, backwards beyond a swap, or wider than the per-request cap is
+// of range or wider than the per-request cap is
 // not a request at all: the output fails open as a bad verdict instead.
 function parseTurnRequest(text, count) {
   const match = TURN_REQUEST_PATTERN.exec(String(text ?? "").trim());
@@ -1395,7 +1395,10 @@ async function main() {
   }
 }
 
-const entry = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";
+// Node runs the main module from its real path, so argv[1] is compared the
+// same way: a symlinked hook path would otherwise run nothing and exit 0,
+// which every host reads as an accepted stop.
+const entry = process.argv[1] ? pathToFileURL(await realpath(process.argv[1]).catch(() => "")).href : "";
 if (import.meta.url === entry) await main();
 
 export {
