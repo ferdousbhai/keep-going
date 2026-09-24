@@ -81,8 +81,8 @@ scans `~/.claude/settings.json`, so `--claude` alone covers it; with both
 installed, keep-going ignores the Claude copy on Grok and the reviewer runs
 once.
 
-Installs track `main`. To pin, use a tag: `--ref v0.14.0` for Codex,
-`#v0.14.0` for `npx`, `@v0.14.0` for Pi. The Claude plugin moves only on
+Installs track `main`. To pin, use a tag: `--ref v0.15.0` for Codex,
+`#v0.15.0` for `npx`, `@v0.15.0` for Pi. The Claude plugin moves only on
 `claude plugin update`. There is no npm package.
 
 Installer flags:
