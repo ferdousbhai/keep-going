@@ -2,8 +2,6 @@ import { handleStop } from "./keep-going.mjs";
 
 const NUDGE = "keep-going";
 const REVIEW = "keep-going-review";
-// Marks the turn's one RESCAN, so the hook can take it off the table after.
-const RESCAN = "keep-going-rescan";
 const SETTINGS = "keep-going-settings";
 
 const textOf = (message) => (message.content ?? [])
@@ -13,28 +11,6 @@ const textOf = (message) => (message.content ?? [])
 
 const lastAssistant = (branch) => branch.findLast((entry) =>
   entry.type === "message" && entry.message.role === "assistant");
-
-// Turns before the one under review, oldest first, for the reviewer's TURN
-// requests. Segments open at user messages; tool-only assistant traffic has
-// no text and never becomes a final. A nudge is a custom message, not a user
-// one, so it never opens a turn.
-function pastTurnsFromBranch(branch, ownerIndex) {
-  const turns = [];
-  let current = null;
-  for (const entry of branch.slice(0, ownerIndex)) {
-    if (entry?.type !== "message") continue;
-    if (entry.message?.role === "user") {
-      const owner = textOf(entry.message).trim();
-      if (!owner) continue;
-      current = { owner_prompt: owner, final_response: "" };
-      turns.push(current);
-    } else if (entry.message?.role === "assistant" && current) {
-      const text = textOf(entry.message).trim();
-      if (text) current.final_response = text;
-    }
-  }
-  return turns;
-}
 
 function enabled(ctx) {
   const setting = ctx.sessionManager.getBranch().findLast((entry) =>
@@ -163,9 +139,13 @@ export default function keepGoing(pi) {
 
     const owner = branch[ownerIndex];
     const thisTurn = branch.slice(ownerIndex + 1);
-    const count = thisTurn.filter((entry) =>
-      entry.type === "custom_message" && entry.customType === NUDGE).length;
-    const rescanned = thisTurn.some((entry) => entry.type === "custom" && entry.customType === RESCAN);
+    const isNudge = (entry) => entry.type === "custom_message" && entry.customType === NUDGE;
+    const count = thisTurn.filter(isNudge).length;
+    // Stopped again after the latest nudge without calling a tool: the agent
+    // weighed it and holds, so the hook lets the stop through unreviewed.
+    const held = count > 0 && !thisTurn.slice(thisTurn.findLastIndex(isNudge) + 1).some((entry) =>
+      entry.type === "message" && entry.message.role === "assistant" &&
+      entry.message.content.some((part) => part.type === "toolCall"));
     const controller = new AbortController();
     activeReview = controller;
     const signal = AbortSignal.any([ctx.signal, controller.signal]);
@@ -173,20 +153,17 @@ export default function keepGoing(pi) {
     try {
       const model = reviewerModel(ctx);
       ctx.ui.setStatus(NUDGE, `keep-going: reviewing with ${model.provider}/${model.id}`);
-      let verdict;
       const result = await handleStop({
         session_id: sessionId,
         turn_id: owner.id,
         cwd: ctx.cwd,
         continuation_count: count,
-        rescanned,
+        held_after_nudge: held,
         reviewer_model: `${model.provider}/${model.id}`,
         last_assistant_message: text,
         owner_prompt: textOf(owner.message),
-        past_turns: pastTurnsFromBranch(branch, ownerIndex),
       }, "pi", {
         runModel: (request) => reviewWithPi(ctx, model, request, signal),
-        onVerdict: (value) => { verdict = value; },
       });
 
       // The user may have typed, aborted, navigated, or disabled the extension
@@ -196,7 +173,6 @@ export default function keepGoing(pi) {
           lastAssistant(ctx.sessionManager.getBranch())?.id !== assistant.id) return;
       if (result.systemMessage) ctx.ui.notify(result.systemMessage, "warning");
       if (result.decision === "block") {
-        if (verdict === "RESCAN") pi.appendEntry(RESCAN, { assistantId: assistant.id });
         pi.sendMessage({ customType: NUDGE, content: result.reason, display: true },
           { deliverAs: "followUp", triggerTurn: true });
       }

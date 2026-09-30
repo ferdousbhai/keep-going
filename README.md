@@ -7,53 +7,51 @@ Jarred Sumner's input, through a day and a half of Claude subagents chasing the
 Riemann hypothesis, was mostly variants of "keep going" and "believe in
 yourself." This is that, on a hook.
 
-![Three stops, three verdicts: work left, a question it can answer itself, and
-a turn that is genuinely done](docs/keep-going.gif)
+![Three stops: work left, a question only the owner can answer, and a turn
+that is done](docs/keep-going.gif)
 
 ## How it works
 
 When the agent tries to end a turn, a reviewer model sees the last assistant
 message and the owner's request — redacted and truncated — and answers:
 
-- `CONTINUE` — work remains that the agent can do right now.
-- `THINK` — it should reason this through instead of stopping or asking.
-- `RESCAN` — it claims open-ended work is done; one more fresh pass first.
-- `STOP` — it is genuinely done, genuinely blocked on the user, or waiting on
-  a decision only the owner can make: consent, or which reading of their words
+- `CONTINUE` — the agent stopped with work in hand: it announced a step and
+  did not take it, stopped partway, or asked permission for an obvious next
+  step.
+- `STOP` — the request is done, the agent is blocked, or it is waiting on
+  something only the owner can give: consent to deploy, publish, send, spend,
+  or delete, an answer only the owner has, or which reading of their words
   they meant.
 
-`RESCAN` is offered once per owner turn. The report of that scan is itself a
-claim that the work is done, so on every later stop of the turn the reviewer is
-told the scan was already asked for and chooses among the other three. A
-`RESCAN` it gives anyway is not an answer the prompt offered, so the stop goes
-through the way an unparseable verdict does, with a warning to the owner.
+`CONTINUE` blocks the stop (in Pi, queues a follow-up) with a fixed line —
+"Keep going." and three variations, rotated. The reviewer only decides; it
+never writes to the agent. The agent has read far more than the reviewer, and
+a reviewer that wrote its own line ended up arguing with it: restating the
+owner's words against the agent's evidence, or claiming consent the owner never
+gave.
 
-The first three block the stop (in Pi, queue a follow-up) with a line the
-reviewer writes for the occasion, speaking for the owner: a question the agent
-could have answered itself is answered there. What the owner said or meant is
-not among them; the reviewer sees their words but not the agent's evidence. Everything else lets the stop through: a
-missing binary, a timeout, an unparseable verdict, or a bare completion token
-(`Done.`) with no owner prompt to weigh it against.
+A stop that follows a nudge with no tool call in between goes through
+unreviewed: the agent weighed the nudge and still holds, and a second review
+would only argue with it. Claude Code, Codex, and Pi show where the last nudge
+fell; on the other hosts every stop is reviewed.
 
-At most 100 continuations per owner turn; over the last 10 the reviewer is
-asked for a line about landing what is in flight, and past the cap the stop is
-accepted unreviewed. From the first continuation it is told how many the turn
-has already had — earlier nudges are filtered out of the transcript it reads,
-so a stop it keeps refusing would otherwise look like a first attempt. The count is a tally per session and turn under
+Everything else lets the stop through: a missing binary, a timeout, an
+unparseable verdict, or a bare completion token (`Done.`) with no owner prompt
+to weigh it against.
+
+At most 100 continuations per owner turn; past the cap the stop is accepted
+unreviewed. The count is a tally per session and turn under
 `$XDG_STATE_HOME/keep-going` (the ghost home for Ghost). On Claude Code, whose
 stop names no turn, it is read from the transcript; Pi counts follow-ups on the
-session branch. Subagents on Claude Code and Muse are
-reviewed on the same terms, each with its own count.
+session branch. Subagents on Claude Code and Muse are reviewed on the same
+terms, each with its own count.
 
 A fresh stop waits fifteen seconds first; if the owner's next message lands
 in the transcript during that window they were already following up, and the
 stop goes through. Only an owner message counts: the host's own writes, such
 as Claude Code landing the final assistant message after Stop has fired, do
-not. Subagent stops skip the wait. The reviewer may reply `TURN n` or
-`TURN x-y` (up to five turns) to read earlier turns before verdicting, at most
-twice per stop. Muse sends no transcript, so there the stop is reviewed at
-once from the current turn alone; Pi reviews at once too, from the turns its
-branch holds.
+not. Subagent stops skip the wait, and so do Muse, which sends no transcript,
+and Pi.
 
 ## Install
 
@@ -103,7 +101,7 @@ Installer flags:
 
 Pi runs keep-going as an extension. It reviews only a normal final text
 response; tool turns, aborted responses, and turns with queued messages are
-left alone. A blocking verdict queues one visible follow-up. The reviewer is a
+left alone. `CONTINUE` queues one visible follow-up. The reviewer is a
 direct, tool-free call to Pi's active model — or `KEEP_GOING_PI_MODEL`, an
 exact `provider/model-id` — with Pi's own authentication.
 
@@ -128,8 +126,7 @@ build and unit tests without Pi.
 | `KEEP_GOING_{MUSE,GROK}_MODEL` | unset; the reviewer CLI picks its default |
 | `KEEP_GOING_PI_MODEL` | unset; Pi's active model |
 | `KEEP_GOING_QUIET_MS` | `15000`; the wait before a fresh stop is reviewed; `0` reviews at once |
-| `KEEP_GOING_TURNS` | unset; `0` disables the past-turn index |
-| `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's raw text, how the stop was decided, and, where past turns were offered, how many (`past_turns`) and which ranges the reviewer read (`turn_requests`) |
+| `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's raw text and how the stop was decided |
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
 Reviewers run without tools — Muse, which has no such switch, without web

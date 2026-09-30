@@ -14,11 +14,11 @@ SCRIPT = [
   (None, None),
   ("$ agent stops: \"I drafted the first half of the migration; the second half is missing.\"", TXT),
   ("  keep-going ▸ CONTINUE", YEL),
-  ("    blocked: Keep going — finish the second half of the migration.", GREEN),
+  ("    blocked: Keep going.", GREEN),
   (None, None),
-  ("$ agent stops: \"Should I use Postgres or SQLite for this?\"", TXT),
-  ("  keep-going ▸ THINK", YEL),
-  ("    blocked: Don't ask yet — weigh the tradeoffs and make a recommendation yourself.", GREEN),
+  ("$ agent stops: \"You wrote spice.trade, but only spicy.trade resolves. Which one?\"", TXT),
+  ("  keep-going ▸ STOP", BLUE),
+  ("    only the owner knows; the turn ends.", DIM),
   (None, None),
   ("$ agent stops: \"All three tests pass and the changes are committed.\"", TXT),
   ("  keep-going ▸ STOP", BLUE),
@@ -44,7 +44,7 @@ for entry in SCRIPT:
     shown = shown + [entry]
     frame(n, shown); n += 1
     # Hold on each verdict line so it is readable.
-    if entry[1] in (GREEN, BLUE):
+    if entry[1] in (GREEN, DIM) and entry[0].startswith("    "):
         for _ in range(6):
             frame(n, shown); n += 1
 # End card: the install line, held.

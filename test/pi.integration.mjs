@@ -9,11 +9,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { CONTINUATION_CAP } from "../src/keep-going.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
-async function runPi(t, { cap = false, duplicate = false, verdict = "CONTINUE", reviewerModel } = {}) {
+async function runPi(t, { duplicate = false, verdict = "CONTINUE", reviewerModel } = {}) {
   const home = await mkdtemp(path.join(tmpdir(), "keep-going-pi-e2e-"));
   const agentDir = path.join(home, "agent");
   await mkdir(agentDir);
@@ -28,10 +27,10 @@ async function runPi(t, { cap = false, duplicate = false, verdict = "CONTINUE", 
       requests.push({ input, review });
       let text;
       if (review) {
-        text = cap || mainCalls === 1 ? `${verdict}\nFinish the calculation.` : "STOP";
+        text = mainCalls === 1 ? `${verdict}\nFinish the calculation.` : "STOP";
       } else {
         mainCalls++;
-        text = cap || mainCalls === 1 ? "I still need to calculate 2 + 2." : "2 + 2 = 4. Done.";
+        text = mainCalls === 1 ? "I still need to calculate 2 + 2." : "2 + 2 = 4. Done.";
       }
       res.writeHead(200, { "content-type": "text/event-stream" });
       const chunk = (delta, finish_reason = null) => ({
@@ -89,25 +88,27 @@ async function runPi(t, { cap = false, duplicate = false, verdict = "CONTINUE", 
   return { mainCalls, requests, rows, stdout, stderr };
 }
 
-test("real Pi continues once, then stops; duplicate installs still review each response once", { timeout: 60_000 }, async (t) => {
+test("real Pi continues once, then defers to an agent that holds; duplicate installs still review once", { timeout: 60_000 }, async (t) => {
   const result = await runPi(t, { duplicate: true });
   assert.equal(result.mainCalls, 2, result.stderr);
-  assert.equal(result.requests.length, 4);
-  assert.deepEqual(result.rows.map((row) => row.verdict), ["CONTINUE", "STOP"]);
+  // The second answer follows the nudge with no tool call, so it is not reviewed.
+  assert.equal(result.requests.length, 3);
+  assert.deepEqual(result.rows.map((row) => row.verdict), ["CONTINUE", "HELD"]);
   for (const { input } of result.requests.filter((r) => r.review)) {
     assert.equal(input.messages.length, 1);
     assert.equal(input.tools, undefined);
     assert.equal(input.model, "fixture");
   }
   const main = result.requests.filter((r) => !r.review);
-  assert.match(JSON.stringify(main[1].input.messages), /Finish the calculation\./);
+  assert.match(JSON.stringify(main[1].input.messages), /Keep going\./);
+  assert.doesNotMatch(JSON.stringify(main[1].input.messages), /Finish the calculation\./);
   assert.match(result.stdout, /2 \+ 2 = 4\. Done\./);
 });
 
-test("real Pi honors THINK and an explicit reviewer model", { timeout: 60_000 }, async (t) => {
-  const result = await runPi(t, { verdict: "THINK", reviewerModel: "fixture/reviewer" });
+test("real Pi honors an explicit reviewer model", { timeout: 60_000 }, async (t) => {
+  const result = await runPi(t, { reviewerModel: "fixture/reviewer" });
   assert.equal(result.mainCalls, 2);
-  assert.deepEqual(result.rows.map((row) => row.verdict), ["THINK", "STOP"]);
+  assert.deepEqual(result.rows.map((row) => row.verdict), ["CONTINUE", "HELD"]);
   for (const { input, review } of result.requests) {
     assert.equal(input.model, review ? "reviewer" : "fixture");
   }
@@ -120,12 +121,4 @@ test("real Pi accepts STOP and fails open on invalid reviewer output", { timeout
     assert.equal(result.requests.length, 2);
     assert.deepEqual(result.rows.map((row) => row.verdict), [verdict === "STOP" ? "STOP" : "ERROR"]);
   }
-});
-
-test("real Pi stops at 100 continuations without calling the reviewer again", { timeout: 60_000 }, async (t) => {
-  const result = await runPi(t, { cap: true });
-  assert.equal(result.mainCalls, CONTINUATION_CAP + 1);
-  assert.equal(result.requests.filter((r) => r.review).length, CONTINUATION_CAP);
-  assert.equal(result.rows.length, CONTINUATION_CAP + 1);
-  assert.equal(result.rows.at(-1).verdict, "CAP");
 });

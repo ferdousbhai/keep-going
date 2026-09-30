@@ -8,23 +8,16 @@ import { spawn } from "node:child_process";
 
 import {
   CONTINUATION_CAP,
-  TURN_INDEX_LIMIT,
-  VERDICTS,
-  LAST_STRETCH,
+  NUDGES,
   quietDelayMs,
   REVIEW_PROMPT,
   claudeContinuations,
+  claudeNudges,
+  codexNudges,
   recordedContinuations,
-  recordedRescan,
-  RESCAN_SPENT_PROMPT,
-  reviewPrompt,
   handleStop,
   hookOutputForVerdict,
-  listPastTurns,
   parseReviewVerdict,
-  parseTurnRequest,
-  turnIndexSection,
-  formatTurns,
   yieldsToGrokNative,
   resolveOwnerPrompt,
 } from "../src/keep-going.mjs";
@@ -44,7 +37,6 @@ const ENV_KEYS = [
   "KEEP_GOING_MUSE_BIN",
   "KEEP_GOING_MUSE_MODEL",
   "KEEP_GOING_QUIET_MS",
-  "KEEP_GOING_TURNS",
   "GROK_HOOK_EVENT",
   "GROK_HOME",
   "CODEX_HOME",
@@ -119,9 +111,9 @@ async function fixture() {
   const modelMock = path.join(root, "mock-codex.mjs");
   const callLog = path.join(root, "calls.jsonl");
 
-  // Codex sends a rollout path with every stop. The owner prompt, past turns,
-  // and quiet wait read it; the count never does — the turn id beside it
-  // keys the tally.
+  // Codex sends a rollout path with every stop. The owner prompt, the nudge
+  // reader, and the quiet wait read it; the count never does — the turn id
+  // beside it keys the tally.
   await mkdir(sessions, { recursive: true });
   await writeFile(
     transcript,
@@ -358,7 +350,7 @@ test("audit keeps the reviewer's raw text", async () => {
     await handleStop(context.input, "codex", { runModel: async () => "just thinking out loud" });
     const [continueRow, longRow, invalidRow] = await auditRows();
     assert.equal(continueRow.verdict, "CONTINUE");
-    assert.equal(continueRow.rationale, "Keep going, finish it.");
+    assert.equal(continueRow.rationale, NUDGES[0]);
     assert.equal(continueRow.reviewer_output, "CONTINUE\nKeep going, finish it.");
     assert.equal(longRow.verdict, "STOP");
     assert.match(longRow.reviewer_output, /^\s*STOP/);
@@ -406,67 +398,12 @@ test("stub final messages without an owner prompt skip review", async () => {
   }
 });
 
-test("a bare RESCAN blocks with a fresh-scan fallback", async () => {
-  const context = await fixture();
-  try {
-    const bare = await handleStop(context.input, "codex", {
-      runModel: async () => "RESCAN",
-    });
-    assert.deepEqual(bare, { decision: "block", reason: VERDICTS.RESCAN.fallbacks[0] });
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("RESCAN is offered once per turn; a second one fails open as an unoffered verdict", async () => {
-  const context = await fixture();
-  try {
-    const prompts = [];
-    const runModel = async ({ prompt }) => {
-      prompts.push(prompt);
-      return "RESCAN\nLook again with fresh eyes.";
-    };
-    const first = await handleStop(context.input, "codex", { runModel });
-    assert.deepEqual(first, { decision: "block", reason: "Look again with fresh eyes." });
-    assert.equal(await recordedRescan(context.input, "codex"), true);
-    assert.match(prompts[0], /RESCAN — the agent claims/);
-
-    // The reviewer is offered three verdicts now; a RESCAN anyway is no answer
-    // to that prompt, and takes the fail-open path with a visible reason.
-    const verdicts = [];
-    const second = await handleStop(context.input, "codex", { runModel, onVerdict: (verdict) => verdicts.push(verdict) });
-    assert.match(second.systemMessage, /keep-going was skipped: Reviewer answered RESCAN, which was not offered/);
-    assert.deepEqual(verdicts, []);
-    assert.doesNotMatch(prompts[1], /RESCAN — the agent claims/);
-    assert.match(prompts[1], /already asked for this turn, so RESCAN is not on offer/);
-    assert.match(prompts[1], /verdict word alone on the first line: CONTINUE, THINK, or STOP\./);
-    const rows = await auditRows();
-    assert.equal(rows.at(-1).verdict, "ERROR");
-    assert.match(rows.at(-1).reviewer_output, /^RESCAN/);
-    // The accepted stop ends the turn, and with it the memory of the scan.
-    assert.equal(await recordedRescan(context.input, "codex"), false);
-
-    // Under the reduced prompt the three offered verdicts work as ever, the
-    // flag survives blocks in between, and it is per turn.
-    await handleStop(context.input, "codex", { runModel });
-    const kept = await handleStop(context.input, "codex", { runModel: async () => "CONTINUE\nKeep going." });
-    assert.deepEqual(kept, { decision: "block", reason: "Keep going." });
-    assert.equal(await recordedRescan(context.input, "codex"), true);
-    assert.equal(await recordedContinuations(context.input, "codex"), 2);
-    assert.equal(await recordedRescan({ ...context.input, turn_id: "turn-next" }, "codex"), false);
-    assert.deepEqual(await handleStop(context.input, "codex", { runModel: async () => "STOP" }), {});
-    assert.equal(await recordedRescan(context.input, "codex"), false);
-  } finally {
-    await context.cleanup();
-  }
-});
-
 test("last_assistant_message is reviewed when the transcript is unavailable", async () => {
   const context = await fixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     const output = await handleStop({ ...context.input, transcript_path: null });
-    assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
+    assert.deepEqual(output, { decision: "block", reason: NUDGES[0] });
     const [call] = await context.calls();
     assert.match(call.prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.match(call.prompt, /"owner_prompt":""/);
@@ -546,28 +483,27 @@ test("an interruption is not a new owner prompt", async () => {
   }
 });
 
-test("a subagent reporting back does not open a turn", async () => {
-  // Codex has no flag for these the way Claude's task notifications do; the
-  // <subagent_notification> prefix is what keeps them out of the history the
-  // reviewer can ask to read.
+test("Codex reads its own nudges, and neither they nor a subagent open a turn", async () => {
+  // Codex records this hook's nudge as a user message in the turn it
+  // continues, and a subagent reporting back the same way. Neither is the
+  // owner: read as one, the nudge became the request the next stop was judged
+  // against, and either would restart the count.
   const context = await fixture();
   try {
+    const user = (text) => transcriptLine({ role: "user", content: [{ type: "input_text", text }] }, "turn-test");
     await appendRecords(context.input.transcript_path, [
-      { type: "turn_context", payload: { turn_id: "t1" } },
-      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Fix the thing." }] } },
-      { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Fixed." }] } },
-      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<subagent_notification>agent 3 finished</subagent_notification>" }] } },
-      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<turn_aborted>The user interrupted the previous turn on purpose.</turn_aborted>" }] } },
-      { type: "turn_context", payload: { turn_id: "t2" } },
-      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Now the other thing." }] } },
-    ].map((r) => JSON.stringify(r)));
+      user('<hook_prompt hook_run_id="stop:9:/x/hooks.json">Keep going.</hook_prompt>'),
+      user("<subagent_notification>agent 3 finished</subagent_notification>"),
+      user("<turn_aborted>The user interrupted the previous turn on purpose.</turn_aborted>"),
+    ]);
+    assert.equal(await resolveOwnerPrompt(context.input, "codex"), "Build it now. token=supersecretvalue");
+    assert.deepEqual(await codexNudges(context.input), { continuations: 1, held: true });
 
-    const owners = (await listPastTurns({ ...context.input, turn_id: "t2" }, "codex"))
-      .map((turn) => turn.owner);
-    assert.ok(!owners.some((owner) => owner.startsWith("<subagent_notification>")), owners.join(" | "));
-    // The notification sits between the two prompts; were it a turn, it would
-    // come last and push the real request out of that slot.
-    assert.deepEqual(owners.slice(-1), ["Fix the thing."]);
+    // Any tool item after the nudge is work done on it.
+    await appendRecords(context.input.transcript_path, [
+      JSON.stringify({ type: "response_item", payload: { type: "custom_tool_call", name: "exec" } }),
+    ]);
+    assert.deepEqual(await codexNudges(context.input), { continuations: 1, held: false });
   } finally {
     await context.cleanup();
   }
@@ -644,7 +580,7 @@ test("Claude classifies with no tools and the lowest advertised effort", async (
     assert.ok(call.args.includes("--no-session-persistence"));
     assert.equal(call.args[call.args.indexOf("--tools") + 1], "");
     assert.ok(!call.args.includes("--json-schema"));
-    assert.match(call.prompt, /Reply with the verdict word alone/);
+    assert.match(call.prompt, /Reply with CONTINUE or STOP and nothing else/);
     assert.match(call.prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.match(call.prompt, /"owner_prompt":"Build it now. token=\[REDACTED\]"/);
     assert.doesNotMatch(call.prompt, /supersecretvalue/);
@@ -706,13 +642,13 @@ process.exitCode = 1;
 test("Ghost delegates classification to its smol-model bridge", async () => {
   const context = await ghostFixture();
   try {
-    process.env.MOCK_REVIEW_RESPONSE = "THINK";
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     const output = await handleStop(context.input, "ghost");
-    assert.deepEqual(output, { decision: "block", reason: VERDICTS.THINK.fallbacks[0] });
+    assert.deepEqual(output, { decision: "block", reason: NUDGES[0] });
     const [call] = await context.calls();
     assert.deepEqual(call.args, ["hook-smol-complete"]);
     assert.equal(call.input.ghost_home, context.input.ghost_home);
-    assert.match(call.input.prompt, /Reply with the verdict word alone/);
+    assert.match(call.input.prompt, /Reply with CONTINUE or STOP/);
     assert.match(call.input.prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.match(call.input.prompt, /"owner_prompt":"Please finish the requested change\."/);
   } finally {
@@ -720,136 +656,49 @@ test("Ghost delegates classification to its smol-model bridge", async () => {
   }
 });
 
-test("verdict parsing accepts only the exact verdict words, wherever the reviewer puts them", () => {
-  for (const verdict of ["CONTINUE", "THINK", "RESCAN", "STOP"]) {
-    assert.deepEqual(parseReviewVerdict(` ${verdict}\n`), { verdict, nudge: "" });
+test("the verdict is the first CONTINUE or STOP standing as a word, wherever the reviewer puts it", () => {
+  for (const verdict of ["CONTINUE", "STOP"]) {
+    assert.equal(parseReviewVerdict(` ${verdict}\n`), verdict);
   }
-  for (const invalid of ["continue", "CONTINUEX", "CONSULT", "THINK_ADVISOR", "JUDGE", "RESCAN_NOW", "{}", "", null, undefined]) {
-    assert.throws(() => parseReviewVerdict(invalid), /begin with CONTINUE, THINK, RESCAN, or STOP/);
+  for (const invalid of ["continue", "CONTINUEX", "STOPPED", "THINK", "RESCAN", "{}", "", null, undefined]) {
+    assert.throws(() => parseReviewVerdict(invalid), /must be CONTINUE or STOP/);
   }
-  assert.deepEqual(
-    parseReviewVerdict("I'll check the session state.\nSTOP"),
-    { verdict: "STOP", nudge: "" },
-  );
-  assert.deepEqual(
-    parseReviewVerdict("A short look at the last message.\nCONTINUE\nKeep going."),
-    { verdict: "CONTINUE", nudge: "Keep going." },
-  );
-  assert.deepEqual(
-    parseReviewVerdict("I'll inspect the workspace and recent activity to see if the turn actually finished.STOP"),
-    { verdict: "STOP", nudge: "" },
-  );
-});
-
-test("a long run of separators after a verdict parses at once", () => {
-  // A separator run nested in a second repetition matched exponentially many
-  // ways, so a reply like this stalled the parser past the hook timeout.
+  assert.equal(parseReviewVerdict("I'll check the session state.\nSTOP"), "STOP");
+  assert.equal(parseReviewVerdict("I'll inspect the workspace to see if the turn finished.STOP"), "STOP");
+  assert.equal(parseReviewVerdict("CONTINUECONTINUE"), "CONTINUE");
+  assert.equal(parseReviewVerdict("STOP — done, nothing to CONTINUE"), "STOP");
+  // Linear, however long the reply.
   const started = Date.now();
-  assert.throws(() => parseReviewVerdict(`I think STOP${".".repeat(40)}x`));
-  assert.deepEqual(parseReviewVerdict(`I think it is done STOP${" -".repeat(40)}`), { verdict: "STOP", nudge: "" });
+  assert.equal(parseReviewVerdict(`${" -".repeat(100_000)}STOP`), "STOP");
   assert.ok(Date.now() - started < 1_000, `took ${Date.now() - started} ms`);
 });
 
-test("a verdict answered twice is still one verdict", () => {
-  // Small reviewers repeat themselves, so a verdict may run straight into the
-  // next. The repeat is not edited out of the line: what the reviewer wrote
-  // reaches the agent as written.
-  assert.deepEqual(parseReviewVerdict("CONTINUECONTINUE"), { verdict: "CONTINUE", nudge: "CONTINUE" });
-  assert.deepEqual(parseReviewVerdict("CONTINUE CONTINUE"), { verdict: "CONTINUE", nudge: "CONTINUE" });
-  assert.deepEqual(parseReviewVerdict("STOPSTOP"), { verdict: "STOP", nudge: "STOP" });
-  assert.deepEqual(
-    parseReviewVerdict("THINK\nKeep going.THINK\nKeep going."),
-    { verdict: "THINK", nudge: "Keep going.THINK\nKeep going." },
-  );
-});
-
-test("the reviewer's own line reaches the agent as written, secrets aside", () => {
-  const { verdict, nudge } = parseReviewVerdict(
-    "CONTINUE\nThree files into the rename and the last one is small.",
-  );
-  assert.equal(verdict, "CONTINUE");
-  assert.equal(nudge, "Three files into the rename and the last one is small.");
-  // Every blocking verdict ships the reviewer's line and nothing else.
-  for (const blocking of Object.keys(VERDICTS).filter((name) => VERDICTS[name].blocks)) {
-    assert.deepEqual(hookOutputForVerdict(blocking, 0, nudge), { decision: "block", reason: nudge });
-  }
-
-  // The separator after the verdict belongs to the verdict; the line keeps its
-  // own shape.
-  assert.equal(parseReviewVerdict("CONTINUE \u2014 keep\n  at it").nudge, "keep\n  at it");
-  assert.equal(parseReviewVerdict("CONTINUE: nearly there").nudge, "nearly there");
-
-  // Secrets the reviewer echoes back never reach the agent's next turn.
-  assert.match(
-    parseReviewVerdict(`CONTINUE\nYou already have token=${"s".repeat(20)} in hand.`).nudge,
-    /token=\[REDACTED\]/,
-  );
-
-  // A speech rather than a sentence is carried whole.
-  const long = "go on and on ".repeat(60).trim();
-  assert.equal(parseReviewVerdict(`CONTINUE\n${long}`).nudge, long);
-});
-
-test("a turn waiting on the owner's consent may end", () => {
-  // Consent is the one thing the agent cannot reason its way to, so the
-  // reviewer is given somewhere honest to land a turn that ends on it rather
-  // than filing it under questions the agent could have answered itself.
-  assert.match(REVIEW_PROMPT, /only the owner has standing to make/);
-});
-
-test("the reviewer does not decide what the owner meant", () => {
+test("the agent hears a fixed line, never the reviewer's", async () => {
   // Observed: an owner typed "spice.trade" for spicy.trade; the agent checked
-  // and asked, and the reviewer twice pushed the typo back as "You said ...
-  // as instructed" until a dead link shipped.
-  assert.match(REVIEW_PROMPT, /which of two readings of the owner's words they meant/);
-  assert.match(REVIEW_PROMPT, /never state what the owner said, meant or approved/);
-  assert.match(RESCAN_SPENT_PROMPT, /never state what the owner said, meant or approved/);
-});
-
-test("the reviewer is told when it is being refused", () => {
-  // Earlier nudges are filtered out of the transcript it reads, so without the
-  // count every firing looks like the first and a holding agent reads as a
-  // stalling one. The note is the only thing that tells it otherwise.
-  assert.match(reviewPrompt(1), /already been continued 1 time\./);
-  assert.match(reviewPrompt(3), /already been continued 3 times\./);
-  assert.match(reviewPrompt(2), /that reason is a real blocker \u2014 STOP/);
-  // Near the cap it carries both notes, and the rescan variant keeps its own.
-  assert.match(reviewPrompt(CONTINUATION_CAP - 1), /already been continued[\s\S]*land what is in flight/);
-  assert.match(reviewPrompt(CONTINUATION_CAP - 1, true), /not on offer[\s\S]*already been continued/);
-});
-
-test("the fallback line rotates and the last stretch asks for a landing", () => {
-  // One sentence repeated a hundred times reads as a loop, not a push.
-  const reasons = Array.from(
-    { length: VERDICTS.CONTINUE.fallbacks.length },
-    (_, index) => hookOutputForVerdict("CONTINUE", index).reason,
-  );
-  assert.deepEqual(reasons, VERDICTS.CONTINUE.fallbacks);
-  assert.equal(new Set(reasons).size, VERDICTS.CONTINUE.fallbacks.length);
-
-  // A dropped THINK line must not degrade into CONTINUE: the whole of the
-  // verdict is "think it through", and the agent has just asked the user.
-  const shared = VERDICTS.THINK.fallbacks.filter((line) => VERDICTS.CONTINUE.fallbacks.includes(line));
-  assert.deepEqual(shared, []);
-
-  // Only this side knows the cap, so it reaches the reviewer the way every
-  // other hook-side fact does: in the prompt, before the line is written.
-  assert.equal(reviewPrompt(0), REVIEW_PROMPT);
-  assert.doesNotMatch(reviewPrompt(CONTINUATION_CAP - LAST_STRETCH - 1), /near its limit/);
-  assert.match(reviewPrompt(CONTINUATION_CAP - LAST_STRETCH), /near its limit/);
-  assert.equal(reviewPrompt(0, true), RESCAN_SPENT_PROMPT);
-  assert.doesNotMatch(RESCAN_SPENT_PROMPT, /RESCAN —|Prefer RESCAN/);
-  // The note changes the instruction, never the answer the reviewer gave.
-  assert.equal(
-    hookOutputForVerdict("CONTINUE", CONTINUATION_CAP - 1, "Nearly done.").reason,
-    "Nearly done.",
-  );
-});
-
-test("each verdict the parser accepts is one the prompt asks for", () => {
-  for (const verdict of Object.keys(VERDICTS)) {
-    assert.match(REVIEW_PROMPT, new RegExp(`^${verdict} \\u2014 `, "m"));
+  // and asked, and a reviewer that wrote its own line pushed the typo back as
+  // "You said ... as instructed" until a dead link shipped. Another claimed
+  // "Owner said 'Agreed with all' — commit and push". The reviewer now only
+  // decides; what it writes beyond the verdict goes to the audit log alone.
+  const context = await fixture();
+  try {
+    const output = await handleStop(context.input, "codex", {
+      runModel: async () => "CONTINUE\nYou said spice.trade, so point the link there.",
+    });
+    assert.deepEqual(output, { decision: "block", reason: NUDGES[0] });
+    assert.match((await auditRows())[0].reviewer_output, /spice\.trade/);
+  } finally {
+    await context.cleanup();
   }
+  // Rotated, so a hundred continuations do not read as one stuck loop.
+  assert.deepEqual(NUDGES.map((_, index) => hookOutputForVerdict("CONTINUE", index).reason), NUDGES);
+  assert.equal(new Set(NUDGES).size, NUDGES.length);
+  assert.deepEqual(hookOutputForVerdict("STOP", 3), {});
+});
+
+test("waiting on the owner ends the turn, and the reviewer does not second-guess the agent", () => {
+  assert.match(REVIEW_PROMPT, /consent to deploy, publish, send, spend,\s+or delete/);
+  assert.match(REVIEW_PROMPT, /which reading of their words they\s+meant/);
+  assert.match(REVIEW_PROMPT, /Do not second-guess its findings/);
 });
 
 // A Grok session on disk: the updates log the stop names, its owner's chat
@@ -1012,7 +861,7 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", asyn
   try {
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     const output = await handleStop(context.input, "grok");
-    assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
+    assert.deepEqual(output, { decision: "block", reason: NUDGES[0] });
 
     // The overlay is a fresh GROK_HOME so the reviewer does not inherit MCP,
     // plugins, or the parent session's agent. --single still dispatches no
@@ -1024,7 +873,7 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", asyn
     assert.equal(call.args[call.args.indexOf("--effort") + 1], "low");
     assert.equal(
       call.args[call.args.indexOf("--system-prompt-override") + 1],
-      "Reply with exactly one of CONTINUE, THINK, RESCAN, or STOP as the first line. No preamble, no analysis.",
+      "Reply with exactly CONTINUE or STOP. No preamble, no analysis.",
     );
     assert.equal(call.args[call.args.indexOf("--permission-mode") + 1], "dontAsk");
     assert.match(call.args[call.args.indexOf("--single") + 1], /Candidate final response\./);
@@ -1091,7 +940,7 @@ test("Grok-dispatched Claude settings are reviewed by grok, not claude", async (
 
     assert.equal(await yieldsToGrokNative("claude"), false);
     const output = await handleStop(context.input, "claude");
-    assert.deepEqual(output, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
+    assert.deepEqual(output, { decision: "block", reason: NUDGES[0] });
 
     const [call] = await context.calls();
     assert.ok(call.args.includes("--single"));
@@ -1121,7 +970,7 @@ test("a native Grok hook makes the Claude-settings copy yield", async () => {
     assert.deepEqual(await context.calls(), []);
 
     const native = await handleStop(context.input, "grok");
-    assert.deepEqual(native, { decision: "block", reason: VERDICTS.CONTINUE.fallbacks[0] });
+    assert.deepEqual(native, { decision: "block", reason: NUDGES[0] });
     assert.equal((await context.calls()).length, 1);
   } finally {
     await context.cleanup();
@@ -1178,7 +1027,7 @@ test("Muse is reviewed by muse exec in a hook-free overlay", async () => {
 
     // The reviewer sees the redacted final message and nothing else: no cwd,
     // no transcript content.
-    assert.match(call.prompt, /Reply with the verdict word alone/);
+    assert.match(call.prompt, /Reply with CONTINUE or STOP/);
     assert.match(call.prompt, /"owner_prompt":""/);
     assert.doesNotMatch(call.prompt, /supersecretvalue/);
     assert.match(call.prompt, /token=\[REDACTED\]/);
@@ -1269,6 +1118,7 @@ test("the host's own writes during the quiet wait are not a follow-up", async ()
           JSON.stringify({ type: "queue-operation", operation: "enqueue", content: "<task-notification>done</task-notification>" }),
           JSON.stringify({ type: "last-prompt", lastPrompt: "Build it now." }),
           JSON.stringify({ type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback: keep going" } }),
+          JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", name: "Bash" }] } }),
           JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", content: "ok" }] } }),
         ]);
       },
@@ -1402,337 +1252,37 @@ test("the quiet wait defaults to fifteen seconds and parses defensively", () => 
   }
 });
 
-test("TURN requests name past turns 1-based, oldest first", () => {
-  assert.deepEqual(parseTurnRequest("TURN 1", 3), { start: 1, end: 1 });
-  assert.deepEqual(parseTurnRequest("turn 2-3", 3), { start: 2, end: 3 });
-  assert.deepEqual(parseTurnRequest("TURN 3-1", 5), { start: 1, end: 3 });
-  assert.deepEqual(parseTurnRequest("TURN -1", 3), { start: 3, end: 3 });
-  assert.deepEqual(parseTurnRequest("TURN -2", 3), { start: 2, end: 2 });
-  assert.deepEqual(parseTurnRequest("TURN 1-5", 9), { start: 1, end: 5 });
-  for (const invalid of ["CONTINUE", "TURN", "TURN 0", "TURN 4", "TURN 1-6", "TURN 1-9", "TURN -4", "", null]) {
-    assert.equal(parseTurnRequest(invalid, 3), null);
-  }
-});
-
-test("fulfilled turns carry redacted prompts and finals, never raw secrets", () => {
-  const out = formatTurns(
-    [{ owner: "do it token=supersecretvalue", final: "done token=supersecretvalue" }],
-    { start: 1, end: 1 },
-  );
-  assert.match(out, /Turn 1/);
-  assert.match(out, /token=\[REDACTED\]/);
-  assert.doesNotMatch(out, /supersecretvalue/);
-  assert.match(
-    turnIndexSection([{ owner: "First request", final: "x" }, { owner: "Second request", final: "y" }]),
-    /1: First request\n2: Second request/,
-  );
-});
-
-test("Claude past turns exclude the current turn and tool traffic", async () => {
+test("a Claude agent that holds after a nudge is not reviewed again", async () => {
+  // The hook advances a session; it does not argue with the agent. A nudge
+  // the agent answered with work earns another review. One it answered with
+  // no tool at all was weighed and declined, and the stop goes through.
   const context = await claudeFixture();
   try {
-    assert.deepEqual(await listPastTurns(context.input, "claude"), [
-      { owner: "Earlier context.", final: "Earlier answer." },
-    ]);
-  } finally {
-    await context.cleanup();
-  }
-});
+    let reviews = 0;
+    const runModel = async () => { reviews += 1; return "CONTINUE"; };
+    const feedback = JSON.stringify({ type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback:\nKeep going." } });
+    const tool = JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", name: "Bash" }] } });
+    const said = (text) => JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
 
-test("Codex past turns segment on turn_context and exclude the current turn", async () => {
-  const context = await fixture();
-  try {
-    await appendRecords(context.input.transcript_path, [
-      JSON.stringify({ type: "turn_context", payload: { turn_id: "turn-next" } }),
-      transcriptLine(
-        { role: "user", content: [{ type: "input_text", text: "Now the next thing." }] },
-        "turn-next",
-      ),
-      transcriptLine(
-        { role: "assistant", content: [{ type: "output_text", text: "Working on it." }] },
-        "turn-next",
-      ),
-    ]);
-    const past = await listPastTurns({ ...context.input, turn_id: "turn-next" }, "codex");
-    assert.deepEqual(past, [{ owner: "Build it now. token=supersecretvalue", final: "Candidate final response." }]);
-  } finally {
-    await context.cleanup();
-  }
-});
+    assert.deepEqual(await claudeNudges(context.input), { continuations: 0, held: false });
+    assert.equal((await handleStop(context.input, "claude", { runModel })).decision, "block");
 
-test("Grok past turns pair chat log users with their assistant finals", async () => {
-  const context = await grokFixture();
-  try {
-    const { chat, input } = await grokSession(context);
-    await writeFile(chat, [
-      JSON.stringify({ type: "user", content: [{ type: "text", text: "First thing." }] }),
-      JSON.stringify({ type: "assistant", content: "First done." }),
-      JSON.stringify({ type: "user", content: [{ type: "text", text: "Second thing." }] }),
-      JSON.stringify({ type: "assistant", content: "Second done." }),
-    ].join("\n"));
-    assert.deepEqual(await listPastTurns(input, "grok"), [
-      { owner: "First thing.", final: "First done." },
-    ]);
-  } finally {
-    await context.cleanup();
-  }
-});
+    await appendRecords(context.input.transcript_path, [feedback, tool, said("Checked; the domain in the request looks like a typo. Which did you mean?")]);
+    assert.deepEqual(await claudeNudges(context.input), { continuations: 1, held: false });
+    assert.equal((await handleStop(context.input, "claude", { runModel })).decision, "block");
+    assert.equal(reviews, 2);
 
-test("Ghost past turns read the pi session file and skip tool passes", async () => {
-  const context = await ghostFixture();
-  try {
-    const sessionFile = path.join(context.input.ghost_home, "session.jsonl");
-    const message = (role, content, extra = {}) => JSON.stringify({
-      type: "message", id: Math.random().toString(36).slice(2), message: { role, content, ...extra },
-    });
-    const text = (value) => [{ type: "text", text: value }];
-    await writeFile(sessionFile, [
-      message("user", text("First errand.")),
-      message("assistant", [{ type: "toolCall", name: "read" }], { stopReason: "toolUse" }),
-      message("assistant", text("First errand done."), { stopReason: "stop" }),
-      message("user", text("Second errand.")),
-      message("assistant", text("Second errand done."), { stopReason: "stop" }),
-    ].join("\n"));
-    const past = await listPastTurns({ ...context.input, transcript_path: sessionFile }, "ghost");
-    assert.deepEqual(past, [{ owner: "First errand.", final: "First errand done." }]);
-  } finally {
-    await context.cleanup();
-  }
-});
+    await appendRecords(context.input.transcript_path, [feedback, said("I still need your answer on the domain.")]);
+    assert.deepEqual(await claudeNudges(context.input), { continuations: 2, held: true });
+    assert.deepEqual(await handleStop(context.input, "claude", { runModel }), {});
+    assert.equal(reviews, 2);
+    const row = (await auditRows()).at(-1);
+    assert.equal(row.verdict, "HELD");
+    assert.equal(row.counted_by, "transcript");
 
-test("Pi turns arrive with the stop", async () => {
-  assert.deepEqual(
-    await listPastTurns(
-      { past_turns: [{ owner_prompt: "Earlier.", final_response: "Did it." }] },
-      "pi",
-    ),
-    [{ owner: "Earlier.", final: "Did it." }],
-  );
-});
-
-test("without past turns a TURN line is just a bad verdict", async () => {
-  const context = await museFixture();
-  try {
-    const prompts = [];
-    const output = await handleStop(context.input, "muse", {
-      runModel: async ({ prompt }) => {
-        prompts.push(prompt);
-        return "TURN 1";
-      },
-    });
-    assert.match(output.systemMessage, /begin with CONTINUE, THINK, RESCAN, or STOP/);
-    assert.equal(prompts.length, 1);
-    assert.doesNotMatch(prompts[0], /Past turns/);
-  } finally {
-    await context.cleanup();
-  }
-});
-
-// A Claude transcript with `count` finished turns before the current one, so
-// history requests have ranges to name.
-async function claudeHistory(context, count) {
-  const records = [];
-  for (let n = 1; n <= count; n += 1) {
-    records.push(
-      { type: "user", message: { role: "user", content: `Errand ${n}.` }, origin: { kind: "human" } },
-      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: `Errand ${n} done.` }] } },
-    );
-  }
-  records.push(
-    { type: "user", message: { role: "user", content: "Build it now." }, origin: { kind: "human" } },
-    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Candidate final response." }] } },
-  );
-  await writeFile(context.input.transcript_path, records.map((record) => JSON.stringify(record)).join("\n"));
-}
-
-// Drive one Claude stop through scripted reviewer replies and return what the
-// audit log recorded for it, plus what the reviewer was shown.
-async function historyStop(replies, { turns = 3, env = {} } = {}) {
-  const context = await claudeFixture();
-  try {
-    await claudeHistory(context, turns);
-    Object.assign(process.env, env);
-    const prompts = [];
-    const output = await handleStop(context.input, "claude", {
-      runModel: async ({ prompt }) => {
-        prompts.push(prompt);
-        return replies.shift() ?? "STOP";
-      },
-    });
-    const rows = await auditRows();
-    assert.equal(rows.length, 1);
-    return { output, row: rows[0], prompts };
-  } finally {
-    await context.cleanup();
-  }
-}
-
-test("the audit row says history was offered and not read", async () => {
-  const { row, prompts } = await historyStop(["STOP"]);
-  assert.equal(row.verdict, "STOP");
-  assert.equal(row.past_turns, 3);
-  assert.deepEqual(row.turn_requests, []);
-  assert.equal(prompts.length, 1);
-  assert.match(prompts[0], /Past turns, oldest first/);
-});
-
-test("the audit row records a history request and the verdict after it", async () => {
-  const { output, row, prompts } = await historyStop(["TURN 2", "CONTINUE\nStill unfinished."]);
-  assert.deepEqual(output, { decision: "block", reason: "Still unfinished." });
-  assert.equal(row.verdict, "CONTINUE");
-  assert.equal(row.past_turns, 3);
-  assert.deepEqual(row.turn_requests, [{ start: 2, end: 2 }]);
-  // reviewer_output is the reply that decided the stop, not the request.
-  assert.equal(row.reviewer_output, "CONTINUE\nStill unfinished.");
-  assert.match(prompts[1], /Turn 2\nowner_prompt: Errand 2\.\nfinal_response: Errand 2 done\./);
-  assert.doesNotMatch(prompts[1], /Turn 1\n|Turn 3\n/);
-});
-
-test("history requests are logged as the ranges actually read", async () => {
-  // -1 is the turn before this one and a backwards range is swapped: the row
-  // holds what was fulfilled, not the reviewer's spelling of it.
-  const { row, prompts } = await historyStop(["TURN -1", "TURN 3-2", "STOP"]);
-  assert.equal(row.verdict, "STOP");
-  assert.deepEqual(row.turn_requests, [{ start: 3, end: 3 }, { start: 2, end: 3 }]);
-  assert.equal(prompts.length, 3);
-  assert.match(prompts[2], /Turn 2\n[\s\S]*Turn 3\n/);
-});
-
-test("a reviewer that keeps asking fails open with every read request logged", async () => {
-  const { output, row, prompts } = await historyStop(["TURN 1", "TURN 1", "TURN 1"]);
-  assert.match(output.systemMessage, /keep-going was skipped/);
-  assert.equal(row.verdict, "ERROR");
-  assert.equal(row.past_turns, 3);
-  assert.deepEqual(row.turn_requests, [{ start: 1, end: 1 }, { start: 1, end: 1 }]);
-  assert.equal(row.reviewer_output, "TURN 1");
-  assert.equal(prompts.length, 3);
-});
-
-test("the offered count is the index, capped like the index", async () => {
-  const { row, prompts } = await historyStop(["STOP"], { turns: TURN_INDEX_LIMIT + 5 });
-  assert.equal(row.past_turns, TURN_INDEX_LIMIT);
-  // The oldest turns fall off the index; its first entry is turn 6 of 25.
-  assert.match(prompts[0], /\n1: Errand 6\.\n/);
-});
-
-test("no history on offer leaves the audit row without history fields", async () => {
-  // A first turn has nothing before it.
-  const first = await historyStop(["STOP"], { turns: 0 });
-  assert.equal(first.row.verdict, "STOP");
-  assert.equal("past_turns" in first.row, false);
-  assert.equal("turn_requests" in first.row, false);
-  assert.doesNotMatch(first.prompts[0], /Past turns/);
-
-  // History switched off.
-  const disabled = await historyStop(["STOP"], { env: { KEEP_GOING_TURNS: "0" } });
-  assert.equal("past_turns" in disabled.row, false);
-  assert.doesNotMatch(disabled.prompts[0], /Past turns/);
-});
-
-test("a stop settled before review logs no history fields", async () => {
-  const context = await claudeFixture();
-  try {
-    await claudeHistory(context, 3);
-    const cap = Array.from({ length: CONTINUATION_CAP }, () => JSON.stringify({
-      type: "user", message: { role: "user", content: "Stop hook feedback:\nKeep going." }, isMeta: true,
-    }));
-    await appendRecords(context.input.transcript_path, cap);
-    let called = false;
-    await handleStop(context.input, "claude", { runModel: async () => { called = true; return "STOP"; } });
-    const [row] = await auditRows();
-    assert.equal(called, false);
-    assert.equal(row.verdict, "CAP");
-    assert.equal("past_turns" in row, false);
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("Ghost and Pi log history the same way", async () => {
-  const ghost = await ghostFixture();
-  try {
-    const sessionFile = path.join(ghost.input.ghost_home, "session.jsonl");
-    const message = (role, value) => JSON.stringify({
-      type: "message", message: { role, content: [{ type: "text", text: value }], stopReason: "stop" },
-    });
-    await writeFile(sessionFile, [
-      message("user", "First errand."),
-      message("assistant", "First errand done."),
-      message("user", "Please finish the requested change."),
-      message("assistant", "Candidate final response."),
-    ].join("\n"));
-    const replies = ["TURN 1", "STOP"];
-    await handleStop({ ...ghost.input, transcript_path: sessionFile }, "ghost", {
-      runModel: async () => replies.shift(),
-    });
-    const [row] = await auditRows();
-    assert.equal(row.past_turns, 1);
-    assert.deepEqual(row.turn_requests, [{ start: 1, end: 1 }]);
-  } finally {
-    await ghost.cleanup();
-  }
-
-  const root = await mkdtemp(path.join(tmpdir(), "pi-history-audit-"));
-  const previous = environmentSnapshot();
-  try {
-    process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
-    const replies = ["TURN -1", "THINK\nWork it out."];
-    const output = await handleStop({
-      session_id: "pi-session",
-      turn_id: "pi-turn",
-      continuation_count: 0,
-      last_assistant_message: "Candidate final response.",
-      owner_prompt: "Finish it.",
-      past_turns: [
-        { owner_prompt: "Earlier.", final_response: "Did it." },
-        { owner_prompt: "Later.", final_response: "Did that too." },
-      ],
-    }, "pi", { runModel: async () => replies.shift() });
-    assert.deepEqual(output, { decision: "block", reason: "Work it out." });
-    const [row] = await auditRows();
-    assert.equal(row.past_turns, 2);
-    assert.deepEqual(row.turn_requests, [{ start: 2, end: 2 }]);
-  } finally {
-    restoreEnvironment(previous);
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("a new Claude turn is offered RESCAN whatever an interrupted one left", async () => {
-  // Claude's tally key is the session, and an interrupted turn fires no Stop
-  // to clear its entry. The transcript says whether this is still that turn.
-  const context = await claudeFixture();
-  const tallyFile = path.join(process.env.XDG_STATE_HOME, "keep-going", "continuations.json");
-  const seed = () => writeFile(tallyFile, JSON.stringify({
-    [tallyKey(context.input.session_id)]: { count: 3, updated: Date.now(), rescanned: true },
-  }));
-  try {
-    await mkdir(path.dirname(tallyFile), { recursive: true });
-    const review = async () => {
-      const prompts = [];
-      await handleStop(context.input, "claude", {
-        runModel: async ({ prompt }) => { prompts.push(prompt); return "CONTINUE\nGo on."; },
-      });
-      return { prompt: prompts[0], entry: JSON.parse(await readFile(tallyFile, "utf8"))[tallyKey(context.input.session_id)] };
-    };
-
-    // No feedback since the owner's prompt: a new turn, with RESCAN back on
-    // offer and the stale flag gone from the entry.
-    await seed();
-    const fresh = await review();
-    assert.match(fresh.prompt, /RESCAN — the agent claims/);
-    assert.doesNotMatch(fresh.prompt, /not on offer/);
-    assert.deepEqual(Object.keys(fresh.entry).sort(), ["count", "updated"]);
-    assert.equal(fresh.entry.count, 1);
-
-    // Feedback since the prompt: the same turn, whose scan was already asked for.
-    await appendRecords(context.input.transcript_path, [JSON.stringify({
-      type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback:\nScan once more." },
-    })]);
-    await seed();
-    const same = await review();
-    assert.match(same.prompt, /not on offer/);
-    assert.equal(same.entry.rescanned, true);
+    // A subagent's stop carries its parent's transcript, so the parent's
+    // holding is not the subagent's.
+    assert.equal((await handleStop({ ...context.input, agent_id: "agent-1" }, "claude", { runModel })).decision, "block");
   } finally {
     await context.cleanup();
   }
@@ -1847,7 +1397,6 @@ test("Ghost's turn is its owner prompt, and its tally lives in the ghost home", 
   try {
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     assert.equal((await handleStop(context.input, "ghost")).decision, "block");
-    assert.ok((await auditRows())[0].stop_input_fields.includes("owner_prompt"));
 
     // Ghost declares where its state belongs: the count is written inside the
     // ghost home.

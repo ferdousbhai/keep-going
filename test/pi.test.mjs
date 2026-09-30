@@ -111,22 +111,6 @@ test("Pi uses its active model and sends the redacted final text and owner reque
   await assert.rejects(stat(path.join(f.root, "keep-going", "continuations.json")), { code: "ENOENT" });
 });
 
-test("Pi sends earlier turns for reviewer TURN requests", async (t) => {
-  const f = await fixture(t);
-  f.branch.unshift(
-    { id: "assistant-0", type: "message", message: { role: "assistant", content: text("First done."), stopReason: "stop" } },
-  );
-  f.branch.unshift(
-    { id: "owner-0", type: "message", message: { role: "user", content: text("First errand.") } },
-  );
-  await f.finish(reply("Second done."));
-  assert.equal(f.calls.length, 1);
-  const prompt = f.calls[0][1].messages[0].content[0].text;
-  assert.match(prompt, /Past turns, oldest first/);
-  assert.match(prompt, /1: First errand\./);
-  assert.match(prompt, /"owner_prompt":"private owner request"/);
-});
-
 test("Pi model override is exact provider/model-id, including slashes in model IDs", async (t) => {
   const f = await fixture(t);
   process.env.KEEP_GOING_PI_MODEL = "other/vendor/reviewer";
@@ -140,46 +124,33 @@ test("Pi model override is exact provider/model-id, including slashes in model I
   assert.throws(() => reviewerModel({ ...f.ctx, model: undefined }), /No Pi model/);
 });
 
-test("CONTINUE and THINK queue one custom follow-up, not a new owner prompt", async (t) => {
+test("CONTINUE queues one custom follow-up, not a new owner prompt", async (t) => {
   const f = await fixture(t);
-  for (const verdict of ["CONTINUE", "THINK"]) {
-    f.review(async () => reply(`${verdict}\nWork it out first.`));
-    await f.finish(reply("There is work left."));
-    assert.deepEqual(f.sent, [{
-      message: { customType: "keep-going", content: "Work it out first.", display: true },
-      options: { deliverAs: "followUp", triggerTurn: true },
-    }]);
-    f.deliver();
-  }
+  f.review(async () => reply("CONTINUE\nA line of the reviewer's own."));
+  await f.finish(reply("There is work left."));
+  // The reviewer's words never reach the agent; the line is fixed.
+  assert.deepEqual(f.sent, [{
+    message: { customType: "keep-going", content: "Keep going.", display: true },
+    options: { deliverAs: "followUp", triggerTurn: true },
+  }]);
   assert.equal(f.branch.filter((e) => e.message?.role === "user").length, 1);
-  assert.equal(f.calls.length, 2);
 });
 
-test("Pi marks a RESCAN on the branch and reports it spent on the next stop", async (t) => {
+test("Pi lets a stop through unreviewed when the agent holds after a nudge", async (t) => {
   const f = await fixture(t);
-  f.review(async () => reply("RESCAN\nLook again."));
-  await f.finish(reply("Everything is done."));
-  assert.equal(f.sent.length, 1);
-  assert.ok(f.branch.some((e) => e.type === "custom" && e.customType === "keep-going-rescan"));
+  f.review(async () => reply("CONTINUE"));
+  await f.finish(reply("Waiting on your answer."));
   f.deliver();
-
-  // The reviewer no longer has RESCAN to give; giving it anyway is no answer,
-  // so the stop goes through with a warning, the way an unparseable one does.
-  f.review(async () => reply("RESCAN\nLook again."));
-  await f.finish(reply("The scan found nothing."));
+  // Worked after the nudge, then stopped: reviewed again.
+  f.branch.push({ id: "tool-pass", type: "message", message: { ...reply("Checking."), content: [{ type: "toolCall" }], stopReason: "toolUse" } });
+  await f.finish(reply("Checked; still waiting on your answer."));
+  assert.equal(f.calls.length, 2);
+  f.deliver();
+  // Stopped again with no tool since the nudge: it holds, and the hook defers.
+  await f.finish(reply("Still waiting on your answer."));
+  assert.equal(f.calls.length, 2);
   assert.equal(f.sent.length, 0);
-  assert.match(f.notifications.at(-1)[0], /keep-going was skipped: Reviewer answered RESCAN, which was not offered/);
-  const prompt = f.calls[1][1].messages[0].content[0].text;
-  assert.match(prompt, /already asked for this turn/);
-  assert.doesNotMatch(prompt, /RESCAN — the agent claims/);
-  const rows = await f.audit();
-  assert.equal(rows.at(-1).verdict, "ERROR");
-
-  // A new owner turn starts with the scan on offer again.
-  f.branch.push({ id: "owner-2", type: "message", message: { role: "user", content: text("next request") } });
-  f.review(async () => reply("STOP"));
-  await f.finish(reply("Done with the next thing."));
-  assert.match(f.calls[2][1].messages[0].content[0].text, /RESCAN — the agent claims/);
+  assert.equal((await f.audit()).at(-1).verdict, "HELD");
 });
 
 test("Pi does not review twice, even when two copies of the extension are loaded", async (t) => {
@@ -216,10 +187,10 @@ test("Pi counts continuations on the active branch, survives reload, and caps wi
   for (let i = 0; i < CONTINUATION_CAP - 1; i++) {
     f.branch.push({ type: "custom_message", customType: "keep-going", content: "Keep going." });
   }
+  f.branch.push({ type: "message", message: { ...reply(""), content: [{ type: "toolCall" }], stopReason: "toolUse" } });
   // A freshly loaded copy still sees the persisted branch state and markers.
   keepGoing(f.pi);
   await f.finish(reply("Work remains."));
-  assert.match(f.calls[0][1].messages[0].content[0].text, /near its limit/);
   assert.equal(f.sent.length, 1);
   f.deliver();
   await f.finish(reply("Work remains."));
@@ -233,7 +204,6 @@ test("Pi counts continuations on the active branch, survives reload, and caps wi
   f.branch.push({ id: "owner-2", type: "message", message: { role: "user", content: text("private owner request") } });
   await f.finish(reply("Work remains."));
   assert.equal(f.calls.length, 2);
-  assert.doesNotMatch(f.calls[1][1].messages[0].content[0].text, /near its limit/);
   assert.equal(f.sent.length, 1);
 });
 

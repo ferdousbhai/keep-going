@@ -15,8 +15,6 @@ const MODEL_OUTPUT_LIMIT = 2 * 1024 * 1024;
 const CLASSIFIER_TIMEOUT_MS = 180_000;
 // Continuations per owner turn before the hook accepts the stop unconditionally.
 const CONTINUATION_CAP = 100;
-// Continuations before the cap where the nudge stops inviting new work.
-const LAST_STRETCH = 10;
 // How long the hook holds a fresh stop before reviewing it. A user who was
 // already typing a follow-up should not pay for a review of a turn they were
 // about to extend: an owner message that lands in the transcript during the
@@ -62,7 +60,7 @@ async function followedUpDuringQuietWait(input, runtime, delay) {
   // the owner sent is always a whole line of its own.
   try {
     for await (const record of jsonLines(file, { start: before, end: after - 1 })) {
-      if (watch.turn(record)?.open) return true;
+      if (watch.opens(record)) return true;
     }
   } catch {
     // An unreadable range shows no follow-up; the stop is reviewed as usual.
@@ -74,49 +72,46 @@ const ownTranscript = (input) => input.transcript_path;
 
 // Everything that differs per host, keyed once: the inputs it must supply, the
 // directory its state belongs under, the directories its transcripts may live
-// in, how its continuations are counted, how its owner prompt and past turns
-// are read, how its reviewer is run, and which log shows a follow-up. A host
-// whose stop payload already identifies the turn needs no counter — the tally
-// is keyed on that identity. Function declarations hoist, so the counter and
-// the runners below are already bound when this is evaluated.
+// in, how its nudges are read, how its owner prompt is read, how its reviewer
+// is run, and which log shows a follow-up. A host whose stop payload already
+// identifies the turn keeps its count in the tally, keyed on that identity.
+// Function declarations hoist, so the readers and the runners below are
+// already bound when this is evaluated.
 const RUNTIMES = {
-  // Pi supplies a model call from its authenticated registry and counts nudges
-  // on the active session branch. No subprocess or separate tally is needed.
+  // Pi supplies a model call from its authenticated registry and reads its
+  // nudges off the active session branch. No subprocess or tally is needed.
   pi: {
     requires: ["session_id", "turn_id"],
-    count: (input) => input.continuation_count,
-    pastTurns: piPastTurns,
+    nudges: (input) => ({ continuations: input.continuation_count, held: input.held_after_nudge === true }),
   },
   codex: {
     requires: ["turn_id", "session_id"],
     state: xdgStateHome,
     roots: () => [path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "sessions")],
+    nudges: codexNudges,
     ownerPrompt: codexOwnerPrompt,
-    pastTurns: codexPastTurns,
     run: runCodexModel,
-    followUp: { file: ownTranscript, turn: codexTurn },
+    followUp: { file: ownTranscript, opens: codexOpensTurn },
   },
   claude: {
     requires: ["session_id"],
     state: xdgStateHome,
     roots: () => [path.join(process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), ".claude"), "projects")],
-    count: claudeContinuations,
+    nudges: claudeNudges,
     ownerPrompt: claudeOwnerPrompt,
-    pastTurns: claudePastTurns,
     run: runClaudeModel,
-    followUp: { file: ownTranscript, turn: claudeTurn },
+    followUp: { file: ownTranscript, opens: claudeOpensTurn },
   },
   ghost: {
     requires: ["session_id", "owner_prompt", "ghost_home"],
     state: (input) => input.ghost_home,
-    pastTurns: ghostPastTurns,
     run: runGhostModel,
-    followUp: { file: ownTranscript, turn: ghostTurn },
+    followUp: { file: ownTranscript, opens: ghostOpensTurn },
   },
   // Muse names its turn, so the tally keys on it wherever it is sent. Only
   // session_id is required: the hook contract is unpublished and a stop that
   // stopped naming its turn should still be reviewed and capped per session,
-  // not refused outright. It sends no transcript, so it has no past turns.
+  // not refused outright.
   muse: {
     requires: ["session_id"],
     state: xdgStateHome,
@@ -129,155 +124,54 @@ const RUNTIMES = {
   // writes ~/.grok/hooks/keep-going.json so Grok is covered even if that scan
   // is off; grok picks its own default model.
   // Its transcript is a log of session/update frames in which a blocked turn's
-  // nudge lands inside the agent's own reasoning, leaving no continuation to
-  // count; the tally counts them instead.
+  // nudge lands inside the agent's own reasoning, leaving nothing to read
+  // nudges from; the tally counts them instead.
   grok: {
     requires: ["session_id"],
     state: xdgStateHome,
     roots: () => [path.join(process.env.GROK_HOME || path.join(homedir(), ".grok"), "sessions")],
     ownerPrompt: grokOwnerPrompt,
-    pastTurns: grokPastTurns,
     run: runGrokModel,
     followUp: {
       file: (input) => (typeof input.transcript_path === "string" ? grokChatHistory(input.transcript_path) : null),
-      turn: grokTurn,
+      opens: grokOpensTurn,
     },
   },
 };
 
-// Everything that differs per verdict, keyed once: how the prompt defines it,
-// what the reviewer is told to write after it, and what the hook falls back to
-// when the reviewer wrote no line. RUNTIMES does this for hosts; the
-// verdict is the other axis this file turns on.
-const VERDICTS = {
-  CONTINUE: {
-    blocks: true,
-    describe: "required work remains that the agent can perform now.",
-    // Rotated rather than fixed: a hundred continuations carrying one identical
-    // sentence read to the agent like a stuck loop instead of a push.
-    fallbacks: [
-      "Keep going.",
-      "You've got this \u2014 keep going.",
-      "Believe in yourself. Keep going.",
-      "There is still work left here. Keep going.",
-    ],
-  },
-  THINK: {
-    blocks: true,
-    describe: "more reasoning is needed; it should think this through instead of stopping or asking the user.",
-    // Not CONTINUE's lines. THINK is "reason further", and a dropped reviewer
-    // line would otherwise answer a question the agent put to the user with
-    // "keep going" — which is no reason not to ask it again.
-    fallbacks: [
-      "Think it through. Keep going.",
-      "Do not ask yet \u2014 work it out first.",
-      "You can answer this one yourself. Keep going.",
-      "Research it before handing it back. Keep going.",
-    ],
-  },
-  // Offered once per turn. A report that the scan found nothing is itself a
-  // claim that open-ended work is done, so a reviewer left to its own reading
-  // asked for the same scan again and again; the hook remembers the first ask
-  // and withdraws RESCAN after it (see reviewPrompt), and a RESCAN answered
-  // anyway fails open like any other reply the prompt did not offer.
-  RESCAN: {
-    blocks: true,
-    describe: "the agent claims open-ended work is done, but a fresh pass could still surface more.",
-    // A rescan nudge names the one remaining move: look again, then report.
-    // It never restates the task, so a dropped line still reads as a push.
-    fallbacks: [
-      "Do a fresh scan for anything left.",
-      "Scan once more before you finish.",
-      "One more full pass, then report.",
-      "Look again with fresh eyes.",
-    ],
-  },
-  // Waiting on the owner's say-so is named here rather than left to the THINK
-  // preference below. Consent is the one thing no amount of reasoning
-  // produces, and a reviewer with no word for it reads a pending
-  // authorization as a question the agent could have answered itself. What
-  // the owner meant is the same: a reviewer that reads only the words picks
-  // the literal one, and a typo in the request becomes an instruction.
-  STOP: {
-    blocks: false,
-    describe:
-      "work is complete, progress genuinely requires the user or an external state change, or the agent is waiting on a decision only the owner has standing to make \u2014 consent to deploy, publish, send, spend, or delete, or which of two readings of the owner's words they meant.",
-  },
-};
+// The reviewer only decides whether the turn is over; what the agent hears is
+// fixed. The agent has read far more than the reviewer, so a reviewer that
+// writes the line ends up arguing with it: restating the owner's words
+// against the agent's evidence, or claiming consent the owner never gave.
+// Rotated rather than fixed: a hundred continuations carrying one identical
+// sentence read to the agent like a stuck loop instead of a push.
+const NUDGES = [
+  "Keep going.",
+  "You've got this \u2014 keep going.",
+  "Believe in yourself. Keep going.",
+  "There is still work left here. Keep going.",
+];
 
-const VERDICT_NAMES = Object.keys(VERDICTS);
-const listVerdicts = (names) => new Intl.ListFormat("en", { type: "disjunction" }).format(names);
+// Waiting on the owner is spelled out because it is the one stop no amount
+// of the agent's own work resolves: consent, an answer only the owner has,
+// or which reading of their words they meant. A reviewer that reads only
+// the words picks the literal reading, and a typo becomes an instruction.
+const REVIEW_PROMPT = `An agent just tried to end its turn. owner_prompt is the owner's request
+this turn and last_assistant_message is the agent's final message. Decide
+whether the turn is over.
 
-// Validate the reviewer's tiny provider-independent protocol before translating
-// it to the Stop-hook JSON.
-const VERDICT_ALTERNATION = VERDICT_NAMES.join("|");
-const VERDICT_SEPARATOR = "[\\s:.\\u2013\\u2014-]*";
-// A verdict ends where a non-word character does, or where another verdict
-// begins: a small reviewer often answers twice — "CONTINUECONTINUE".
-const REVIEW_VERDICT_PATTERN = new RegExp(
-  `^(${VERDICT_ALTERNATION})(?=$|[^A-Za-z_]|${VERDICT_ALTERNATION})${VERDICT_SEPARATOR}([\\s\\S]*)$`,
-);
+CONTINUE — the agent stopped with work left that it can do now: it announced a
+step and did not take it, stopped partway through the request, or asked
+permission for an obvious next step within it.
+STOP — the request is done, the agent reports a real blocker, or it is waiting
+on something only the owner can give: consent to deploy, publish, send, spend,
+or delete, an answer only the owner has, or which reading of their words they
+meant.
 
-// History lookup the reviewer can request before verdicting. The reviewer
-// stays tool-free: it replies TURN n (or TURN x-y) and the hook fulfills the
-// request from its own transcript readers, then asks again. Past turns only —
-// the current turn is already in the prompt — numbered 1 for the oldest, with
-// -1 meaning the previous turn.
-const TURN_INDEX_LIMIT = 20;
-const TURN_INDEX_CHARS = 100;
-const TURNS_PER_REQUEST = 5;
-const TURN_REQUESTS_MAX = 2;
-const TURN_OWNER_CHARS = 2_000;
-const TURN_FINAL_CHARS = 4_000;
-// The whole loop shares one budget so two slow reviewers cannot stack past
-// the hook timeout that hosts enforce above this process.
-const REVIEW_BUDGET_MS = 200_000;
-const REVIEW_CALL_FLOOR_MS = 15_000;
+The agent has read far more than you have. Do not second-guess its findings or
+its reading of the owner; judge only whether it stopped with work in hand.
 
-const RESCAN_GUIDANCE = `Prefer RESCAN over STOP when the message claims open-ended work is done —
-finding every issue, fixing them all, cleaning up — and a fresh pass could
-surface more. Tell it to scan once more and report what the scan found. STOP
-when the message already reports such a rescan with nothing left, or when the
-work is complete on any other terms.`;
-
-// The reviewer that asked for the scan does not see this turn again; the one
-// that reads the report has to be told the scan was already asked for, or a
-// report of nothing found reads as one more claim of done and earns one more
-// scan. With RESCAN gone from its choices, the honest verdicts remain.
-const RESCAN_SPENT_GUIDANCE = `A fresh scan was already asked for this turn, so RESCAN is not on offer.
-STOP when the message reports that scan, whatever it found and whether or not
-it fixed anything. CONTINUE only if the agent skipped the scan it was asked for.`;
-
-function composeReviewPrompt(names, rescanGuidance) {
-  const blocking = names.filter((name) => VERDICTS[name].blocks);
-  const ending = names.filter((name) => !VERDICTS[name].blocks);
-  return `An agent just tried to end its turn. Its final message is
-last_assistant_message. Decide whether the turn is really over.
-
-${names.map((name) => `${name} — ${VERDICTS[name].describe}`).join("\n")}
-
-Prefer THINK over STOP when the request for input looks self-resolvable by the agent.
-Do not default to any outcome or invent unstated work.
-
-You may answer questions about the code or the world in the owner's place, but
-never state what the owner said, meant or approved: you see their words, not
-the evidence the agent read, and your reading reaches it as their instruction.
-
-${rescanGuidance}
-
-owner_prompt is the owner's request this turn. STOP if last_assistant_message
-already fulfills it.
-
-Reply with the verdict word alone on the first line: ${listVerdicts(names)}.
-For ${listVerdicts(ending)}, stop there. For ${listVerdicts(blocking)}, add one short
-sentence on the next line; it reaches the agent verbatim — "Keep going.",
-"Believe in yourself.", "Don't ask yet — you can work this out." Name no task,
-file, command, or requirement its message did not already state.`;
-}
-
-const REVIEW_PROMPT = composeReviewPrompt(VERDICT_NAMES, RESCAN_GUIDANCE);
-const RESCAN_SPENT_VERDICTS = VERDICT_NAMES.filter((name) => name !== "RESCAN");
-const RESCAN_SPENT_PROMPT = composeReviewPrompt(RESCAN_SPENT_VERDICTS, RESCAN_SPENT_GUIDANCE);
+Reply with CONTINUE or STOP and nothing else.`;
 
 // The review is a one-word verdict, so the host's frontier default is more
 // model than it needs. Codex and Claude name a smaller tier the way Ghost's
@@ -401,6 +295,10 @@ const INJECTED_PREFIXES = [
   // A finished subagent reporting back. Codex has no flag for it the way
   // Claude's task notifications do, so only this keeps it from opening turns.
   "<subagent_notification>",
+  // This hook's own nudge, as Codex records it: a user message in the turn it
+  // continues. Read as the owner's, it became the request the next stop was
+  // judged against.
+  "<hook_prompt",
 ];
 
 function isInjectedContext(text) {
@@ -460,24 +358,64 @@ function claudeUserMessage(record) {
   };
 }
 
+// Where this turn stands on nudges, read from a transcript: how many the turn
+// has had since the owner's last prompt, and whether the agent stopped again
+// after the latest one without running a tool. That is an agent that weighed
+// the nudge and still holds, and a second review would only argue with it.
+// classify names each record "owner", "nudge", "tool", or nothing.
+async function transcriptNudges(file, classify) {
+  let continuations = 0;
+  let worked = false;
+  let hasOwner = false;
+  for await (const record of jsonLines(file)) {
+    const kind = classify(record);
+    if (kind === "owner") {
+      hasOwner = true;
+      continuations = 0;
+      worked = false;
+    } else if (kind === "nudge" && hasOwner) {
+      continuations += 1;
+      worked = false;
+    } else if (kind === "tool") {
+      worked = true;
+    }
+  }
+  return { continuations, held: continuations > 0 && !worked };
+}
+
 // Claude's stop payload names the session and nothing else, so where one owner
 // turn ends and the next begins is information only the transcript has: the
 // turn starts at the last genuine user message, and the hook prompts after it
 // are this turn's continuations.
-async function claudeContinuations(input) {
-  const transcriptPath = await allowedTranscriptPath(input, "claude");
-  let count = 0;
-  let hasOwner = false;
-  for await (const record of jsonLines(transcriptPath)) {
-    const message = claudeUserMessage(record);
-    if (message?.genuine) {
-      hasOwner = true;
-      count = 0;
-    } else if (hasOwner && message && HOOK_PROMPT_PATTERN.test(message.text)) {
-      count += 1;
-    }
+function claudeRecordKind(record) {
+  if (record?.type === "assistant") {
+    return record.message?.content?.some?.((part) => part?.type === "tool_use") ? "tool" : null;
   }
-  return count;
+  const message = claudeUserMessage(record);
+  if (message?.genuine) return "owner";
+  return message && HOOK_PROMPT_PATTERN.test(message.text) ? "nudge" : null;
+}
+
+async function claudeNudges(input) {
+  return transcriptNudges(await allowedTranscriptPath(input, "claude"), claudeRecordKind);
+}
+
+async function claudeContinuations(input) {
+  return (await claudeNudges(input)).continuations;
+}
+
+// Codex records its nudge as a user message and every tool as a *_call item.
+function codexRecordKind(record) {
+  const payload = record?.type === "response_item" ? record.payload : null;
+  if (typeof payload?.type === "string" && payload.type.endsWith("_call")) return "tool";
+  if (payload?.type !== "message" || payload.role !== "user") return null;
+  const text = messageText(payload);
+  if (text.trimStart().startsWith("<hook_prompt")) return "nudge";
+  return lastGenuinePrompt(text) ? "owner" : null;
+}
+
+async function codexNudges(input) {
+  return transcriptNudges(await allowedTranscriptPath(input, "codex"), codexRecordKind);
 }
 
 function lastGenuinePrompt(text) {
@@ -565,130 +503,26 @@ async function resolveOwnerPrompt(input, runner) {
   }
 }
 
-// Past turns per harness, oldest first, current turn excluded. Every reader
-// is best-effort: what it cannot parse is a turn the reviewer never hears
-// about. Only the owner's prompt and the turn's final assistant text are
-// kept — tool calls, reasoning, and hook feedback never leave the file.
-async function readTurns(file, classify) {
-  const segments = [];
-  let current = null;
-  for await (const record of jsonLines(file)) {
-    const turn = classify(record);
-    if (!turn) continue;
-    if (turn.open === undefined) {
-      if (current && turn.final) current.final = turn.final;
-    } else if (current && !current.owner && turn.open) {
-      // A turn_context marker opens an empty head; its user message fills
-      // it, so the marker and the message stay one turn.
-      current.owner = turn.open;
-    } else {
-      current = { owner: turn.open, final: "" };
-      if (turn.id !== undefined) current.id = turn.id;
-      segments.push(current);
-    }
-  }
-  return segments;
-}
-
-function claudeTurn(record) {
-  if (record?.type === "assistant" && record.message?.role === "assistant") {
-    const text = messageText(record.message).trim();
-    return text ? { final: text } : null;
-  }
+// Whether a record is the owner opening a turn, per host, for the quiet wait.
+function claudeOpensTurn(record) {
   const message = claudeUserMessage(record);
-  if (!message?.genuine) return null;
-  const owner = lastGenuinePrompt(message.text);
-  return owner ? { open: owner } : null;
+  return Boolean(message?.genuine && lastGenuinePrompt(message.text));
 }
 
-function grokTurn(record) {
-  if (record?.type === "user" && !record.synthetic_reason) {
-    const text = grokQueryText(record);
-    return text ? { open: text } : null;
-  }
-  if (record?.type === "assistant") {
-    const raw = record.content;
-    const text = (typeof raw === "string" ? raw : messageText(record)).trim();
-    return text ? { final: text } : null;
-  }
-  return null;
+function grokOpensTurn(record) {
+  return record?.type === "user" && !record.synthetic_reason && Boolean(grokQueryText(record));
 }
 
-function ghostTurn(record) {
-  // Turns segment the way the daemon itself does: user-role messages open
-  // them (agent echoes excluded). Custom entries — hook context, nudges,
-  // imports — never open a turn.
-  if (record?.type !== "message") return null;
-  const message = record.message;
-  if (message?.role === "user" && message.attribution !== "agent") {
-    const text = lastGenuinePrompt(messageText(message));
-    return text ? { open: text } : null;
-  }
-  if (message?.role === "assistant" && message.stopReason !== "toolUse") {
-    const text = messageText(message).trim();
-    return text ? { final: text } : null;
-  }
-  return null;
+// Ghost's user-role messages open turns, agent echoes excluded. Custom
+// entries — hook context, nudges, imports — never do.
+function ghostOpensTurn(record) {
+  const message = record?.type === "message" ? record.message : null;
+  return message?.role === "user" && message.attribution !== "agent" && Boolean(lastGenuinePrompt(messageText(message)));
 }
 
-async function claudePastTurns(input) {
-  // A subagent stop carries the parent's transcript, not the subagent's turns.
-  if (input.agent_id) return [];
-  const segments = await readTurns(await allowedTranscriptPath(input, "claude"), claudeTurn);
-  return segments.slice(0, -1);
-}
-
-function codexTurn(record) {
-  if (record?.type === "turn_context" && typeof record.payload?.turn_id === "string") {
-    return { open: "", id: record.payload.turn_id };
-  }
+function codexOpensTurn(record) {
   const payload = record?.type === "response_item" ? record.payload : null;
-  if (payload?.type !== "message") return null;
-  if (payload.role === "user") {
-    const text = lastGenuinePrompt(messageText(payload));
-    return text ? { open: text } : null;
-  }
-  if (payload.role === "assistant") {
-    const text = messageText(payload).trim();
-    return text ? { final: text } : null;
-  }
-  return null;
-}
-
-async function codexPastTurns(input) {
-  const segments = await readTurns(await allowedTranscriptPath(input, "codex"), codexTurn);
-  const named = segments.filter((segment) => segment.owner);
-  let currentIndex = named.length - 1;
-  const found = named.findLastIndex((segment) => segment.id === input.turn_id);
-  if (found >= 0) currentIndex = found;
-  return named.slice(0, currentIndex).map(({ owner, final }) => ({ owner, final }));
-}
-
-async function grokPastTurns(input) {
-  const updates = await allowedTranscriptPath(input, "grok");
-  const segments = await readTurns(grokChatHistory(updates), grokTurn);
-  return segments.slice(0, -1);
-}
-
-// Ghost hands the hook the runtime's own pi session file as the transcript.
-async function ghostPastTurns(input) {
-  return (await readTurns(input.transcript_path, ghostTurn)).slice(0, -1);
-}
-
-// The extension owns the branch, so it sends the turns down with the stop
-// instead of the hook re-reading a file it cannot see.
-function piPastTurns(input) {
-  return (input.past_turns ?? []).map((turn) => ({ owner: turn.owner_prompt, final: turn.final_response }));
-}
-
-async function listPastTurns(input, runner) {
-  const read = RUNTIMES[runner].pastTurns;
-  if (process.env.KEEP_GOING_TURNS === "0" || !read) return [];
-  try {
-    return (await read(input)).slice(-TURN_INDEX_LIMIT);
-  } catch {
-    return [];
-  }
+  return payload?.type === "message" && payload.role === "user" && Boolean(lastGenuinePrompt(messageText(payload)));
 }
 
 // The cap is the only thing between a stuck reviewer and a hundred turns of
@@ -758,11 +592,7 @@ async function writeTally(file, tally) {
 // names none, and an owner who repeats a prompt word for word re-derives the
 // key of the turn before. Ending a turn where the hook lets the stop through is
 // what keeps a finished turn's count from being spent on the next one in both.
-//
-// The entry also remembers whether a RESCAN was issued this turn, so the one
-// fresh pass the verdict asks for is asked for once. Like the count, it is
-// cleared when a stop goes through.
-async function recordTurnState(input, runner, blocked, exact = null, rescan = false) {
+async function recordTurnState(input, runner, blocked, exact = null) {
   if (!RUNTIMES[runner].state) return;
   const file = tallyFile(input, runner);
   const key = turnKey(input);
@@ -774,18 +604,9 @@ async function recordTurnState(input, runner, blocked, exact = null, rescan = fa
     // from it rather than incremented past its own stale value — otherwise the
     // number the hook falls back to is one it has been drifting all turn.
     const from = exact ?? tally[key]?.count ?? 0;
-    const rescanned = (exact !== 0 && tally[key]?.rescanned === true) || rescan;
-    tally[key] = { count: from + 1, updated: Date.now(), ...(rescanned ? { rescanned } : {}) };
+    tally[key] = { count: from + 1, updated: Date.now() };
   }
   await writeTally(file, tally);
-}
-
-// Whether this turn has already had its one RESCAN. A tally-backed host reads
-// it from the turn's entry; Pi keeps no tally and says so in its stop input.
-async function recordedRescan(input, runner) {
-  if (!RUNTIMES[runner].state) return input.rescanned === true;
-  const tally = await readTally(tallyFile(input, runner));
-  return tally[turnKey(input)]?.rescanned === true;
 }
 
 function stopCandidateText(input) {
@@ -972,10 +793,8 @@ async function runClaudeModel({ prompt, timeoutMs }) {
 }
 
 // Grok's default system prompt is a coding agent; this one keeps --single to
-// the verdict. The verdicts on offer this stop, so the system prompt never lists one the
-// user prompt has withdrawn.
-const grokClassifierPrompt = (verdicts) =>
-  `Reply with exactly one of ${listVerdicts(verdicts)} as the first line. No preamble, no analysis.`;
+// the verdict.
+const GROK_SYSTEM_PROMPT = "Reply with exactly CONTINUE or STOP. No preamble, no analysis.";
 
 // Nested `grok --single` otherwise inherits the parent session's home: MCP
 // servers, plugins, high reasoning, and the coding agent. That is a full
@@ -984,7 +803,7 @@ const grokClassifierPrompt = (verdicts) =>
 // tools and --effort low (the lowest level this CLI advertises; it has no
 // none). --single dispatches no stop hook, so the reviewer cannot trip the
 // hook that spawned it.
-async function runGrokModel({ prompt, timeoutMs, verdicts }) {
+async function runGrokModel({ prompt, timeoutMs }) {
   return inTemporaryDirectory("grok", async (directory) => {
     const overlayHome = path.join(directory, "home");
     await mkdir(path.join(overlayHome, "hooks"), { recursive: true });
@@ -1038,7 +857,7 @@ async function runGrokModel({ prompt, timeoutMs, verdicts }) {
       "--effort",
       "low",
       "--system-prompt-override",
-      grokClassifierPrompt(verdicts),
+      GROK_SYSTEM_PROMPT,
       "--cwd",
       directory,
       ...modelArgs("KEEP_GOING_GROK_MODEL"),
@@ -1108,110 +927,24 @@ async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
   return envelope.text;
 }
 
-const TURN_REQUEST_PATTERN = /^TURN\s+(-?\d+)(?:\s*-\s*(-?\d+))?\s*$/i;
+// The verdict is the first CONTINUE or STOP standing as a word of its own,
+// wherever the reviewer put it: small reviewers write a sentence first, glue
+// the verdict onto it ("...finished.STOP"), or answer twice
+// ("CONTINUECONTINUE").
+const VERDICT_PATTERN = /(?<![A-Za-z_])(CONTINUE|STOP)(?=$|[^A-Za-z_]|CONTINUE|STOP)/;
 
-// A history request names past turns 1-based, oldest first; negative counts
-// back from the previous turn, so -1 is the turn just before this one. Out
-// of range or wider than the per-request cap is
-// not a request at all: the output fails open as a bad verdict instead.
-function parseTurnRequest(text, count) {
-  const match = TURN_REQUEST_PATTERN.exec(String(text ?? "").trim());
-  if (!match) return null;
-  const at = (n) => (n < 0 ? count + n + 1 : n);
-  let start = at(Number(match[1]));
-  let end = match[2] === undefined ? start : at(Number(match[2]));
-  if (start > end) [start, end] = [end, start];
-  if (start < 1 || end > count || end - start + 1 > TURNS_PER_REQUEST) return null;
-  return { start, end };
+function parseReviewVerdict(text) {
+  const match = VERDICT_PATTERN.exec(String(text ?? ""));
+  if (!match) throw new Error("Reviewer output must be CONTINUE or STOP");
+  return match[1];
 }
 
-function turnIndexSection(turns) {
-  const lines = turns.map((turn, index) =>
-    `${index + 1}: ${redactSensitive(turn.owner).replace(/\s+/g, " ").trim().slice(0, TURN_INDEX_CHARS)}`);
-  return [
-    `Past turns, oldest first. To read full text before verdicting, reply TURN n or TURN x-y (at most ${TURNS_PER_REQUEST} turns), e.g. TURN ${turns.length}. Then verdict as usual.`,
-    ...lines,
-  ].join("\n");
+function hookOutputForVerdict(verdict, continuations = 0) {
+  if (verdict !== "CONTINUE") return {};
+  return { decision: "block", reason: NUDGES[continuations % NUDGES.length] };
 }
 
-function formatTurns(turns, { start, end }) {
-  return turns.slice(start - 1, end).map((turn, index) => [
-    `Turn ${start + index}`,
-    `owner_prompt: ${compactText(turn.owner, TURN_OWNER_CHARS)}`,
-    `final_response: ${compactText(turn.final, TURN_FINAL_CHARS) || "(none)"}`,
-  ].join("\n")).join("\n\n");
-}
-
-function parseReviewVerdict(text, offered = VERDICT_NAMES) {
-  const body = String(text ?? "").trim();
-  const match = REVIEW_VERDICT_PATTERN.exec(body)
-    ?? verdictAfterPreamble(body)
-    ?? trailingVerdict(body);
-  if (!match) {
-    throw new Error(`Reviewer output must begin with ${listVerdicts(offered)}`);
-  }
-  // A verdict withdrawn on this stop is no answer.
-  if (!offered.includes(match[1])) {
-    throw new Error(`Reviewer answered ${match[1]}, which was not offered on this stop; expected ${listVerdicts(offered)}`);
-  }
-  // The reviewer's own words reach the agent as written, secrets aside.
-  return { verdict: match[1], nudge: redactSensitive(match[2]).trim() };
-}
-
-// A reviewer may write a sentence before the verdict. The first line that is
-// a verdict is the answer; preamble is discarded.
-function verdictAfterPreamble(body) {
-  const lines = body.split(/\n/);
-  for (let i = 1; i < lines.length; i++) {
-    const rest = lines.slice(i).join("\n").trim();
-    const match = REVIEW_VERDICT_PATTERN.exec(rest);
-    if (match) return match;
-  }
-  return null;
-}
-
-// Or glue the verdict onto that sentence: "I'll inspect the workspace.STOP"
-function trailingVerdict(body) {
-  const match = new RegExp(
-    `(?:^|[^A-Za-z_])(${VERDICT_ALTERNATION})${VERDICT_SEPARATOR}$`,
-  ).exec(body);
-  return match ? [match[0], match[1], ""] : null;
-}
-
-// Near the cap the reviewer is told to write a different line, rather than
-// having one appended to the line it wrote: hook-side facts reach it in the
-// prompt, before the line is written.
-const LAST_STRETCH_NOTE =
-  "This turn is near its limit: tell the agent to land what is in flight rather than start anything new.";
-
-// Earlier nudges are filtered out of the transcript the reviewer reads, so
-// without this every firing looks like the first. The agent meanwhile grows
-// more insistent about why it stopped, and a reviewer that cannot see its own
-// refused attempts reads that insistence as resistance to push harder against.
-// The count is the only way it learns it is being refused rather than ignored.
-const refusalNote = (continuations) =>
-  `This turn has already been continued ${continuations} time${continuations === 1 ? "" : "s"}. `
-  + "If the agent is holding for the same stated reason as before, that reason is a real blocker — STOP.";
-
-function reviewPrompt(continuations, rescanned = false) {
-  const base = rescanned ? RESCAN_SPENT_PROMPT : REVIEW_PROMPT;
-  const notes = [];
-  if (continuations > 0) notes.push(refusalNote(continuations));
-  if (continuations >= CONTINUATION_CAP - LAST_STRETCH) notes.push(LAST_STRETCH_NOTE);
-  return notes.length ? `${base}\n\n${notes.join("\n\n")}` : base;
-}
-
-// The reviewer writes the whole line for every blocking verdict. A fixed
-// preamble could only repeat one guess about why the agent stopped, and the
-// reviewer is the half that actually read the message. The fallback rotates so
-// a hundred continuations do not carry one identical sentence.
-function hookOutputForVerdict(verdict, continuations = 0, nudge = "") {
-  const spec = VERDICTS[verdict];
-  if (!spec.blocks) return {};
-  return { decision: "block", reason: nudge || spec.fallbacks[continuations % spec.fallbacks.length] };
-}
-
-async function recordReviewAudit(input, runner, { verdict, reason, error, countedBy, reviewerOutput, pastTurns, turnRequests }) {
+async function recordReviewAudit(input, runner, { verdict, reason, error, countedBy, reviewerOutput }) {
   const auditPath = process.env.KEEP_GOING_AUDIT_LOG;
   if (!auditPath) return;
   const entry = {
@@ -1223,16 +956,10 @@ async function recordReviewAudit(input, runner, { verdict, reason, error, counte
     cwd: typeof input.cwd === "string" ? input.cwd : null,
     verdict: error ? "ERROR" : verdict,
     rationale: error ? compactText(String(error), 2_000) : reason ?? "",
-    // The reviewer's own words, kept whole where the rationale keeps only the
-    // nudge: a STOP row would otherwise say nothing about why the turn ended.
+    // What the reviewer actually wrote: an unparseable reply is the debugging
+    // evidence when the stop fails open.
     ...(reviewerOutput !== undefined ? { reviewer_output: compactText(reviewerOutput, 2_000) } : {}),
-    // Whether history was on offer and what the reviewer read of it, so the
-    // log can say whether the index earns its place in the prompt.
-    ...(pastTurns ? { past_turns: pastTurns, turn_requests: turnRequests } : {}),
-    // Record how the turn was counted. For tally-backed hosts, include field
-    // names to help diagnose their payload format without logging its values.
     counted_by: countedBy,
-    ...(countedBy === "tally" ? { stop_input_fields: Object.keys(input).sort() } : {}),
   };
   try {
     await appendFile(auditPath, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
@@ -1245,20 +972,20 @@ async function recordReviewAudit(input, runner, { verdict, reason, error, counte
 // a stop let through clears and a block advances, and the audit row. One
 // helper makes both so no exit can forget either: a forgotten first write
 // carries a count into a turn that never earned it, disarming the cap.
-async function settleStop(input, runner, output, audit, exact = null, rescan = false) {
+async function settleStop(input, runner, output, audit, exact = null) {
   const blocked = output.decision === "block";
-  await recordTurnState(input, runner, blocked, exact, rescan);
+  await recordTurnState(input, runner, blocked, exact);
   await recordReviewAudit(input, runner, { verdict: blocked ? "CONTINUE" : "STOP", reason: output.reason, ...audit });
   return output;
 }
 
 async function recordedContinuations(input, runner) {
-  if (!RUNTIMES[runner].state) return RUNTIMES[runner].count(input);
+  if (!RUNTIMES[runner].state) return (await RUNTIMES[runner].nudges(input)).continuations;
   const tally = await readTally(tallyFile(input, runner));
   return tally[turnKey(input)]?.count ?? 0;
 }
 
-async function handleStop(input, runner = "codex", { runModel, delay, onVerdict } = {}) {
+async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
   if (await yieldsToGrokNative(runner)) return {};
   // GROK_HOOK_EVENT is set only by Grok's hook runner, never by Claude Code.
   if (process.env.GROK_HOOK_EVENT) runner = "grok";
@@ -1290,80 +1017,47 @@ async function handleStop(input, runner = "codex", { runModel, delay, onVerdict 
     return settleStop(input, runner, {}, { reason: "nothing to review", countedBy: "stub" });
   }
 
-  let review;
-  let continuations = await recordedContinuations(input, runner);
-  let rescanned = await recordedRescan(input, runner);
-  let countedBy = runtime.state ? "tally" : "session";
-  const named = payloadTurn(input);
-  // The last reviewer response, whatever it parses as: an unparseable reply
-  // is the debugging evidence, so the audit row keeps it on the fail-open
-  // path as well as the verdict one. The history offered and read is kept
-  // on both paths for the same reason.
-  let rawReview;
-  let pastTurns = [];
-  const turnRequests = [];
-  try {
-    // A transcript is read to count when the payload leaves the turn unnamed.
-    // A subagent names its turn, and its parent's transcript holds the
-    // parent's messages.
-    if (!named && runtime.count) {
-      try {
-        continuations = await runtime.count(input);
-        countedBy = "transcript";
-        // No feedback since the owner's last prompt is a new turn, whatever
-        // an interrupted turn left in the session's tally entry.
-        if (continuations === 0) rescanned = false;
-      } catch {
-        // A transcript in a shape or a place this runtime does not know is the
-        // ordinary case on a host we have not taught it yet. The tally already
-        // caps the turn, so the review still happens and the audit row says so.
-      }
+  // A subagent stop carries its parent's transcript, whose nudges are the
+  // parent's, so it is read only for the agent that owns it.
+  let nudges = null;
+  if (runtime.nudges && !input.agent_id) {
+    try {
+      nudges = await runtime.nudges(input);
+    } catch {
+      // A transcript in a shape or a place this runtime does not know is the
+      // ordinary case on a host we have not taught it yet. The tally still
+      // caps the turn, and the stop is reviewed.
     }
-    if (continuations >= CONTINUATION_CAP) {
-      const capped = {
-        systemMessage: `keep-going: continuation cap (${CONTINUATION_CAP}) reached for this turn; accepting the stop.`,
-      };
-      return settleStop(input, runner, capped, { verdict: "CAP", reason: capped.systemMessage, countedBy });
-    }
+  }
+  // A turn the payload names is counted by the tally keyed on it; one it
+  // leaves unnamed (Claude's) by the transcript, where that was readable.
+  const fromTranscript = Boolean(nudges && runtime.state && !payloadTurn(input));
+  const continuations = fromTranscript ? nudges.continuations : await recordedContinuations(input, runner);
+  const countedBy = fromTranscript ? "transcript" : runtime.state ? "tally" : "session";
+  if (continuations >= CONTINUATION_CAP) {
+    const capped = {
+      systemMessage: `keep-going: continuation cap (${CONTINUATION_CAP}) reached for this turn; accepting the stop.`,
+    };
+    return settleStop(input, runner, capped, { verdict: "CAP", reason: capped.systemMessage, countedBy });
+  }
+  if (nudges?.held) {
+    return settleStop(input, runner, {}, { verdict: "HELD", reason: "stopped again after a nudge without running a tool", countedBy });
+  }
 
-    const offered = rescanned ? RESCAN_SPENT_VERDICTS : VERDICT_NAMES;
+  let rawReview;
+  let verdict;
+  try {
     const run = runModel ?? runtime.run;
     if (!run) throw new Error(`${runner} review requires its native extension`);
-    // Past turns ride along only when there are any: the index tells the
-    // reviewer what it may ask for, and a harness with no readable history
-    // reviews from the current turn alone.
-    pastTurns = await listPastTurns(input, runner);
-    let reviewerPrompt = `${reviewPrompt(continuations, rescanned)}\n\n${JSON.stringify({
-      last_assistant_message: lastAssistantMessage,
-      owner_prompt: compactText(ownerPrompt, 12_000),
-    })}`;
-    if (pastTurns.length) reviewerPrompt += `\n\n${turnIndexSection(pastTurns)}`;
-    const loopStart = Date.now();
-    for (;;) {
-      const remaining = REVIEW_BUDGET_MS - (Date.now() - loopStart);
-      if (remaining < REVIEW_CALL_FLOOR_MS) {
-        throw new Error(`review budget (${REVIEW_BUDGET_MS} ms) spent before a verdict`);
-      }
-      rawReview = await run({
-        prompt: reviewerPrompt,
-        timeoutMs: Math.min(CLASSIFIER_TIMEOUT_MS, remaining),
-        ghostHome: input.ghost_home,
-        verdicts: offered,
-      });
-      try {
-        review = parseReviewVerdict(rawReview, offered);
-        break;
-      } catch (verdictError) {
-        // Not a verdict: the one other legal move is asking for history. Ways
-        // of asking that name nothing readable fail open as a bad verdict.
-        const request = pastTurns.length && turnRequests.length < TURN_REQUESTS_MAX
-          ? parseTurnRequest(rawReview, pastTurns.length)
-          : null;
-        if (!request) throw verdictError;
-        reviewerPrompt += `\n\n${formatTurns(pastTurns, request)}\n\nVerdict now, with the turns above in mind.`;
-        turnRequests.push(request);
-      }
-    }
+    rawReview = await run({
+      prompt: `${REVIEW_PROMPT}\n\n${JSON.stringify({
+        last_assistant_message: lastAssistantMessage,
+        owner_prompt: compactText(ownerPrompt, 12_000),
+      })}`,
+      timeoutMs: CLASSIFIER_TIMEOUT_MS,
+      ghostHome: input.ghost_home,
+    });
+    verdict = parseReviewVerdict(rawReview);
   } catch (error) {
     // Failing open lets the stop through, so it ends the turn like any other
     // accepted stop. This is the path a reviewer timeout takes — the stuck
@@ -1373,18 +1067,16 @@ async function handleStop(input, runner = "codex", { runModel, delay, onVerdict 
       input,
       runner,
       { systemMessage: `keep-going was skipped: ${compactText(error.message, 500)}` },
-      { error: error.message, countedBy, reviewerOutput: rawReview, pastTurns: pastTurns.length, turnRequests },
+      { error: error.message, countedBy, reviewerOutput: rawReview },
     );
   }
 
-  onVerdict?.(review.verdict);
   return settleStop(
     input,
     runner,
-    hookOutputForVerdict(review.verdict, continuations, review.nudge),
-    { verdict: review.verdict, countedBy, reviewerOutput: rawReview, pastTurns: pastTurns.length, turnRequests },
-    countedBy === "transcript" ? continuations : null,
-    review.verdict === "RESCAN",
+    hookOutputForVerdict(verdict, continuations),
+    { verdict, countedBy, reviewerOutput: rawReview },
+    fromTranscript ? continuations : null,
   );
 }
 
@@ -1409,23 +1101,16 @@ if (import.meta.url === entry) await main();
 
 export {
   CONTINUATION_CAP,
-  TURN_INDEX_LIMIT,
-  quietDelayMs,
+  NUDGES,
   REVIEW_PROMPT,
-  RESCAN_SPENT_PROMPT,
-  VERDICTS,
-  LAST_STRETCH,
+  quietDelayMs,
   claudeContinuations,
+  claudeNudges,
+  codexNudges,
   recordedContinuations,
-  recordedRescan,
-  reviewPrompt,
   handleStop,
   hookOutputForVerdict,
-  listPastTurns,
   parseReviewVerdict,
-  parseTurnRequest,
-  turnIndexSection,
-  formatTurns,
   yieldsToGrokNative,
   resolveOwnerPrompt,
 };
