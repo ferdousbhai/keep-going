@@ -195,11 +195,13 @@ const VERDICTS = {
   // Waiting on the owner's say-so is named here rather than left to the THINK
   // preference below. Consent is the one thing no amount of reasoning
   // produces, and a reviewer with no word for it reads a pending
-  // authorization as a question the agent could have answered itself.
+  // authorization as a question the agent could have answered itself. What
+  // the owner meant is the same: a reviewer that reads only the words picks
+  // the literal one, and a typo in the request becomes an instruction.
   STOP: {
     blocks: false,
     describe:
-      "work is complete, progress genuinely requires the user or an external state change, or the agent is waiting on a decision only the owner has standing to make \u2014 consent to deploy, publish, send, spend, or delete.",
+      "work is complete, progress genuinely requires the user or an external state change, or the agent is waiting on a decision only the owner has standing to make \u2014 consent to deploy, publish, send, spend, or delete, or which of two readings of the owner's words they meant.",
   },
 };
 
@@ -256,6 +258,10 @@ ${names.map((name) => `${name} — ${VERDICTS[name].describe}`).join("\n")}
 
 Prefer THINK over STOP when the request for input looks self-resolvable by the agent.
 Do not default to any outcome or invent unstated work.
+
+You may answer questions about the code or the world in the owner's place, but
+never state what the owner said, meant or approved: you see their words, not
+the evidence the agent read, and your reading reaches it as their instruction.
 
 ${rescanGuidance}
 

@@ -19,7 +19,8 @@ message and the owner's request — redacted and truncated — and answers:
 - `THINK` — it should reason this through instead of stopping or asking.
 - `RESCAN` — it claims open-ended work is done; one more fresh pass first.
 - `STOP` — it is genuinely done, genuinely blocked on the user, or waiting on
-  a decision only the owner can make.
+  a decision only the owner can make: consent, or which reading of their words
+  they meant.
 
 `RESCAN` is offered once per owner turn. The report of that scan is itself a
 claim that the work is done, so on every later stop of the turn the reviewer is
@@ -29,7 +30,8 @@ through the way an unparseable verdict does, with a warning to the owner.
 
 The first three block the stop (in Pi, queue a follow-up) with a line the
 reviewer writes for the occasion, speaking for the owner: a question the agent
-could have answered itself is answered there. Everything else lets the stop through: a
+could have answered itself is answered there. What the owner said or meant is
+not among them; the reviewer sees their words but not the agent's evidence. Everything else lets the stop through: a
 missing binary, a timeout, an unparseable verdict, or a bare completion token
 (`Done.`) with no owner prompt to weigh it against.
 

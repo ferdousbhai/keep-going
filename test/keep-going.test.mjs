@@ -797,6 +797,15 @@ test("a turn waiting on the owner's consent may end", () => {
   assert.match(REVIEW_PROMPT, /only the owner has standing to make/);
 });
 
+test("the reviewer does not decide what the owner meant", () => {
+  // Observed: an owner typed "spice.trade" for spicy.trade; the agent checked
+  // and asked, and the reviewer twice pushed the typo back as "You said ...
+  // as instructed" until a dead link shipped.
+  assert.match(REVIEW_PROMPT, /which of two readings of the owner's words they meant/);
+  assert.match(REVIEW_PROMPT, /never state what the owner said, meant or approved/);
+  assert.match(RESCAN_SPENT_PROMPT, /never state what the owner said, meant or approved/);
+});
+
 test("the reviewer is told when it is being refused", () => {
   // Earlier nudges are filtered out of the transcript it reads, so without the
   // count every firing looks like the first and a holding agent reads as a
