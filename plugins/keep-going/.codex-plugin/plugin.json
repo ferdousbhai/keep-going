@@ -19,7 +19,7 @@
   "interface": {
     "displayName": "Keep Going",
     "shortDescription": "Nudge unfinished Codex turns onward.",
-    "longDescription": "Classifies the last assistant message as CONTINUE, THINK, RESCAN, or STOP, then answers a premature stop with a few words from the reviewer instead of letting the turn end.",
+    "longDescription": "Classifies the last assistant message as CONTINUE or STOP and answers a premature stop with \"Keep going.\" instead of letting the turn end; an agent that holds after a nudge is let stop.",
     "developerName": "Ferdous Bhai",
     "category": "Productivity",
     "capabilities": [
