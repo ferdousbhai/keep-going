@@ -656,6 +656,24 @@ test("Ghost delegates classification to its smol-model bridge", async () => {
   }
 });
 
+test("Ghost stops are reviewed without a quiet wait, since Ghost lets the owner's follow-up win itself", async () => {
+  const context = await ghostFixture();
+  try {
+    // ghostd sends the conversation log, which a queued follow-up reaches
+    // only after this hook returns.
+    const log = path.join(context.input.ghost_home, "sessions", "c1", ".conversation.jsonl");
+    await mkdir(path.dirname(log), { recursive: true });
+    await writeFile(log, `${JSON.stringify({ type: "user", text: "Please finish the requested change." })}\n`);
+    process.env.KEEP_GOING_QUIET_MS = "60000";
+    process.env.MOCK_REVIEW_RESPONSE = "STOP";
+    const started = Date.now();
+    assert.deepEqual(await handleStop({ ...context.input, transcript_path: log }, "ghost"), {});
+    assert.ok(Date.now() - started < 10_000, "a ghost stop waited for a follow-up it cannot see");
+  } finally {
+    await context.cleanup();
+  }
+});
+
 test("the verdict is the first CONTINUE or STOP standing as a word, wherever the reviewer puts it", () => {
   for (const verdict of ["CONTINUE", "STOP"]) {
     assert.equal(parseReviewVerdict(` ${verdict}\n`), verdict);

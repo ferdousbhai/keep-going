@@ -102,11 +102,12 @@ const RUNTIMES = {
     run: runClaudeModel,
     followUp: { file: ownTranscript, opens: claudeOpensTurn },
   },
+  // Ghost needs no quiet wait: it asks no stop hook while the owner's queued
+  // follow-up waits and drops a continuation one arrives during.
   ghost: {
     requires: ["session_id", "owner_prompt", "ghost_home"],
     state: (input) => input.ghost_home,
     run: runGhostModel,
-    followUp: { file: ownTranscript, opens: ghostOpensTurn },
   },
   // Muse names its turn, so the tally keys on it wherever it is sent. Only
   // session_id is required: the hook contract is unpublished and a stop that
@@ -511,13 +512,6 @@ function claudeOpensTurn(record) {
 
 function grokOpensTurn(record) {
   return record?.type === "user" && !record.synthetic_reason && Boolean(grokQueryText(record));
-}
-
-// Ghost's user-role messages open turns, agent echoes excluded. Custom
-// entries — hook context, nudges, imports — never do.
-function ghostOpensTurn(record) {
-  const message = record?.type === "message" ? record.message : null;
-  return message?.role === "user" && message.attribution !== "agent" && Boolean(lastGenuinePrompt(messageText(message)));
 }
 
 function codexOpensTurn(record) {
