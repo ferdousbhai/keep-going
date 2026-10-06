@@ -433,6 +433,9 @@ test("installer places and removes the OpenCode plugin", async () => {
   const { configHome, env, cleanup } = await installHome("opencode");
   try {
     const plugin = path.join(configHome, "opencode", "plugins", "keep-going.js");
+    // --all names the original four hosts; the others are asked for one by one.
+    assert.equal((await runInstaller(["--all", "--link"], env)).code, 0);
+    await assert.rejects(access(plugin), { code: "ENOENT" });
     assert.equal((await runInstaller(["--opencode"], env)).code, 0);
     assert.match(await readFile(plugin, "utf8"), /KeepGoing/);
     assert.match((await runInstaller(["--status"], env)).stdout, /opencode\s+registered/);

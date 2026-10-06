@@ -132,6 +132,9 @@ test("Cursor: records the prompt and reply from their hooks and reviews at stop"
     assert.doesNotMatch(second, /two files so far/);
 
     assert.deepEqual(await context.run("cursor", { ...stop, status: "aborted" }), {});
+    // A follow-up's stop with no reply (a tool-only answer) is let through, not nudged again.
+    assert.deepEqual(await say("beforeSubmitPrompt", "prompt", "Keep going."), {});
+    assert.deepEqual(await context.run("cursor", { ...stop, loop_count: 1 }), {});
   } finally {
     await context.cleanup();
   }

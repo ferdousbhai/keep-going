@@ -397,9 +397,11 @@ async function main() {
 
   const uninstall = args.includes("--uninstall");
   // --all includes grok even beside claude: its native file is what reviews on
-  // Grok, and the Claude-settings copy yields there.
+  // Grok, and the Claude-settings copy yields there. The hosts after those four
+  // are named one by one, so no one gets config for an agent they lack.
   const all = args.includes("--all");
-  const runtimes = [...Object.keys(TARGETS), "opencode"].filter((name) => all || args.includes(`--${name}`));
+  const ALL = ["claude", "muse", "ghost", "grok"];
+  const runtimes = [...Object.keys(TARGETS), "opencode"].filter((name) => (all && ALL.includes(name)) || args.includes(`--${name}`));
   if (runtimes.length === 0) {
     throw new Error(`Select ${new Intl.ListFormat("en", { type: "disjunction" }).format([...Object.keys(TARGETS), "opencode"].map((name) => `--${name}`).concat("--all"))}.\n\n${usage()}`);
   }

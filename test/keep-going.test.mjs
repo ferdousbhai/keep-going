@@ -11,7 +11,6 @@ import {
   NUDGES,
   quietDelayMs,
   REVIEW_PROMPT,
-  claudeContinuations,
   claudeNudges,
   codexNudges,
   recordedContinuations,
@@ -426,7 +425,7 @@ test("a missing reviewer executable fails open and clears the turn tally", async
 test("Claude counting starts at the last genuine prompt and counts only hook feedback", async () => {
   const context = await claudeFixture();
   try {
-    assert.equal(await claudeContinuations(context.input), 0);
+    assert.equal((await claudeNudges(context.input)).continuations, 0);
 
     const additions = [
       JSON.stringify({ type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback:\ncontinue" } }),
@@ -443,7 +442,7 @@ test("Claude counting starts at the last genuine prompt and counts only hook fee
     ];
     await appendRecords(context.input.transcript_path, additions);
 
-    assert.equal(await claudeContinuations(context.input), 1);
+    assert.equal((await claudeNudges(context.input)).continuations, 1);
     assert.equal(await resolveOwnerPrompt(context.input, "claude"), "Do one more thing.");
   } finally {
     await context.cleanup();
@@ -460,12 +459,12 @@ test("an interruption is not a new owner prompt", async () => {
     const owner = { type: "user", message: { role: "user", content: "Fix the thing." }, origin: { kind: "human" } };
     const feedback = { type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback: continue" } };
     await appendRecords(context.input.transcript_path, [owner, feedback, feedback].map((r) => JSON.stringify(r)));
-    assert.equal(await claudeContinuations(context.input), 2);
+    assert.equal((await claudeNudges(context.input)).continuations, 2);
 
     for (const content of ["[Request interrupted by user]", "  [Request interrupted by user for tool use]  "]) {
       await appendRecords(context.input.transcript_path, [JSON.stringify({ type: "user", message: { role: "user", content } })]);
     }
-    assert.equal(await claudeContinuations(context.input), 2);
+    assert.equal((await claudeNudges(context.input)).continuations, 2);
     assert.equal(await resolveOwnerPrompt(context.input, "claude"), "Fix the thing.");
 
     // Interrupting and then typing is the ordinary way to redirect a turn, and
@@ -476,7 +475,7 @@ test("an interruption is not a new owner prompt", async () => {
       origin: { kind: "human" },
       message: { role: "user", content: "[Request interrupted by user] do the other thing instead" },
     })]);
-    assert.equal(await claudeContinuations(context.input), 0);
+    assert.equal((await claudeNudges(context.input)).continuations, 0);
     assert.match(await resolveOwnerPrompt(context.input, "claude"), /do the other thing instead/);
   } finally {
     await context.cleanup();
@@ -520,7 +519,7 @@ test("running a command is not asking for anything", async () => {
     const owner = { type: "user", message: { role: "user", content: "Fix the thing." }, origin: { kind: "human" } };
     const feedback = { type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback: continue" } };
     await appendRecords(context.input.transcript_path, [owner, feedback].map((r) => JSON.stringify(r)));
-    assert.equal(await claudeContinuations(context.input), 1);
+    assert.equal((await claudeNudges(context.input)).continuations, 1);
 
     const noise = [
       "<bash-input>vscode</bash-input>",
@@ -537,7 +536,7 @@ test("running a command is not asking for anything", async () => {
     }));
     await appendRecords(context.input.transcript_path, noise);
 
-    assert.equal(await claudeContinuations(context.input), 1);
+    assert.equal((await claudeNudges(context.input)).continuations, 1);
     assert.equal(await resolveOwnerPrompt(context.input, "claude"), "Fix the thing.");
 
     // A slash command is the owner invoking something on purpose, so it still
@@ -547,7 +546,7 @@ test("running a command is not asking for anything", async () => {
       origin: { kind: "human" },
       message: { role: "user", content: "<command-message>simplify</command-message> <command-name>/simplify</command-name>" },
     })]);
-    assert.equal(await claudeContinuations(context.input), 0);
+    assert.equal((await claudeNudges(context.input)).continuations, 0);
     assert.match(await resolveOwnerPrompt(context.input, "claude"), /simplify/);
   } finally {
     await context.cleanup();
@@ -560,11 +559,11 @@ test("Claude ignores orphan feedback and resets the streaming count for a new ow
   const feedback = { type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback: continue" } };
   const owner = { type: "user", message: { role: "user", content: "New request" } };
   await writeFile(context.input.transcript_path, JSON.stringify(feedback));
-  assert.equal(await claudeContinuations(context.input), 0);
+  assert.equal((await claudeNudges(context.input)).continuations, 0);
   await appendRecords(context.input.transcript_path, [owner, feedback, feedback].map((record) => JSON.stringify(record)));
-  assert.equal(await claudeContinuations(context.input), 2);
+  assert.equal((await claudeNudges(context.input)).continuations, 2);
   await appendRecords(context.input.transcript_path, [JSON.stringify(owner), "incomplete JSON"]);
-  assert.equal(await claudeContinuations(context.input), 0);
+  assert.equal((await claudeNudges(context.input)).continuations, 0);
 });
 
 test("Claude classifies with no tools and the lowest advertised effort", async () => {

@@ -138,7 +138,7 @@ const RUNTIMES = {
       opens: grokOpensTurn,
     },
   },
-  // The next three send a stop that names neither the reply nor the request.
+  // Copilot, Antigravity and Cursor send a stop that names neither the reply nor the request.
   // `payload` reads both from what the host keeps (null: not a stop to review)
   // and `answer` speaks the host's own continue. Their reviewers are the host's
   // own CLI, whose stop hooks have no off switch, so KEEP_GOING_REVIEWING
@@ -163,6 +163,13 @@ const RUNTIMES = {
   // Cursor keeps a transcript in no documented shape, but hands its hooks the
   // prompt (beforeSubmitPrompt) and the reply (afterAgentResponse); the same
   // command records both and reviews at stop. Cursor caps its own follow-ups.
+  cursor: {
+    requires: ["session_id"],
+    state: xdgStateHome,
+    payload: cursorPayload,
+    answer: (output) => (output.decision === "block" ? { followup_message: output.reason } : {}),
+    run: runCursorModel,
+  },
   // OpenCode runs keep-going as an in-process plugin (src/opencode.mjs) that
   // sends the nudge itself; its reviewer is `opencode run --pure`, which loads
   // no plugins.
@@ -178,13 +185,6 @@ const RUNTIMES = {
     requires: ["session_id"],
     state: xdgStateHome,
     run: runOmpModel,
-  },
-  cursor: {
-    requires: ["session_id"],
-    state: xdgStateHome,
-    payload: cursorPayload,
-    answer: (output) => (output.decision === "block" ? { followup_message: output.reason } : {}),
-    run: runCursorModel,
   },
 };
 
@@ -452,10 +452,6 @@ async function claudeNudges(input) {
   return transcriptNudges(await allowedTranscriptPath(input, "claude"), claudeRecordKind);
 }
 
-async function claudeContinuations(input) {
-  return (await claudeNudges(input)).continuations;
-}
-
 // Codex records its nudge as a user message and every tool as a *_call item.
 function codexRecordKind(record) {
   const payload = record?.type === "response_item" ? record.payload : null;
@@ -645,6 +641,8 @@ async function cursorPayload(input) {
     session_id: conversation,
     owner_prompt: turn.prompt ?? "",
     last_assistant_message: turn.reply ?? "",
+    // Cursor counts the follow-ups this loop has sent.
+    stop_hook_active: input.loop_count > 0,
   };
 }
 
@@ -1082,8 +1080,8 @@ async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
   return envelope.text;
 }
 
-// The CLIs below have no switch for their own hooks, so the reviewer's stop
-// is marked instead (see handleStop).
+// Copilot, Antigravity and Cursor have no switch for their own hooks, so
+// their reviewer's stop is marked instead (see handleStop).
 const reviewerEnv = () => ({ ...process.env, KEEP_GOING_REVIEWING: "1" });
 
 async function runCopilotModel({ prompt, timeoutMs }) {
@@ -1111,7 +1109,7 @@ async function runOpencodeModel({ prompt, timeoutMs }) {
   return inTemporaryDirectory("opencode", async (directory) => {
     const opencode = process.env.KEEP_GOING_OPENCODE_BIN || "opencode";
     const args = ["run", "--pure", ...modelArgs("KEEP_GOING_OPENCODE_MODEL"), prompt];
-    return assertExitOk(await runProcess(opencode, args, "", timeoutMs, reviewerEnv(), directory), "opencode").stdout;
+    return assertExitOk(await runProcess(opencode, args, "", timeoutMs, process.env, directory), "opencode").stdout;
   });
 }
 
@@ -1119,7 +1117,7 @@ async function runOmpModel({ prompt, timeoutMs }) {
   return inTemporaryDirectory("omp", async (directory) => {
     const omp = process.env.KEEP_GOING_OMP_BIN || "omp";
     const args = ["-p", "--no-extensions", ...modelArgs("KEEP_GOING_OMP_MODEL"), prompt];
-    return assertExitOk(await runProcess(omp, args, "", timeoutMs, reviewerEnv(), directory), "omp").stdout;
+    return assertExitOk(await runProcess(omp, args, "", timeoutMs, process.env, directory), "omp").stdout;
   });
 }
 
@@ -1228,20 +1226,6 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
     return settleStop(input, runner, {}, { reason: "user followed up during quiet wait", countedBy: "quiet-wait" });
   }
   const lastAssistantMessage = compactText(stopCandidateText(input), 12_000);
-  if (!lastAssistantMessage) {
-    // Grok can fire Stop with no lastAssistantMessage. Accepting that stop
-    // disables the hook. Block once; if the next stop is still empty, let it end.
-    if (input.stop_hook_active || input.stopHookActive) {
-      return settleStop(input, runner, {}, { reason: "no last message on retry", countedBy: "empty" });
-    }
-    return settleStop(input, runner, { decision: "block", reason: EMPTY_STOP_NUDGE }, { countedBy: "empty" });
-  }
-
-  const ownerPrompt = await resolveOwnerPrompt(input, runner);
-  if (!ownerPrompt && VACUOUS_COMPLETIONS.has(lastAssistantMessage.trim().replace(/[.!]+$/, "").toLowerCase())) {
-    return settleStop(input, runner, {}, { reason: "nothing to review", countedBy: "stub" });
-  }
-
   // A subagent stop carries its parent's transcript, whose nudges are the
   // parent's, so it is read only for the agent that owns it.
   let nudges = null;
@@ -1265,6 +1249,22 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
     };
     return settleStop(input, runner, capped, { verdict: "CAP", reason: capped.systemMessage, countedBy });
   }
+  // After the cap, which bounds this nudge too on hosts that never say a stop
+  // answers one.
+  if (!lastAssistantMessage) {
+    // Grok can fire Stop with no lastAssistantMessage. Accepting that stop
+    // disables the hook. Block once; if the next stop is still empty, let it end.
+    if (input.stop_hook_active || input.stopHookActive) {
+      return settleStop(input, runner, {}, { reason: "no last message on retry", countedBy: "empty" });
+    }
+    return settleStop(input, runner, { decision: "block", reason: EMPTY_STOP_NUDGE }, { countedBy: "empty" });
+  }
+
+  const ownerPrompt = await resolveOwnerPrompt(input, runner);
+  if (!ownerPrompt && VACUOUS_COMPLETIONS.has(lastAssistantMessage.trim().replace(/[.!]+$/, "").toLowerCase())) {
+    return settleStop(input, runner, {}, { reason: "nothing to review", countedBy: "stub" });
+  }
+
   if (nudges?.held) {
     return settleStop(input, runner, {}, { verdict: "HELD", reason: "stopped again after a nudge without running a tool", countedBy });
   }
@@ -1331,7 +1331,6 @@ export {
   NUDGES,
   REVIEW_PROMPT,
   quietDelayMs,
-  claudeContinuations,
   claudeNudges,
   codexNudges,
   recordedContinuations,

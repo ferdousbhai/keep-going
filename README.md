@@ -98,9 +98,11 @@ How each newer host continues:
   that idle, so only a session that stays open continues.
 - **Oh My Pi** blocks on its `session_stop` hook.
 
-These reviewers are the host's own CLI, whose hooks cannot be switched off for
-one run; `KEEP_GOING_REVIEWING` marks the reviewer's process so its stop is not
-reviewed in turn.
+Cursor's, Copilot's and Antigravity's reviewers are the host's own CLI, whose
+hooks cannot be switched off for one run; `KEEP_GOING_REVIEWING` marks the
+reviewer's process so its stop is not reviewed in turn. OpenCode's reviewer
+runs with `--pure` and Oh My Pi's with `--no-extensions`, so neither loads
+keep-going.
 
 Not supported: Crush (its only hook runs before a tool call), Ori's own agent
 (`ori code`, no documented turn-end hook; `ori claude`, `ori codex`, and the
