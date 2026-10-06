@@ -166,7 +166,8 @@ build and unit tests without Pi.
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
 Reviewers run without tools — Muse, which has no such switch, without web
-tools in a scratch directory; OpenCode and Oh My Pi with their own tools in a
+tools in a scratch directory; Cursor in ask mode and Antigravity in plan mode,
+read-only in a scratch directory; OpenCode and Oh My Pi with their own tools in a
 scratch directory, since OpenCode's free tier refuses a reduced tool set and
 Oh My Pi's switch is unconfirmed — and with as little thinking as the host
 allows: `low` on Codex, Claude, and Grok; Pi at off where the model's catalog
