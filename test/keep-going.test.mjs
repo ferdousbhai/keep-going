@@ -984,6 +984,22 @@ test("a harness running a ghost's turn yields to Ghost's own stop hook", async (
   }
 });
 
+test("a Muse hook, which gets no environment, knows a ghost's turn by its conversation directory", async () => {
+  const context = await museFixture();
+  const conversation = await mkdtemp(path.join(tmpdir(), "ghost-conversation-"));
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    await writeFile(path.join(conversation, ".conversation.jsonl"), "");
+    assert.deepEqual(await handleStop({ ...context.input, cwd: conversation }, "muse"), {});
+    assert.deepEqual(await context.calls(), []);
+    // The same stop outside a ghost conversation is reviewed.
+    assert.notDeepEqual(await handleStop({ ...context.input, cwd: tmpdir() }, "muse"), {});
+  } finally {
+    await rm(conversation, { recursive: true, force: true });
+    await context.cleanup();
+  }
+});
+
 test("a native Grok hook makes the Claude-settings copy yield", async () => {
   const context = await grokFixture();
   try {

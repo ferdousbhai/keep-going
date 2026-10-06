@@ -979,10 +979,20 @@ async function recordedContinuations(input, runner) {
   return tally[turnKey(input)]?.count ?? 0;
 }
 
+/**
+ * Ghost reviews its own turns through its session_stop hook, so a harness
+ * running one stands down. GHOST is set in that turn's environment; Muse
+ * passes a hook no environment, but the turn runs in its Ghost conversation's
+ * directory, which holds the conversation log.
+ */
+async function inGhostTurn(input) {
+  if (process.env.GHOST) return true;
+  if (typeof input.cwd !== "string" || !input.cwd) return false;
+  return stat(path.join(input.cwd, ".conversation.jsonl")).then(() => true, () => false);
+}
+
 async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
-  // Ghost reviews its own turns through its session_stop hook; a harness it
-  // runs for a turn (GHOST is set in that turn's environment) stops when it stops.
-  if (runner !== "ghost" && process.env.GHOST) return {};
+  if (runner !== "ghost" && await inGhostTurn(input)) return {};
   if (await yieldsToGrokNative(runner)) return {};
   // GROK_HOOK_EVENT is set only by Grok's hook runner, never by Claude Code.
   if (process.env.GROK_HOOK_EVENT) runner = "grok";
