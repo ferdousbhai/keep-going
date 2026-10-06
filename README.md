@@ -76,7 +76,8 @@ npx --yes github:ferdousbhai/keep-going --muse   # --ghost, --grok, --claude, --
 ```
 
 One route per host: a plugin and an `npx` hook together review every stop
-twice. `--all` writes a native file for Claude Code, Muse, Ghost, and Grok. Grok also
+twice. Inside a Ghost turn (`GHOST` set in the environment) the harness's own
+copy stands down: Ghost reviews the turn once through its `session_stop` hook. `--all` writes a native file for Claude Code, Muse, Ghost, and Grok. Grok also
 scans `~/.claude/settings.json`, so `--claude` alone covers it; with both
 installed, keep-going ignores the Claude copy on Grok and the reviewer runs
 once.

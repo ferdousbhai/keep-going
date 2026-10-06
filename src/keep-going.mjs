@@ -980,6 +980,9 @@ async function recordedContinuations(input, runner) {
 }
 
 async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
+  // Ghost reviews its own turns through its session_stop hook; a harness it
+  // runs for a turn (GHOST is set in that turn's environment) stops when it stops.
+  if (runner !== "ghost" && process.env.GHOST) return {};
   if (await yieldsToGrokNative(runner)) return {};
   // GROK_HOOK_EVENT is set only by Grok's hook runner, never by Claude Code.
   if (process.env.GROK_HOOK_EVENT) runner = "grok";

@@ -969,6 +969,21 @@ test("Grok-dispatched Claude settings are reviewed by grok, not claude", async (
   }
 });
 
+test("a harness running a ghost's turn yields to Ghost's own stop hook", async () => {
+  const context = await grokFixture();
+  try {
+    process.env.GHOST = "dous";
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    for (const runner of ["codex", "claude", "grok", "muse", "pi"]) {
+      assert.deepEqual(await handleStop(context.input, runner), {});
+    }
+    assert.deepEqual(await context.calls(), []);
+  } finally {
+    delete process.env.GHOST;
+    await context.cleanup();
+  }
+});
+
 test("a native Grok hook makes the Claude-settings copy yield", async () => {
   const context = await grokFixture();
   try {
