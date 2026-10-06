@@ -138,6 +138,54 @@ const RUNTIMES = {
       opens: grokOpensTurn,
     },
   },
+  // The next three send a stop that names neither the reply nor the request.
+  // `payload` reads both from what the host keeps (null: not a stop to review)
+  // and `answer` speaks the host's own continue. Their reviewers are the host's
+  // own CLI, whose stop hooks have no off switch, so KEEP_GOING_REVIEWING
+  // keeps a reviewer's stop from being reviewed in turn.
+  copilot: {
+    requires: ["session_id"],
+    state: xdgStateHome,
+    roots: () => [path.join(process.env.COPILOT_HOME || path.join(homedir(), ".copilot"), "session-state")],
+    payload: copilotPayload,
+    run: runCopilotModel,
+  },
+  // Antigravity sends its nudge in as a system message, so the last owner
+  // prompt in its transcript stays the turn's request across continuations.
+  agy: {
+    requires: ["session_id"],
+    state: xdgStateHome,
+    roots: () => [path.join(homedir(), ".gemini", "antigravity-cli", "brain")],
+    payload: agyPayload,
+    answer: (output) => (output.decision === "block" ? { decision: "continue", reason: output.reason } : {}),
+    run: runAgyModel,
+  },
+  // Cursor keeps a transcript in no documented shape, but hands its hooks the
+  // prompt (beforeSubmitPrompt) and the reply (afterAgentResponse); the same
+  // command records both and reviews at stop. Cursor caps its own follow-ups.
+  // OpenCode runs keep-going as an in-process plugin (src/opencode.mjs) that
+  // sends the nudge itself; its reviewer is `opencode run --pure`, which loads
+  // no plugins.
+  opencode: {
+    requires: ["session_id"],
+    state: xdgStateHome,
+    run: runOpencodeModel,
+  },
+  // Oh My Pi loads src/omp.mjs (package.json `omp.extensions`, which it
+  // prefers over Pi's) on its session_stop hook; its reviewer runs with no
+  // extensions, so keep-going does not review the review.
+  omp: {
+    requires: ["session_id"],
+    state: xdgStateHome,
+    run: runOmpModel,
+  },
+  cursor: {
+    requires: ["session_id"],
+    state: xdgStateHome,
+    payload: cursorPayload,
+    answer: (output) => (output.decision === "block" ? { followup_message: output.reason } : {}),
+    run: runCursorModel,
+  },
 };
 
 // The reviewer only decides whether the turn is over; what the agent hears is
@@ -146,6 +194,9 @@ const RUNTIMES = {
 // against the agent's evidence, or claiming consent the owner never gave.
 // Rotated rather than fixed: a hundred continuations carrying one identical
 // sentence read to the agent like a stuck loop instead of a push.
+const EMPTY_STOP_NUDGE =
+  "The stop hook did not see your last message. If work remains, continue it; if you are done, say so in one sentence.";
+
 const NUDGES = [
   "Keep going.",
   "You've got this \u2014 keep going.",
@@ -491,6 +542,97 @@ async function grokOwnerPrompt(input) {
   }
 }
 
+// A nudge comes back to some hosts as the next user message; it is never the
+// owner's request.
+const isNudge = (text) => NUDGES.includes(text) || text === EMPTY_STOP_NUDGE;
+
+async function copilotPayload(input) {
+  if (input.stopReason !== undefined && input.stopReason !== "end_turn") return null;
+  const stop = {
+    ...input,
+    session_id: input.sessionId ?? input.session_id,
+    transcript_path: input.transcriptPath ?? input.transcript_path,
+  };
+  if (typeof stop.transcript_path !== "string") return stop;
+  const file = await allowedTranscriptPath(stop, "copilot");
+  // Copilot fires agentStop before its last lines reach events.jsonl, so the
+  // reply to the latest message is waited for, briefly.
+  for (let attempt = 0; ; attempt += 1) {
+    let request = "";
+    let reply = "";
+    for await (const record of jsonLines(file)) {
+      const content = typeof record?.data?.content === "string" ? record.data.content.trim() : "";
+      if (record?.type === "user.message" && content) {
+        if (!isNudge(content)) request = content;
+        reply = "";
+      } else if (record?.type === "assistant.message" && content) {
+        reply = content;
+      }
+    }
+    if (reply || attempt >= COPILOT_FLUSH_POLLS) return { ...stop, owner_prompt: request, last_assistant_message: reply };
+    await sleep(COPILOT_FLUSH_POLL_MS);
+  }
+}
+
+const COPILOT_FLUSH_POLLS = 30;
+const COPILOT_FLUSH_POLL_MS = 100;
+
+function agyRequest(content) {
+  return content.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/)?.[1] ?? content.trim();
+}
+
+async function agyPayload(input) {
+  // Only the model choosing to stop is a stop; an error or the step limit is not.
+  if (String(input.terminationReason ?? "").toLowerCase() !== "model_stop") return null;
+  const stop = {
+    ...input,
+    session_id: input.conversationId,
+    transcript_path: input.transcriptPath,
+    cwd: Array.isArray(input.workspacePaths) ? input.workspacePaths[0] : undefined,
+  };
+  if (typeof stop.transcript_path !== "string") return stop;
+  let request = "";
+  let reply = "";
+  for await (const record of jsonLines(await allowedTranscriptPath(stop, "agy"))) {
+    const content = typeof record?.content === "string" ? record.content.trim() : "";
+    if (!content) continue;
+    if (record.type === "USER_INPUT" && record.source === "USER_EXPLICIT") {
+      request = agyRequest(content);
+      reply = "";
+    } else if (record.type === "PLANNER_RESPONSE") {
+      reply = content;
+    }
+  }
+  return { ...stop, owner_prompt: request, last_assistant_message: reply };
+}
+
+const cursorRecord = (conversation) =>
+  path.join(xdgStateHome(), "keep-going", "cursor", `${createHash("sha256").update(conversation).digest("hex").slice(0, 32)}.json`);
+
+async function cursorPayload(input) {
+  const conversation = typeof input.conversation_id === "string" ? input.conversation_id : "";
+  if (!conversation) return null;
+  const file = cursorRecord(conversation);
+  const saved = await readFile(file, "utf8").then(JSON.parse, () => ({}));
+  const event = input.hook_event_name;
+  if (event === "beforeSubmitPrompt" || event === "afterAgentResponse") {
+    const text = String((event === "beforeSubmitPrompt" ? input.prompt : input.text) ?? "").trim();
+    const next = event === "afterAgentResponse"
+      ? { ...saved, reply: text }
+      : isNudge(text) ? saved : { prompt: text, reply: "" };
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, JSON.stringify(next), { encoding: "utf8", mode: 0o600 });
+    return null;
+  }
+  if (input.status !== undefined && input.status !== "completed") return null;
+  return {
+    ...input,
+    session_id: conversation,
+    owner_prompt: saved.prompt ?? "",
+    last_assistant_message: saved.reply ?? "",
+  };
+}
+
 async function resolveOwnerPrompt(input, runner) {
   const fromPayload = typeof input.owner_prompt === "string" ? input.owner_prompt.trim() : "";
   if (fromPayload) return fromPayload;
@@ -672,7 +814,11 @@ function runProcess(command, args, input, timeoutMs, env = process.env, cwd) {
     }, timeoutMs);
 
     child.on("error", fail);
-    child.stdin.on("error", fail);
+    // A reviewer given its prompt as an argument may exit without reading
+    // stdin; its exit status, not the closed pipe, says how it went.
+    child.stdin.on("error", (error) => {
+      if (error.code !== "EPIPE") fail(error);
+    });
     const [out, err] = [child.stdout, child.stderr].map((stream) => {
       const collector = streamCollector(MODEL_OUTPUT_LIMIT, "child process output exceeded 2 MB");
       stream.setEncoding("utf8");
@@ -921,6 +1067,56 @@ async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
   return envelope.text;
 }
 
+// The CLIs below have no switch for their own hooks, so the reviewer's stop
+// is marked instead (see handleStop).
+const reviewerEnv = () => ({ ...process.env, KEEP_GOING_REVIEWING: "1" });
+
+async function runCopilotModel({ prompt, timeoutMs }) {
+  return inTemporaryDirectory("copilot", async (directory) => {
+    const copilot = process.env.KEEP_GOING_COPILOT_BIN || "copilot";
+    const args = [
+      "-p", prompt, "--silent", "--stream", "off", "--available-tools", "",
+      "--no-custom-instructions", "--disable-builtin-mcps", "--no-ask-user", "--no-auto-update",
+      ...modelArgs("KEEP_GOING_COPILOT_MODEL"),
+    ];
+    return assertExitOk(await runProcess(copilot, args, "", timeoutMs, reviewerEnv(), directory), "copilot").stdout;
+  });
+}
+
+async function runAgyModel({ prompt, timeoutMs }) {
+  return inTemporaryDirectory("agy", async (directory) => {
+    const agy = process.env.KEEP_GOING_AGY_BIN || "agy";
+    // Plan mode and no auto-approval: a reviewer that tried a tool would be refused.
+    const args = ["-p", prompt, "--output-format", "text", "--mode", "plan", "--disable-slash-commands", ...modelArgs("KEEP_GOING_AGY_MODEL")];
+    return assertExitOk(await runProcess(agy, args, "", timeoutMs, reviewerEnv(), directory), "agy").stdout;
+  });
+}
+
+async function runOpencodeModel({ prompt, timeoutMs }) {
+  return inTemporaryDirectory("opencode", async (directory) => {
+    const opencode = process.env.KEEP_GOING_OPENCODE_BIN || "opencode";
+    const args = ["run", "--pure", ...modelArgs("KEEP_GOING_OPENCODE_MODEL"), prompt];
+    return assertExitOk(await runProcess(opencode, args, "", timeoutMs, reviewerEnv(), directory), "opencode").stdout;
+  });
+}
+
+async function runOmpModel({ prompt, timeoutMs }) {
+  return inTemporaryDirectory("omp", async (directory) => {
+    const omp = process.env.KEEP_GOING_OMP_BIN || "omp";
+    const args = ["-p", "--no-extensions", ...modelArgs("KEEP_GOING_OMP_MODEL"), prompt];
+    return assertExitOk(await runProcess(omp, args, "", timeoutMs, reviewerEnv(), directory), "omp").stdout;
+  });
+}
+
+async function runCursorModel({ prompt, timeoutMs }) {
+  return inTemporaryDirectory("cursor", async (directory) => {
+    const cursor = process.env.KEEP_GOING_CURSOR_BIN || "cursor-agent";
+    // Ask mode answers without editing anything.
+    const args = ["-p", "--mode", "ask", "--output-format", "text", "--trust", ...modelArgs("KEEP_GOING_CURSOR_MODEL"), prompt];
+    return assertExitOk(await runProcess(cursor, args, "", timeoutMs, reviewerEnv(), directory), "cursor-agent").stdout;
+  });
+}
+
 // The verdict is the first CONTINUE or STOP standing as a word of its own,
 // wherever the reviewer put it: small reviewers write a sentence first, glue
 // the verdict onto it ("...finished.STOP"), or answer twice
@@ -992,7 +1188,17 @@ async function inGhostTurn(input) {
 }
 
 async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
+  // A reviewer's own stop (see reviewerEnv) is not a turn to review.
+  if (process.env.KEEP_GOING_REVIEWING) return {};
   if (runner !== "ghost" && await inGhostTurn(input)) return {};
+  // Cursor also dispatches Claude's settings hooks, with its own payload and
+  // none of the events its review needs; only a native Cursor hook reviews it.
+  if (runner === "claude" && input.cursor_version) return {};
+  if (RUNTIMES[runner]?.payload) {
+    const stop = await RUNTIMES[runner].payload(input);
+    if (!stop) return {};
+    input = stop;
+  }
   if (await yieldsToGrokNative(runner)) return {};
   // GROK_HOOK_EVENT is set only by Grok's hook runner, never by Claude Code.
   if (process.env.GROK_HOOK_EVENT) runner = "grok";
@@ -1013,10 +1219,7 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
     if (input.stop_hook_active || input.stopHookActive) {
       return settleStop(input, runner, {}, { reason: "no last message on retry", countedBy: "empty" });
     }
-    return settleStop(input, runner, {
-      decision: "block",
-      reason: "The stop hook did not see your last message. If work remains, continue it; if you are done, say so in one sentence.",
-    }, { countedBy: "empty" });
+    return settleStop(input, runner, { decision: "block", reason: EMPTY_STOP_NUDGE }, { countedBy: "empty" });
   }
 
   const ownerPrompt = await resolveOwnerPrompt(input, runner);
@@ -1092,7 +1295,8 @@ async function main() {
     const runner = process.argv[2] || "codex";
     const input = await readStdin();
     const output = await handleStop(input, runner);
-    process.stdout.write(`${JSON.stringify(output)}\n`);
+    const answer = RUNTIMES[runner]?.answer;
+    process.stdout.write(`${JSON.stringify(answer ? answer(output) : output)}\n`);
   } catch (error) {
     process.stdout.write(
       `${JSON.stringify({ systemMessage: `keep-going failed open: ${compactText(error.message, 500)}` })}\n`,

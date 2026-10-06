@@ -22,6 +22,11 @@
       "./extensions/keep-going.js"
     ]
   },
+  "omp": {
+    "extensions": [
+      "./extensions/omp.js"
+    ]
+  },
   "files": [
     "extensions",
     "plugins/keep-going",

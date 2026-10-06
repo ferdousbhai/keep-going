@@ -11,10 +11,17 @@ export const HOSTS = {
   muse: { events: ["Stop", "SubagentStop"] },
   ghost: { events: ["session_stop"] },
   grok: { events: ["Stop"] },
+  // Cursor hands the prompt and the reply to hooks of their own; the stop
+  // payload carries neither, so all three are registered.
+  cursor: { events: ["beforeSubmitPrompt", "afterAgentResponse", "stop"] },
+  copilot: { events: ["agentStop"] },
+  agy: { events: ["Stop"] },
+  // A plugin rather than a hook: it watches the session go idle.
+  opencode: { events: ["session.idle"] },
 };
 
 // The hook waits on a reviewer model call, so it has to outlast one.
-const HOOK_TIMEOUT = 240;
+export const HOOK_TIMEOUT = 240;
 const STATUS_MESSAGE = "Deciding whether to keep going";
 
 // The shape itself, not just the constants in it: the build writes the

@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 
 import {
+  access,
   chmod,
   copyFile,
   mkdir,
   readFile,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 
-import { HOSTS, hookEntry } from "./hosts.mjs";
+import { HOOK_TIMEOUT, HOSTS, hookEntry } from "./hosts.mjs";
 
 const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..");
 const BUNDLED_HOOK = path.join(
@@ -22,20 +24,28 @@ const BUNDLED_HOOK = path.join(
   "scripts",
   "keep-going.mjs",
 );
+const OPENCODE_PLUGIN = path.join(PACKAGE_ROOT, "extensions", "opencode.js");
+// OpenCode loads every module in its plugins directory; keep-going is one file there.
+const opencodePluginFile = ({ configHome }) => path.join(configHome, "opencode", "plugins", "keep-going.js");
 
 function usage() {
-  return `Install Keep Going for Claude Code, Muse Code, Ghost, and Grok Build.
+  return `Install Keep Going for Claude Code, Muse Code, Ghost, Grok Build,
+Cursor CLI, GitHub Copilot CLI, Antigravity, and OpenCode.
 
 Usage:
   keep-going --claude
   keep-going --muse
   keep-going --ghost
   keep-going --grok
+  keep-going --cursor
+  keep-going --copilot
+  keep-going --agy
+  keep-going --opencode
   keep-going --all
   keep-going --claude --link
   keep-going --all --audit-log ~/.local/state/keep-going/audit.jsonl
   keep-going --status
-  keep-going --uninstall --claude|--muse|--ghost|--grok|--all
+  keep-going --uninstall --claude|--muse|--ghost|--grok|--cursor|--copilot|--agy|--opencode|--all
 
 --link registers this checkout's hook instead of copying it, so edits to the
 working tree take effect with no reinstall. Switching between --link and a
@@ -65,7 +75,63 @@ const TARGETS = {
   // yields on Grok when this file is present, so the reviewer runs once.
   grok: ({ userHome }) =>
     path.join(process.env.GROK_HOME || path.join(userHome, ".grok"), "hooks", "keep-going.json"),
+  cursor: ({ userHome }) => path.join(userHome, ".cursor", "hooks.json"),
+  copilot: ({ userHome }) =>
+    path.join(process.env.COPILOT_HOME || path.join(userHome, ".copilot"), "hooks", "keep-going.json"),
+  agy: ({ userHome }) => path.join(userHome, ".gemini", "config", "hooks.json"),
 };
+
+// Hosts whose events list hook objects directly rather than groups of them,
+// each with its own spelling of the entry. Antigravity keys a file's hooks by
+// name, so ours live under "keep-going" beside anyone else's.
+const FLAT_HOSTS = {
+  cursor: {
+    hooks: (config) => config.hooks,
+    with: (config, hooks) => ({ version: 1, ...config, hooks }),
+    entry: (command) => ({ command }),
+  },
+  copilot: {
+    hooks: (config) => config.hooks,
+    with: (config, hooks) => ({ version: 1, ...config, hooks }),
+    entry: (command) => ({ type: "command", bash: command, timeoutSec: HOOK_TIMEOUT }),
+  },
+  agy: {
+    hooks: (config) => config["keep-going"],
+    with: (config, hooks) => ({ ...config, "keep-going": hooks }),
+    entry: (command) => ({ type: "command", command, timeout: HOOK_TIMEOUT }),
+  },
+};
+
+const hookCommand = (hook) => (typeof hook?.command === "string" ? hook.command : typeof hook?.bash === "string" ? hook.bash : "");
+
+function flatSource(runner) {
+  const read = async (paths) => {
+    const file = TARGETS[runner](paths);
+    const config = await readJson(file, null);
+    const hooks = config === null ? null : FLAT_HOSTS[runner].hooks(config);
+    if (!isJsonObject(hooks)) return [];
+    return HOSTS[runner].events.flatMap((event) =>
+      (Array.isArray(hooks[event]) ? hooks[event] : []).map(hookCommand).filter(Boolean).map((command) => {
+        const ours = ourRunner(command);
+        return { event, where: file, command, ours: ours !== null, runner: ours };
+      }));
+  };
+  read.host = runner;
+  read.where = TARGETS[runner];
+  return read;
+}
+
+function updateFlatConfig(config, runner, command, uninstall) {
+  const shape = FLAT_HOSTS[runner];
+  const current = shape.hooks(config);
+  const hooks = isJsonObject(current) ? { ...current } : {};
+  for (const event of HOSTS[runner].events) {
+    const kept = (Array.isArray(hooks[event]) ? hooks[event] : []).filter((hook) => ourRunner(hookCommand(hook)) === null);
+    if (!uninstall) kept.push(shape.entry(command));
+    hooks[event] = kept;
+  }
+  return shape.with(config, hooks);
+}
 
 // One test for "this registration is ours", shared by the report and by the
 // installer that has to strip it: any command naming keep-going.mjs, not just
@@ -160,7 +226,20 @@ const SOURCES = {
   ghost: [settingsSource("ghost")],
   grok: [settingsSource("grok"), settingsSource("claude")],
   codex: [codexSource],
+  cursor: [flatSource("cursor")],
+  copilot: [flatSource("copilot")],
+  agy: [flatSource("agy")],
+  opencode: [opencodeSource],
 };
+
+// OpenCode's registration is the plugin file itself; it reviews every idle.
+async function opencodeSource(paths) {
+  const file = opencodePluginFile(paths);
+  const present = await access(file).then(() => true, () => false);
+  return present ? [{ event: "session.idle", where: file, command: file, ours: true, runner: "opencode" }] : [];
+}
+opencodeSource.host = "opencode";
+opencodeSource.where = opencodePluginFile;
 
 // A host reached through another host's file usually runs that file's runtime,
 // so the runner is worth naming when it is not the host. Grok is the exception:
@@ -213,8 +292,9 @@ async function reportStatus(paths) {
   }
 
   const width = Math.max(...rows.map((row) => row[1].length));
+  const hostWidth = Math.max(...rows.map((row) => row[0].length)) + 1;
   return [
-    ...rows.map(([host, state, where]) => `  ${host.padEnd(7)}${state.padEnd(width + 2)}${where}`),
+    ...rows.map(([host, state, where]) => `  ${host.padEnd(hostWidth)}${state.padEnd(width + 2)}${where}`),
     ...warnings.map((warning) => `  ! ${warning}`),
   ].join("\n");
 }
@@ -319,9 +399,9 @@ async function main() {
   // --all includes grok even beside claude: its native file is what reviews on
   // Grok, and the Claude-settings copy yields there.
   const all = args.includes("--all");
-  const runtimes = Object.keys(TARGETS).filter((name) => all || args.includes(`--${name}`));
+  const runtimes = [...Object.keys(TARGETS), "opencode"].filter((name) => all || args.includes(`--${name}`));
   if (runtimes.length === 0) {
-    throw new Error(`Select ${new Intl.ListFormat("en", { type: "disjunction" }).format([...Object.keys(TARGETS).map((name) => `--${name}`), "--all"])}.\n\n${usage()}`);
+    throw new Error(`Select ${new Intl.ListFormat("en", { type: "disjunction" }).format([...Object.keys(TARGETS), "opencode"].map((name) => `--${name}`).concat("--all"))}.\n\n${usage()}`);
   }
 
   // A checkout registered with --link runs whatever it currently holds, which
@@ -350,15 +430,29 @@ async function main() {
   }
 
   for (const runner of runtimes) {
+    if (runner === "opencode") {
+      const file = opencodePluginFile({ configHome });
+      await rm(file, { force: true });
+      if (!uninstall) {
+        await mkdir(path.dirname(file), { recursive: true });
+        // --link points OpenCode at this checkout's bundle, as it does the hook.
+        await (link ? symlink(OPENCODE_PLUGIN, file) : copyFile(OPENCODE_PLUGIN, file));
+      }
+      process.stdout.write(`${uninstall ? "Removed" : "Installed"} opencode plugin at ${file}\n`);
+      continue;
+    }
     const settingsFile = TARGETS[runner]({ userHome, configHome });
     const config = await readJson(settingsFile, uninstall ? null : {});
     if (config === null) {
       process.stdout.write(`Removed ${runner} hook in ${settingsFile}\n`);
       continue;
     }
+    const command = `${auditPrefix}${shellQuote(process.execPath)} ${shellQuote(hookFile)} ${runner}`;
     await writeJsonAtomic(
       settingsFile,
-      updateHookConfig(config, HOSTS[runner].events, `${auditPrefix}${shellQuote(process.execPath)} ${shellQuote(hookFile)} ${runner}`, runner, uninstall),
+      FLAT_HOSTS[runner]
+        ? updateFlatConfig(config, runner, command, uninstall)
+        : updateHookConfig(config, HOSTS[runner].events, command, runner, uninstall),
     );
     process.stdout.write(`${uninstall ? "Removed" : "Installed"} ${runner} hook in ${settingsFile}\n`);
   }

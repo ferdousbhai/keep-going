@@ -1,7 +1,8 @@
 # keep going
 
-A Stop hook for Codex, Claude Code, Muse Code, Ghost, and Grok, and a native Pi
-extension, that tells the agent to keep going when work remains.
+A Stop hook for Codex, Claude Code, Muse Code, Ghost, Grok, Cursor CLI, GitHub
+Copilot CLI, and Antigravity, and a native plugin for Pi, Oh My Pi, and
+OpenCode, that tells the agent to keep going when work remains.
 
 Jarred Sumner's input, through a day and a half of Claude subagents chasing the
 Riemann hypothesis, was mostly variants of "keep going" and "believe in
@@ -56,8 +57,8 @@ and Pi.
 ## Install
 
 CLI hooks need Node.js 22+ and the host CLI (`codex`, `claude`, `muse`,
-`ghostd` with `hook-smol-complete`, or `grok`). The Pi extension needs Pi
-0.84.2+.
+`ghostd` with `hook-smol-complete`, `grok`, `cursor-agent`, `copilot`, `agy`,
+or `opencode`). The Pi extension needs Pi 0.84.2+.
 
 ```bash
 # Pi — then /reload or start a new session
@@ -71,9 +72,39 @@ codex plugin add keep-going@keep-going
 claude plugin marketplace add ferdousbhai/keep-going
 claude plugin install keep-going@keep-going
 
-# Muse Code, Ghost, Grok Build, or Claude Code without the plugin
-npx --yes github:ferdousbhai/keep-going --muse   # --ghost, --grok, --claude, --all
+# Oh My Pi — loads this package's omp extension, not Pi's
+omp plugin install github:ferdousbhai/keep-going
+
+# Muse Code, Ghost, Grok Build, Cursor CLI, Copilot CLI, Antigravity, OpenCode,
+# or Claude Code without the plugin
+npx --yes github:ferdousbhai/keep-going --muse   # --ghost, --grok, --cursor, --copilot, --agy, --opencode, --claude, --all
 ```
+
+How each newer host continues:
+
+- **Cursor CLI** sends neither the reply nor the request at stop, so the hook
+  also runs on `beforeSubmitPrompt` and `afterAgentResponse` to note them, and
+  answers a stop with `followup_message`. Cursor also runs Claude's settings
+  hooks; that copy stands down there. Cursor caps follow-ups at 5 a loop.
+- **Copilot CLI** reads the turn from its `events.jsonl` and blocks with a
+  reason, which Copilot sends as the next prompt; Copilot ends a turn after 8
+  blocks in a row.
+- **Antigravity** reads the turn from its transcript and answers
+  `{"decision":"continue"}`; the nudge arrives as a system message.
+- **OpenCode** has no stop hook: the plugin
+  (`~/.config/opencode/plugins/keep-going.js`) reviews when a session goes idle
+  and sends the nudge as the next message. A one-shot `opencode run` exits at
+  that idle, so only a session that stays open continues.
+- **Oh My Pi** blocks on its `session_stop` hook.
+
+These reviewers are the host's own CLI, whose hooks cannot be switched off for
+one run; `KEEP_GOING_REVIEWING` marks the reviewer's process so its stop is not
+reviewed in turn.
+
+Not supported: Crush (its only hook runs before a tool call), Ori's own agent
+(`ori code`, no documented turn-end hook; `ori claude`, `ori codex`, and the
+other launchers run the real CLI and its hook), and Hermes and OpenClaw, which
+can only queue a follow-up message or revise a turn a few times.
 
 One route per host: a plugin and an `npx` hook together review every stop
 twice. Inside a Ghost turn the harness's own copy stands down: Ghost reviews the
@@ -123,9 +154,10 @@ build and unit tests without Pi.
 | Variable | Default |
 | --- | --- |
 | `KEEP_GOING_{CODEX,CLAUDE,MUSE,GHOST,GROK}_BIN` | `codex`, `claude`, `muse`, `ghostd`, `grok` |
+| `KEEP_GOING_{CURSOR,COPILOT,AGY,OPENCODE,OMP}_BIN` | `cursor-agent`, `copilot`, `agy`, `opencode`, `omp` |
 | `KEEP_GOING_CODEX_MODEL` | `gpt-5.6-luna` |
 | `KEEP_GOING_CLAUDE_MODEL` | `sonnet`; the latest Sonnet |
-| `KEEP_GOING_{MUSE,GROK}_MODEL` | unset; the reviewer CLI picks its default |
+| `KEEP_GOING_{MUSE,GROK,CURSOR,COPILOT,AGY,OPENCODE,OMP}_MODEL` | unset; the reviewer CLI picks its default |
 | `KEEP_GOING_PI_MODEL` | unset; Pi's active model |
 | `KEEP_GOING_QUIET_MS` | `15000`; the wait before a fresh stop is reviewed; `0` reviews at once |
 | `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's raw text and how the stop was decided |

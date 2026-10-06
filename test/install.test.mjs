@@ -388,7 +388,59 @@ test("Codex status scopes feature flags to their table, including a final table"
 test("installer requires an explicit target", async () => {
   const result = await runInstaller([], {});
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /Select --claude, --muse, --ghost, --grok, or --all/);
+  assert.match(result.stderr, /Select --claude, --muse, --ghost, --grok, --cursor, --copilot, --agy, --opencode, or --all/);
+});
+
+test("installer writes Cursor, Copilot, and Antigravity hooks in their own shapes, beside others' hooks", async () => {
+  const { home, env, cleanup } = await installHome("flat");
+  try {
+    const agyFile = path.join(home, ".gemini", "config", "hooks.json");
+    await mkdir(path.dirname(agyFile), { recursive: true });
+    await writeFile(agyFile, JSON.stringify({ herdr: { PreInvocation: [{ type: "command", command: "herdr session", timeout: 10 }] } }));
+
+    const installed = await runInstaller(["--cursor", "--copilot", "--agy", "--link"], env);
+    assert.equal(installed.code, 0, installed.stderr);
+    const cursor = JSON.parse(await readFile(path.join(home, ".cursor", "hooks.json"), "utf8"));
+    assert.equal(cursor.version, 1);
+    for (const event of ["beforeSubmitPrompt", "afterAgentResponse", "stop"]) {
+      assert.equal(cursor.hooks[event].length, 1);
+      assert.match(cursor.hooks[event][0].command, /keep-going\.mjs' cursor$/);
+    }
+    const copilot = JSON.parse(await readFile(path.join(home, ".copilot", "hooks", "keep-going.json"), "utf8"));
+    assert.equal(copilot.hooks.agentStop[0].type, "command");
+    assert.match(copilot.hooks.agentStop[0].bash, /keep-going\.mjs' copilot$/);
+    const agy = JSON.parse(await readFile(agyFile, "utf8"));
+    assert.equal(agy.herdr.PreInvocation[0].command, "herdr session");
+    assert.match(agy["keep-going"].Stop[0].command, /keep-going\.mjs' agy$/);
+
+    // Reinstalling replaces rather than adds, and --status sees all three.
+    assert.equal((await runInstaller(["--cursor", "--copilot", "--agy", "--link"], env)).code, 0);
+    assert.equal(JSON.parse(await readFile(agyFile, "utf8"))["keep-going"].Stop.length, 1);
+    const status = await runInstaller(["--status"], env);
+    for (const host of ["cursor", "copilot", "agy"]) assert.match(status.stdout, new RegExp(`${host}\\s+registered`));
+
+    assert.equal((await runInstaller(["--uninstall", "--cursor", "--copilot", "--agy"], env)).code, 0);
+    const after = JSON.parse(await readFile(agyFile, "utf8"));
+    assert.equal(after.herdr.PreInvocation.length, 1);
+    assert.deepEqual(after["keep-going"].Stop, []);
+    assert.deepEqual(JSON.parse(await readFile(path.join(home, ".cursor", "hooks.json"), "utf8")).hooks.stop, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("installer places and removes the OpenCode plugin", async () => {
+  const { configHome, env, cleanup } = await installHome("opencode");
+  try {
+    const plugin = path.join(configHome, "opencode", "plugins", "keep-going.js");
+    assert.equal((await runInstaller(["--opencode"], env)).code, 0);
+    assert.match(await readFile(plugin, "utf8"), /KeepGoing/);
+    assert.match((await runInstaller(["--status"], env)).stdout, /opencode\s+registered/);
+    assert.equal((await runInstaller(["--uninstall", "--opencode"], env)).code, 0);
+    await assert.rejects(access(plugin), { code: "ENOENT" });
+  } finally {
+    await cleanup();
+  }
 });
 
 test("uninstalling an absent hook does not create a settings file", async () => {
