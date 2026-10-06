@@ -546,6 +546,19 @@ async function grokOwnerPrompt(input) {
 // owner's request.
 const isNudge = (text) => NUDGES.includes(text) || text === EMPTY_STOP_NUDGE;
 
+// A host may start its stop hook before it has recorded the reply that ended
+// the turn, so the reply to the latest message is waited for, briefly.
+const REPLY_FLUSH_POLLS = 30;
+const REPLY_FLUSH_POLL_MS = 100;
+
+async function untilReply(read) {
+  for (let attempt = 0; ; attempt += 1) {
+    const turn = await read();
+    if (turn.reply || attempt >= REPLY_FLUSH_POLLS) return turn;
+    await sleep(REPLY_FLUSH_POLL_MS);
+  }
+}
+
 async function copilotPayload(input) {
   if (input.stopReason !== undefined && input.stopReason !== "end_turn") return null;
   const stop = {
@@ -555,28 +568,23 @@ async function copilotPayload(input) {
   };
   if (typeof stop.transcript_path !== "string") return stop;
   const file = await allowedTranscriptPath(stop, "copilot");
-  // Copilot fires agentStop before its last lines reach events.jsonl, so the
-  // reply to the latest message is waited for, briefly.
-  for (let attempt = 0; ; attempt += 1) {
-    let request = "";
+  // Copilot fires agentStop before its last lines reach events.jsonl.
+  const turn = await untilReply(async () => {
+    let prompt = "";
     let reply = "";
     for await (const record of jsonLines(file)) {
       const content = typeof record?.data?.content === "string" ? record.data.content.trim() : "";
       if (record?.type === "user.message" && content) {
-        if (!isNudge(content)) request = content;
+        if (!isNudge(content)) prompt = content;
         reply = "";
       } else if (record?.type === "assistant.message" && content) {
         reply = content;
       }
     }
-    if (reply || attempt >= REPLY_FLUSH_POLLS) return { ...stop, owner_prompt: request, last_assistant_message: reply };
-    await sleep(REPLY_FLUSH_POLL_MS);
-  }
+    return { prompt, reply };
+  });
+  return { ...stop, owner_prompt: turn.prompt, last_assistant_message: turn.reply };
 }
-
-// How long a host may take to record a reply its stop hook already announced.
-const REPLY_FLUSH_POLLS = 30;
-const REPLY_FLUSH_POLL_MS = 100;
 
 function agyRequest(content) {
   return content.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/)?.[1] ?? content.trim();
@@ -614,25 +622,24 @@ async function cursorPayload(input) {
   const conversation = typeof input.conversation_id === "string" ? input.conversation_id : "";
   if (!conversation) return null;
   const file = cursorRecord(conversation);
-  const saved = await readFile(file, "utf8").then(JSON.parse, () => ({}));
+  const read = () => readFile(file, "utf8").then(JSON.parse, () => ({}));
+  const save = async (turn) => {
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, JSON.stringify(turn), { encoding: "utf8", mode: 0o600 });
+  };
   const event = input.hook_event_name;
   if (event === "beforeSubmitPrompt" || event === "afterAgentResponse") {
+    const saved = await read();
     const text = String((event === "beforeSubmitPrompt" ? input.prompt : input.text) ?? "").trim();
-    const next = event === "afterAgentResponse"
-      ? { ...saved, reply: text }
-      : isNudge(text) ? saved : { prompt: text, reply: "" };
-    await mkdir(path.dirname(file), { recursive: true });
-    await writeFile(file, JSON.stringify(next), { encoding: "utf8", mode: 0o600 });
+    // A nudge keeps the owner's request; any prompt starts a reply afresh.
+    await save(event === "afterAgentResponse" ? { ...saved, reply: text } : { prompt: isNudge(text) ? saved.prompt : text, reply: "" });
     return null;
   }
   if (input.status !== undefined && input.status !== "completed") return null;
-  // Cursor starts the stop hook alongside afterAgentResponse, so the reply is
-  // waited for, briefly; a prompt clears it, so a reply is always this turn's.
-  let turn = saved;
-  for (let attempt = 0; !turn.reply && attempt < REPLY_FLUSH_POLLS; attempt += 1) {
-    await sleep(REPLY_FLUSH_POLL_MS);
-    turn = await readFile(file, "utf8").then(JSON.parse, () => ({}));
-  }
+  // Cursor starts the stop hook alongside afterAgentResponse. A stop uses up
+  // the reply it reads, so the next stop waits for the reply after it.
+  const turn = await untilReply(read);
+  await save({ ...turn, reply: "" });
   return {
     ...input,
     session_id: conversation,
@@ -1319,6 +1326,7 @@ const entry = process.argv[1] ? pathToFileURL(await realpath(process.argv[1]).ca
 if (import.meta.url === entry) await main();
 
 export {
+  isNudge,
   CONTINUATION_CAP,
   NUDGES,
   REVIEW_PROMPT,

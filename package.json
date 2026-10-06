@@ -1,7 +1,7 @@
 {
   "name": "@ferdousbhai/keep-going",
   "version": "0.16.0",
-  "description": "Tell Codex, Claude Code, Muse Code, Ghost, Grok, and Pi to keep going when work remains.",
+  "description": "Tell Codex, Claude Code, Muse Code, Ghost, Grok, Pi, Oh My Pi, Cursor CLI, Copilot CLI, Antigravity, and OpenCode to keep going when work remains.",
   "type": "module",
   "license": "MIT",
   "author": "Ferdous Bhai",

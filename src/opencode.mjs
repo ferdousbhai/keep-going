@@ -1,6 +1,4 @@
-import { handleStop, NUDGES } from "./keep-going.mjs";
-
-const isKeepGoingNudge = (text) => NUDGES.includes(text);
+import { handleStop, isNudge } from "./keep-going.mjs";
 
 // The text a message shows: its text parts, not reasoning, tools, or text the
 // host inserted itself.
@@ -24,12 +22,14 @@ export const KeepGoing = async ({ client, directory }) => ({
       const last = messages.at(-1);
       // An aborted or failed reply is not the agent choosing to stop.
       if (last?.info?.role !== "assistant" || last.info.error) return;
-      const request = messages.findLast((message) => message.info?.role === "user" && !isKeepGoingNudge(shownText(message)));
+      const request = messages.findLast((message) => message.info?.role === "user" && !isNudge(shownText(message)));
       const stop = await handleStop({
         session_id: id,
         // The owner's message names the turn, so its nudges count against it.
         turn_id: request?.info?.id ?? "",
         owner_prompt: shownText(request),
+        // The latest message being a nudge means this stop answers one.
+        stop_hook_active: request !== messages.findLast((message) => message.info?.role === "user"),
         last_assistant_message: shownText(last),
         cwd: directory,
       }, "opencode");

@@ -1,4 +1,4 @@
-import { handleStop, NUDGES } from "./keep-going.mjs";
+import { handleStop, isNudge } from "./keep-going.mjs";
 
 const textOf = (message) => {
   const content = message?.content;
@@ -15,7 +15,7 @@ const textOf = (message) => {
 export default function keepGoing(pi) {
   pi.on("session_stop", async (event, ctx) => {
     if (event.signal?.aborted) return undefined;
-    const request = event.messages?.findLast((message) => message.role === "user" && !NUDGES.includes(textOf(message)));
+    const request = event.messages?.findLast((message) => message.role === "user" && !isNudge(textOf(message)));
     const stop = await handleStop({
       session_id: event.session_id,
       owner_prompt: textOf(request),

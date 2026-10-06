@@ -112,18 +112,24 @@ test("Cursor: records the prompt and reply from their hooks and reviews at stop"
   const context = await hostFixture();
   try {
     const base = { conversation_id: "cv1", cursor_version: "2026.10.01" };
-    assert.deepEqual(await context.run("cursor", { ...base, hook_event_name: "beforeSubmitPrompt", prompt: "Refactor the parser" }), {});
-    assert.deepEqual(await context.run("cursor", { ...base, hook_event_name: "afterAgentResponse", text: "Split it into two files so far." }), {});
-    // A nudge Cursor resubmits as the next prompt is not the owner's request.
-    assert.deepEqual(await context.run("cursor", { ...base, hook_event_name: "beforeSubmitPrompt", prompt: "Keep going." }), {});
-    assert.deepEqual(await context.calls(), []);
-
+    const say = (hook_event_name, field, text) => context.run("cursor", { ...base, hook_event_name, [field]: text });
     const stop = { ...base, hook_event_name: "stop", status: "completed", loop_count: 0 };
+    assert.deepEqual(await say("beforeSubmitPrompt", "prompt", "Refactor the parser"), {});
+    assert.deepEqual(await say("afterAgentResponse", "text", "Split it into two files so far."), {});
+    assert.deepEqual(await context.calls(), []);
     assert.deepEqual(await context.run("cursor", stop), { followup_message: "Keep going." });
-    const [call] = await context.calls();
-    const asked = call.args.at(-1);
-    assert.match(asked, /"owner_prompt":"Refactor the parser"/);
-    assert.match(asked, /Split it into two files so far/);
+
+    // The nudge comes back as the next prompt: not the owner's request, and the
+    // stop after it reviews the reply after it, never the one it answered.
+    assert.deepEqual(await say("beforeSubmitPrompt", "prompt", "Keep going."), {});
+    assert.deepEqual(await say("afterAgentResponse", "text", "All three files split and tested."), {});
+    assert.deepEqual(await context.run("cursor", stop), { followup_message: "You've got this \u2014 keep going." });
+    const [first, second] = (await context.calls()).map((call) => call.args.at(-1));
+    assert.match(first, /"owner_prompt":"Refactor the parser"/);
+    assert.match(first, /Split it into two files so far/);
+    assert.match(second, /"owner_prompt":"Refactor the parser"/);
+    assert.match(second, /All three files split and tested/);
+    assert.doesNotMatch(second, /two files so far/);
 
     assert.deepEqual(await context.run("cursor", { ...stop, status: "aborted" }), {});
   } finally {
@@ -189,6 +195,15 @@ test("OpenCode: an idle session whose work remains gets the nudge as its next me
     assert.ok(call.args.includes("--pure"));
     assert.match(call.args.at(-1), /"owner_prompt":"Port the parser"/);
     assert.match(call.args.at(-1), /Ported four of five modules/);
+
+    // A reply with no text is nudged once; the stop answering that nudge is let through.
+    const empty = (role) => ({ info: { role, id: `msg_${role}_empty` }, parts: [{ type: "step-finish" }] });
+    const silent = opencodeClient([said("user", "Port the parser"), empty("assistant")]);
+    await (await KeepGoing({ client: silent, directory: context.root })).event({ event: { type: "session.idle", properties: { sessionID: "ses_4" } } });
+    assert.equal(silent.sent.length, 1);
+    const again = opencodeClient([said("user", "Port the parser"), empty("assistant"), said("user", silent.sent[0].text), empty("assistant")]);
+    await (await KeepGoing({ client: again, directory: context.root })).event({ event: { type: "session.idle", properties: { sessionID: "ses_4" } } });
+    assert.deepEqual(again.sent, []);
 
     // A subagent's session, and an errored reply, are left alone.
     const sub = opencodeClient([said("user", "x"), said("assistant", "y")], { parentID: "ses_0" });
