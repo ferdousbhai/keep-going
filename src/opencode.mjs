@@ -33,7 +33,11 @@ export const KeepGoing = async ({ client, directory }) => ({
         last_assistant_message: shownText(last),
         cwd: directory,
       }, "opencode");
+      // The review can take a while; a verdict holds only while the reviewed
+      // reply is still the session's last message.
       if (stop.decision === "block") {
+        const now = (await client.session.messages({ path: { id } })).data ?? [];
+        if (now.at(-1)?.info?.id !== last.info.id) return;
         await client.session.promptAsync({ path: { id }, body: { parts: [{ type: "text", text: stop.reason }] } });
       }
     } catch {

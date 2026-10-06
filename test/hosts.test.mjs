@@ -165,13 +165,15 @@ test("a reviewer's own stop is never reviewed", async () => {
 });
 
 // A fake OpenCode client: the session's messages, and what the plugin sends.
-function opencodeClient(messages, { parentID } = {}) {
+function opencodeClient(messages, { parentID, later } = {}) {
   const sent = [];
+  let reads = 0;
   return {
     sent,
     session: {
       get: async () => ({ data: { id: "ses_1", ...(parentID ? { parentID } : {}) } }),
-      messages: async () => ({ data: messages }),
+      // `later`: what the session holds by the time a slow review returns.
+      messages: async () => ({ data: reads++ > 0 && later ? later : messages }),
       promptAsync: async ({ path: where, body }) => { sent.push({ id: where.id, text: body.parts[0].text }); },
     },
   };
@@ -207,6 +209,13 @@ test("OpenCode: an idle session whose work remains gets the nudge as its next me
     const again = opencodeClient([said("user", "Port the parser"), empty("assistant"), said("user", silent.sent[0].text), empty("assistant")]);
     await (await KeepGoing({ client: again, directory: context.root })).event({ event: { type: "session.idle", properties: { sessionID: "ses_4" } } });
     assert.deepEqual(again.sent, []);
+
+    // The owner wrote again while the review ran: the verdict is about an older reply.
+    const moved = opencodeClient([said("user", "Port it"), said("assistant", "Half done.")], {
+      later: [said("user", "Port it"), said("assistant", "Half done."), said("user", "Actually, stop and write docs")],
+    });
+    await (await KeepGoing({ client: moved, directory: context.root })).event({ event: { type: "session.idle", properties: { sessionID: "ses_5" } } });
+    assert.deepEqual(moved.sent, []);
 
     // A subagent's session, and an errored reply, are left alone.
     const sub = opencodeClient([said("user", "x"), said("assistant", "y")], { parentID: "ses_0" });
