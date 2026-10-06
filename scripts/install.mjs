@@ -148,7 +148,7 @@ function registrationsIn(groups, event, where) {
   if (!Array.isArray(groups)) return [];
   return groups
     .flatMap((group) => (Array.isArray(group?.hooks) ? group.hooks : []))
-    .map((hook) => (typeof hook?.command === "string" ? hook.command : ""))
+    .map(hookCommand)
     .filter(Boolean)
     .map((command) => {
       const runner = ourRunner(command);
@@ -401,9 +401,10 @@ async function main() {
   // are named one by one, so no one gets config for an agent they lack.
   const all = args.includes("--all");
   const ALL = ["claude", "muse", "ghost", "grok"];
-  const runtimes = [...Object.keys(TARGETS), "opencode"].filter((name) => (all && ALL.includes(name)) || args.includes(`--${name}`));
+  const installable = [...Object.keys(TARGETS), "opencode"];
+  const runtimes = installable.filter((name) => (all && ALL.includes(name)) || args.includes(`--${name}`));
   if (runtimes.length === 0) {
-    throw new Error(`Select ${new Intl.ListFormat("en", { type: "disjunction" }).format([...Object.keys(TARGETS), "opencode"].map((name) => `--${name}`).concat("--all"))}.\n\n${usage()}`);
+    throw new Error(`Select ${new Intl.ListFormat("en", { type: "disjunction" }).format(installable.map((name) => `--${name}`).concat("--all"))}.\n\n${usage()}`);
   }
 
   // A checkout registered with --link runs whatever it currently holds, which

@@ -126,7 +126,8 @@ Installer flags:
   keep-going. Switching between `--link` and a copy replaces the registration.
 - `--audit-log PATH` writes `KEEP_GOING_AUDIT_LOG` into each hook command,
   the only environment Muse passes to a hook. Reinstalling without it drops
-  the setting. Codex's plugin, Pi, Oh My Pi, and OpenCode read the variable from the shell instead.
+  the setting. The Codex and Claude Code plugins, Pi, Oh My Pi, and OpenCode read the variable
+  from the shell instead.
 - `--status` prints where keep-going is registered for the CLI hosts, any
   missing event, other hooks on the same stop, and any double review.
 - `--uninstall` with a host flag removes it. The plugin: `claude plugin
