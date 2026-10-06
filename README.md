@@ -165,7 +165,7 @@ build and unit tests without Pi.
 | `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's raw text and how the stop was decided |
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
-Reviewers run without tools — Muse, which has no such switch, without web
+Reviewers run without tools — Codex with its shell in a read-only sandbox; Muse, which has no such switch, without web
 tools in a scratch directory; Cursor in ask mode and Antigravity in plan mode,
 read-only in a scratch directory; OpenCode and Oh My Pi with their own tools in a
 scratch directory, since OpenCode's free tier refuses a reduced tool set and

@@ -1185,7 +1185,6 @@ async function settleStop(input, runner, output, audit, exact = null) {
 }
 
 async function recordedContinuations(input, runner) {
-  if (!RUNTIMES[runner].state) return (await RUNTIMES[runner].nudges(input)).continuations;
   const tally = await readTally(tallyFile(input, runner));
   return tally[turnKey(input)]?.count ?? 0;
 }
@@ -1242,9 +1241,10 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
   }
   // A turn the payload names is counted by the tally keyed on it; one it
   // leaves unnamed (Claude's) by the transcript, where that was readable.
-  const fromTranscript = Boolean(nudges && runtime.state && !payloadTurn(input));
+  // Pi, which keeps no tally, counts from the session it already read.
+  const fromTranscript = Boolean(nudges && (!runtime.state || !payloadTurn(input)));
   const continuations = fromTranscript ? nudges.continuations : await recordedContinuations(input, runner);
-  const countedBy = fromTranscript ? "transcript" : runtime.state ? "tally" : "session";
+  const countedBy = !runtime.state ? "session" : fromTranscript ? "transcript" : "tally";
   if (continuations >= CONTINUATION_CAP) {
     const capped = {
       systemMessage: `keep-going: continuation cap (${CONTINUATION_CAP}) reached for this turn; accepting the stop.`,
