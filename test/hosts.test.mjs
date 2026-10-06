@@ -66,6 +66,9 @@ test("Copilot: reads the reply and request from events.jsonl and blocks to conti
       { type: "assistant.message", data: { content: "I started on it." } },
       { type: "user.message", data: { content: "Keep going." } },
       { type: "assistant.message", data: { content: "Half done; next I update the tests." } },
+      // A narrated tool call is not the reply that ended the turn.
+      { type: "assistant.message", data: { content: "Running the tests now.", toolRequests: [{ name: "bash" }] } },
+      { type: "assistant.message", data: { content: "Half done; next I update the tests." } },
     ]);
     const stop = { sessionId: "s1", cwd: context.root, transcriptPath: transcript, stopReason: "end_turn", stop_hook_active: false };
     assert.deepEqual(await context.run("copilot", stop), { decision: "block", reason: "Keep going." });

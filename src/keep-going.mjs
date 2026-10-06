@@ -574,7 +574,8 @@ async function copilotPayload(input) {
         if (!isNudge(content)) prompt = content;
         reply = "";
       } else if (record?.type === "assistant.message" && content) {
-        reply = content;
+        // Text alongside a tool call announces a step; the reply is a message that ends the turn.
+        reply = record.data.toolRequests?.length ? "" : content;
       }
     }
     return { prompt, reply };
