@@ -141,7 +141,7 @@ const RUNTIMES = {
   // Copilot, Antigravity and Cursor send a stop that names neither the reply nor the request.
   // `payload` reads both from what the host keeps (null: not a stop to review)
   // and `answer` speaks the host's own continue. Their reviewers are the host's
-  // own CLI, whose stop hooks have no off switch, so KEEP_GOING_REVIEWING
+  // own CLI; where its stop hooks have no off switch, KEEP_GOING_REVIEWING
   // keeps a reviewer's stop from being reviewed in turn.
   copilot: {
     requires: ["session_id"],
@@ -227,7 +227,7 @@ Reply with CONTINUE or STOP and nothing else.`;
 
 // The review is a one-word verdict, so the host's frontier default is more
 // model than it needs. Codex and Claude name a smaller tier the way Ghost's
-// smol bridge does; Muse and Grok have no such tier to name, so the flag is
+// smol bridge does; the other CLIs have no such tier to name, so the flag is
 // absent unless the variable names one. Claude's alias tracks the latest
 // Sonnet; Codex has no family alias, so its default is an exact release.
 const CODEX_DEFAULT_MODEL = "gpt-5.6-luna";
@@ -1080,8 +1080,9 @@ async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
   return envelope.text;
 }
 
-// Copilot, Antigravity and Cursor have no switch for their own hooks, so
-// their reviewer's stop is marked instead (see handleStop).
+// Copilot and Antigravity have no switch for their own hooks, so their
+// reviewer's stop is marked instead (see handleStop). Cursor's print mode
+// runs no hooks.
 const reviewerEnv = () => ({ ...process.env, KEEP_GOING_REVIEWING: "1" });
 
 async function runCopilotModel({ prompt, timeoutMs }) {
@@ -1126,7 +1127,7 @@ async function runCursorModel({ prompt, timeoutMs }) {
     const cursor = process.env.KEEP_GOING_CURSOR_BIN || "cursor-agent";
     // Ask mode answers without editing anything.
     const args = ["-p", "--mode", "ask", "--output-format", "text", "--trust", ...modelArgs("KEEP_GOING_CURSOR_MODEL"), prompt];
-    return assertExitOk(await runProcess(cursor, args, "", timeoutMs, reviewerEnv(), directory), "cursor-agent").stdout;
+    return assertExitOk(await runProcess(cursor, args, "", timeoutMs, process.env, directory), "cursor-agent").stdout;
   });
 }
 

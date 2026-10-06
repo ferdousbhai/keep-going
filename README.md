@@ -47,12 +47,11 @@ stop names no turn, it is read from the transcript; Pi counts follow-ups on the
 session branch. Subagents on Claude Code and Muse are reviewed on the same
 terms, each with its own count.
 
-A fresh stop waits fifteen seconds first; if the owner's next message lands
+On Codex, Claude Code, and Grok a fresh stop waits fifteen seconds first; if the owner's next message lands
 in the transcript during that window they were already following up, and the
 stop goes through. Only an owner message counts: the host's own writes, such
 as Claude Code landing the final assistant message after Stop has fired, do
-not. Subagent stops skip the wait, and so do Muse, which sends no transcript,
-and Pi.
+not. Subagent stops, and every other host's, are reviewed at once.
 
 ## Install
 
@@ -98,8 +97,8 @@ How each newer host continues:
   that idle, so only a session that stays open continues.
 - **Oh My Pi** blocks on its `session_stop` hook.
 
-Cursor's, Copilot's and Antigravity's reviewers are the host's own CLI, whose
-hooks cannot be switched off for one run; `KEEP_GOING_REVIEWING` marks the
+Copilot's and Antigravity's reviewers are the host's own CLI, whose hooks
+cannot be switched off for one run; `KEEP_GOING_REVIEWING` marks the
 reviewer's process so its stop is not reviewed in turn. OpenCode's reviewer
 runs with `--pure` and Oh My Pi's with `--no-extensions`, so neither loads
 keep-going.
@@ -167,9 +166,12 @@ build and unit tests without Pi.
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
 Reviewers run without tools — Muse, which has no such switch, without web
-tools in a scratch directory — and with as little thinking as the host allows:
-`low` on Codex, Claude, and Grok; Muse at its default; Pi at off where the
-model's catalog allows it, else the lowest level the catalog lists. A one-word
+tools in a scratch directory; OpenCode and Oh My Pi with their own tools in a
+scratch directory, since OpenCode's free tier refuses a reduced tool set and
+Oh My Pi's switch is unconfirmed — and with as little thinking as the host
+allows: `low` on Codex, Claude, and Grok; Pi at off where the model's catalog
+allows it, else the lowest level the catalog lists; every other host at its
+CLI's default. A one-word
 verdict does not need a frontier model, so Codex defaults to `gpt-5.6-luna`
 and Claude to `sonnet`, as Ghost reviews through `ghostd hook-smol-complete`;
 Pi has no smaller tier to name and reviews on the active model. Codex runs
