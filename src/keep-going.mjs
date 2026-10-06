@@ -569,13 +569,14 @@ async function copilotPayload(input) {
         reply = content;
       }
     }
-    if (reply || attempt >= COPILOT_FLUSH_POLLS) return { ...stop, owner_prompt: request, last_assistant_message: reply };
-    await sleep(COPILOT_FLUSH_POLL_MS);
+    if (reply || attempt >= REPLY_FLUSH_POLLS) return { ...stop, owner_prompt: request, last_assistant_message: reply };
+    await sleep(REPLY_FLUSH_POLL_MS);
   }
 }
 
-const COPILOT_FLUSH_POLLS = 30;
-const COPILOT_FLUSH_POLL_MS = 100;
+// How long a host may take to record a reply its stop hook already announced.
+const REPLY_FLUSH_POLLS = 30;
+const REPLY_FLUSH_POLL_MS = 100;
 
 function agyRequest(content) {
   return content.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/)?.[1] ?? content.trim();
@@ -625,11 +626,18 @@ async function cursorPayload(input) {
     return null;
   }
   if (input.status !== undefined && input.status !== "completed") return null;
+  // Cursor starts the stop hook alongside afterAgentResponse, so the reply is
+  // waited for, briefly; a prompt clears it, so a reply is always this turn's.
+  let turn = saved;
+  for (let attempt = 0; !turn.reply && attempt < REPLY_FLUSH_POLLS; attempt += 1) {
+    await sleep(REPLY_FLUSH_POLL_MS);
+    turn = await readFile(file, "utf8").then(JSON.parse, () => ({}));
+  }
   return {
     ...input,
     session_id: conversation,
-    owner_prompt: saved.prompt ?? "",
-    last_assistant_message: saved.reply ?? "",
+    owner_prompt: turn.prompt ?? "",
+    last_assistant_message: turn.reply ?? "",
   };
 }
 

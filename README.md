@@ -85,7 +85,8 @@ How each newer host continues:
 - **Cursor CLI** sends neither the reply nor the request at stop, so the hook
   also runs on `beforeSubmitPrompt` and `afterAgentResponse` to note them, and
   answers a stop with `followup_message`. Cursor also runs Claude's settings
-  hooks; that copy stands down there. Cursor caps follow-ups at 5 a loop.
+  hooks; that copy stands down there. Cursor caps follow-ups at 5 a loop, and
+  its print mode (`cursor-agent -p`) runs no hooks at all.
 - **Copilot CLI** reads the turn from its `events.jsonl` and blocks with a
   reason, which Copilot sends as the next prompt; Copilot ends a turn after 8
   blocks in a row.
