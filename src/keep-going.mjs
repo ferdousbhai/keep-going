@@ -68,10 +68,10 @@ const ownTranscript = (input) => input.transcript_path;
 const digest = (text, length) => createHash("sha256").update(text).digest("hex").slice(0, length);
 
 // Everything that differs per host, keyed once: how its stop payload becomes
-// the common one, the inputs it must supply beside session_id, the directory its tally belongs
-// under, the directories its transcripts may live in, how its nudges and owner
-// prompt are read, how its reviewer is run, and which log shows a follow-up
-// and how an owner's record reads there.
+// the common one, the inputs it must supply beside session_id, the directory
+// its tally belongs under, the directories its transcripts may live in, how its
+// nudges and owner prompt are read, how its reviewer is run, how its answer is
+// spelled, and which log shows a follow-up and how an owner's record reads there.
 const RUNTIMES = {
   // Pi supplies a model call from its authenticated registry and reads its
   // nudges off the active session branch. No subprocess or tally is needed.
@@ -113,10 +113,8 @@ const RUNTIMES = {
   },
   // Grok dispatches hooks it finds in ~/.claude/settings.json as well as its
   // own. A Claude install's command still ends in `claude`, so handleStop
-  // remaps to this runtime whenever GROK_HOOK_EVENT is set — unless a native
-  // Grok hook is present, in which case the Claude copy yields. Dual install
-  // writes ~/.grok/hooks/keep-going.json so Grok is covered even if that scan
-  // is off.
+  // remaps to this runtime whenever GROK_HOOK_EVENT is set (see
+  // yieldsToGrokNative).
   // Its transcript is a log of session/update frames in which a blocked turn's
   // nudge lands inside the agent's own reasoning, leaving nothing to read
   // nudges from; the tally counts them instead.
@@ -139,9 +137,7 @@ const RUNTIMES = {
   },
   // Copilot, Antigravity and Cursor send a stop that names neither the reply
   // nor the request; `payload` reads both from what the host keeps (null: not
-  // a stop to review) and `answer` speaks the host's own continue. Their reviewers are the host's
-  // own CLI; where its stop hooks have no off switch, KEEP_GOING_REVIEWING
-  // keeps a reviewer's stop from being reviewed in turn.
+  // a stop to review) and `answer` speaks the host's own continue.
   copilot: {
     state: xdgStateHome,
     roots: () => [path.join(process.env.COPILOT_HOME || path.join(homedir(), ".copilot"), "session-state")],
@@ -507,24 +503,17 @@ function grokOwnerText(record) {
 
 async function grokOwnerPrompt(input) {
   const updates = await allowedTranscriptPath(input, "grok");
-  const sessionDir = path.dirname(updates);
-  const cwdDir = path.dirname(sessionDir);
-  const sessionId = input.session_id;
   try {
-    const last = await lastTranscriptMatch(path.join(cwdDir, "prompt_history.jsonl"), (record) => {
+    const last = await lastTranscriptMatch(path.join(path.dirname(path.dirname(updates)), "prompt_history.jsonl"), (record) => {
       if (record?.is_bash) return "";
-      if (record?.session_id && record.session_id !== sessionId) return "";
+      if (record?.session_id && record.session_id !== input.session_id) return "";
       return typeof record?.prompt === "string" ? record.prompt.trim() : "";
     });
     if (last) return last;
   } catch {
     // prompt_history is the typed prompt; chat_history is the fallback wrap.
   }
-  try {
-    return await lastTranscriptMatch(grokChatHistory(updates), grokOwnerText);
-  } catch {
-    return "";
-  }
+  return lastTranscriptMatch(grokChatHistory(updates), grokOwnerText);
 }
 
 // A nudge comes back to some hosts as the next user message; it is never the
@@ -706,7 +695,7 @@ async function writeTally(file, tally) {
 // names none, and an owner who repeats a prompt word for word re-derives the
 // key of the turn before. Ending a turn where the hook lets the stop through is
 // what keeps a finished turn's count from being spent on the next one in both.
-async function recordTurnState(input, runner, blocked, exact = null) {
+async function recordTurnState(input, runner, blocked, exact) {
   if (!RUNTIMES[runner].state) return;
   const file = tallyFile(input, runner);
   const key = turnKey(input);
@@ -1019,8 +1008,7 @@ async function runMuseModel({ prompt, timeoutMs }) {
   });
 }
 
-// ghostd reviews on the owner's own agent CLI with its hooks on, so the
-// reviewer's stop is marked (see handleStop).
+// ghostd reviews on the owner's own agent CLI.
 async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
   const ghostd = process.env.KEEP_GOING_GHOST_BIN || "ghostd";
   const result = assertExitOk(
@@ -1099,7 +1087,7 @@ async function recordReviewAudit(input, runner, { verdict, reason, error, counte
 // a stop let through clears and a block advances, and the audit row. One
 // helper makes both so no exit can forget either: a forgotten first write
 // carries a count into a turn that never earned it, disarming the cap.
-async function settleStop(input, runner, output, audit, exact = null) {
+async function settleStop(input, runner, output, audit, exact) {
   const blocked = output.decision === "block";
   await recordTurnState(input, runner, blocked, exact);
   await recordReviewAudit(input, runner, { verdict: blocked ? "CONTINUE" : "STOP", reason: output.reason, ...audit });
