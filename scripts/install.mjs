@@ -29,33 +29,17 @@ const OPENCODE_PLUGIN = path.join(PACKAGE_ROOT, "extensions", "opencode.js");
 const opencodePluginFile = ({ configHome }) => path.join(configHome, "opencode", "plugins", "keep-going.js");
 
 function usage() {
-  return `Install Keep Going for Claude Code, Muse Code, Ghost, Grok Build,
-Cursor CLI, GitHub Copilot CLI, Antigravity, and OpenCode.
+  return `Usage: keep-going HOSTS [--link] [--audit-log PATH]
+       keep-going --uninstall HOSTS
+       keep-going --status
 
-Usage:
-  keep-going --claude
-  keep-going --muse
-  keep-going --ghost
-  keep-going --grok
-  keep-going --cursor
-  keep-going --copilot
-  keep-going --agy
-  keep-going --opencode
-  keep-going --all
-  keep-going --claude --link
-  keep-going --all --audit-log ~/.local/state/keep-going/audit.jsonl
-  keep-going --status
-  keep-going --uninstall --claude|--muse|--ghost|--grok|--cursor|--copilot|--agy|--opencode|--all
+HOSTS: --claude --muse --ghost --grok --cursor --copilot --agy --opencode,
+or --all for Claude Code, Muse, Ghost, and Grok. Codex installs through its
+marketplace; see README.md.
 
---link registers this checkout's hook instead of copying it, so edits to the
-working tree take effect with no reinstall. Switching between --link and a
-copy replaces the old registration rather than adding to it.
-
---audit-log PATH writes KEEP_GOING_AUDIT_LOG into each registered command, so
-the hook appends a JSON line per decision there on hosts that scrub the
-shell's environment. Reinstalling without it removes the setting.
-
-Codex installs through the repository marketplace; see README.md.`;
+--link          register this checkout's hook instead of a copy
+--audit-log P   write KEEP_GOING_AUDIT_LOG=P into each hook command
+--status        show where keep-going is registered`;
 }
 
 const claudeConfigDir = (userHome) => process.env.CLAUDE_CONFIG_DIR || path.join(userHome, ".claude");
@@ -387,7 +371,7 @@ async function main() {
     process.stdout.write(`${usage()}\n`);
     return;
   }
-  const userHome = process.env.KEEP_GOING_HOME || homedir();
+  const userHome = homedir();
   const dataHome = process.env.XDG_DATA_HOME || path.join(userHome, ".local", "share");
   const configHome = process.env.XDG_CONFIG_HOME || path.join(userHome, ".config");
   if (args.includes("--status")) {
@@ -397,14 +381,12 @@ async function main() {
 
   const uninstall = args.includes("--uninstall");
   // --all includes grok even beside claude: its native file is what reviews on
-  // Grok, and the Claude-settings copy yields there. The hosts after those four
-  // are named one by one, so no one gets config for an agent they lack.
-  const all = args.includes("--all");
-  const ALL = ["claude", "muse", "ghost", "grok"];
-  const installable = [...Object.keys(TARGETS), "opencode"];
-  const runtimes = installable.filter((name) => (all && ALL.includes(name)) || args.includes(`--${name}`));
+  // Grok, and the Claude-settings copy yields there. The other hosts are named
+  // one by one, so no one gets config for an agent they lack.
+  const all = args.includes("--all") ? ["claude", "muse", "ghost", "grok"] : [];
+  const runtimes = [...Object.keys(TARGETS), "opencode"].filter((name) => all.includes(name) || args.includes(`--${name}`));
   if (runtimes.length === 0) {
-    throw new Error(`Select ${new Intl.ListFormat("en", { type: "disjunction" }).format(installable.map((name) => `--${name}`).concat("--all"))}.\n\n${usage()}`);
+    throw new Error(`Select a host.\n\n${usage()}`);
   }
 
   // A checkout registered with --link runs whatever it currently holds, which

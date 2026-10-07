@@ -30,7 +30,7 @@ async function installHome(label) {
     settings: path.join(claudeHome, "settings.json"),
     museSettings: path.join(configHome, "muse", "settings.json"),
     env: {
-      KEEP_GOING_HOME: home,
+      HOME: home,
       XDG_DATA_HOME: dataHome,
       XDG_CONFIG_HOME: configHome,
       CLAUDE_CONFIG_DIR: claudeHome,
@@ -388,7 +388,7 @@ test("Codex status scopes feature flags to their table, including a final table"
 test("installer requires an explicit target", async () => {
   const result = await runInstaller([], {});
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /Select --claude, --muse, --ghost, --grok, --cursor, --copilot, --agy, --opencode, or --all/);
+  assert.match(result.stderr, /Select a host\.[\s\S]*--opencode/);
 });
 
 test("installer writes Cursor, Copilot, and Antigravity hooks in their own shapes, beside others' hooks", async () => {

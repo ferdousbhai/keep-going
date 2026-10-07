@@ -15,18 +15,14 @@ const MODEL_OUTPUT_LIMIT = 2 * 1024 * 1024;
 const CLASSIFIER_TIMEOUT_MS = 180_000;
 // Continuations per owner turn before the hook accepts the stop unconditionally.
 const CONTINUATION_CAP = 100;
-// How long the hook holds a fresh stop before reviewing it. A user who was
-// already typing a follow-up should not pay for a review of a turn they were
-// about to extend: an owner message that lands in the transcript during the
-// wait is that follow-up, and the stop is let through unreviewed.
+// How long the hook holds a fresh stop before reviewing it (see
+// followedUpDuringQuietWait); KEEP_GOING_QUIET_MS overrides it.
 const QUIET_DELAY_MS = 15_000;
 
 function quietDelayMs() {
   const raw = process.env.KEEP_GOING_QUIET_MS;
-  if (raw === undefined || raw === "") return QUIET_DELAY_MS;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) return QUIET_DELAY_MS;
-  return Math.floor(parsed);
+  return raw && Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : QUIET_DELAY_MS;
 }
 
 async function fileSize(file) {
@@ -60,7 +56,7 @@ async function followedUpDuringQuietWait(input, runtime, delay) {
   // the owner sent is always a whole line of its own.
   try {
     for await (const record of jsonLines(file, { start: before, end: after - 1 })) {
-      if (watch.opens(record)) return true;
+      if (watch.owner(record)) return true;
     }
   } catch {
     // An unreadable range shows no follow-up; the stop is reviewed as usual.
@@ -73,7 +69,7 @@ const ownTranscript = (input) => input.transcript_path;
 // Everything that differs per host, keyed once: the inputs it must supply, the
 // directory its state belongs under, the directories its transcripts may live
 // in, how its nudges are read, how its owner prompt is read, how its reviewer
-// is run, and which log shows a follow-up. A host whose stop payload already
+// is run, and which log shows a follow-up and how an owner's record reads. A host whose stop payload already
 // identifies the turn keeps its count in the tally, keyed on that identity.
 // Function declarations hoist, so the readers and the runners below are
 // already bound when this is evaluated.
@@ -91,7 +87,7 @@ const RUNTIMES = {
     nudges: codexNudges,
     ownerPrompt: codexOwnerPrompt,
     run: runCodexModel,
-    followUp: { file: ownTranscript, opens: codexOpensTurn },
+    followUp: { file: ownTranscript, owner: codexOwnerText },
   },
   claude: {
     requires: ["session_id"],
@@ -100,7 +96,7 @@ const RUNTIMES = {
     nudges: claudeNudges,
     ownerPrompt: claudeOwnerPrompt,
     run: runClaudeModel,
-    followUp: { file: ownTranscript, opens: claudeOpensTurn },
+    followUp: { file: ownTranscript, owner: claudeOwnerText },
   },
   // Ghost needs no quiet wait: it asks no stop hook while the owner's queued
   // follow-up waits and drops a continuation one arrives during.
@@ -135,7 +131,7 @@ const RUNTIMES = {
     run: runGrokModel,
     followUp: {
       file: (input) => (typeof input.transcript_path === "string" ? grokChatHistory(input.transcript_path) : null),
-      opens: grokOpensTurn,
+      owner: grokOwnerText,
     },
   },
   // Copilot, Antigravity and Cursor send a stop that names neither the reply nor the request.
@@ -422,6 +418,14 @@ async function transcriptNudges(file, classify) {
   return { continuations, held: continuations > 0 && !worked };
 }
 
+// What the owner typed in a record, or "": each host's reader below serves its
+// turn segmentation, its owner-prompt recovery, and its quiet wait alike, so
+// the three cannot disagree about what counts as a prompt.
+function claudeOwnerText(record) {
+  const message = claudeUserMessage(record);
+  return message?.genuine ? genuinePrompt(message.text) : "";
+}
+
 // Claude's stop payload names the session and nothing else, so where one owner
 // turn ends and the next begins is information only the transcript has: the
 // turn starts at the last genuine user message, and the hook prompts after it
@@ -430,8 +434,8 @@ function claudeRecordKind(record) {
   if (record?.type === "assistant") {
     return record.message?.content?.some?.((part) => part?.type === "tool_use") ? "tool" : null;
   }
+  if (claudeOwnerText(record)) return "owner";
   const message = claudeUserMessage(record);
-  if (message?.genuine) return "owner";
   return message && HOOK_PROMPT_PATTERN.test(message.text) ? "nudge" : null;
 }
 
@@ -439,21 +443,25 @@ async function claudeNudges(input) {
   return transcriptNudges(await allowedTranscriptPath(input, "claude"), claudeRecordKind);
 }
 
+function codexOwnerText(record) {
+  const payload = record?.type === "response_item" ? record.payload : null;
+  return payload?.type === "message" && payload.role === "user" ? genuinePrompt(messageText(payload)) : "";
+}
+
 // Codex records its nudge as a user message and every tool as a *_call item.
 function codexRecordKind(record) {
   const payload = record?.type === "response_item" ? record.payload : null;
   if (typeof payload?.type === "string" && payload.type.endsWith("_call")) return "tool";
   if (payload?.type !== "message" || payload.role !== "user") return null;
-  const text = messageText(payload);
-  if (text.trimStart().startsWith("<hook_prompt")) return "nudge";
-  return lastGenuinePrompt(text) ? "owner" : null;
+  if (messageText(payload).trimStart().startsWith("<hook_prompt")) return "nudge";
+  return codexOwnerText(record) ? "owner" : null;
 }
 
 async function codexNudges(input) {
   return transcriptNudges(await allowedTranscriptPath(input, "codex"), codexRecordKind);
 }
 
-function lastGenuinePrompt(text) {
+function genuinePrompt(text) {
   const trimmed = text.trim();
   if (!trimmed || isInjectedContext(trimmed) || HOOK_PROMPT_PATTERN.test(trimmed)) return "";
   return trimmed;
@@ -471,35 +479,26 @@ async function lastTranscriptMatch(transcriptPath, pick) {
 }
 
 async function claudeOwnerPrompt(input) {
-  return lastTranscriptMatch(await allowedTranscriptPath(input, "claude"), (record) => {
-    const message = claudeUserMessage(record);
-    return message?.genuine ? lastGenuinePrompt(message.text) : "";
-  });
+  return lastTranscriptMatch(await allowedTranscriptPath(input, "claude"), claudeOwnerText);
 }
 
 async function codexOwnerPrompt(input) {
-  const turnId = input.turn_id;
-  return lastTranscriptMatch(await allowedTranscriptPath(input, "codex"), (record) => {
-    const payload = record?.payload;
-    if (record?.type !== "response_item" || payload?.type !== "message" || payload?.role !== "user") return "";
-    if (payload.internal_chat_message_metadata_passthrough?.turn_id !== turnId) return "";
-    return lastGenuinePrompt(messageText(payload));
-  });
+  return lastTranscriptMatch(await allowedTranscriptPath(input, "codex"), (record) =>
+    record?.payload?.internal_chat_message_metadata_passthrough?.turn_id === input.turn_id ? codexOwnerText(record) : "");
 }
 
 // The stop names the updates log; what the owner typed lands in the chat
 // history beside it.
 const grokChatHistory = (updates) => path.join(path.dirname(updates), "chat_history.jsonl");
 
-function grokQueryText(record) {
+function grokOwnerText(record) {
+  if (record?.type !== "user" || record.synthetic_reason) return "";
   const raw = messageText(record);
   const tagged = raw.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/);
-  if (tagged) return lastGenuinePrompt(tagged[1]);
+  if (tagged) return genuinePrompt(tagged[1]);
   // What the owner typed is tagged. An untagged block is one the log wrapped
   // for its own purposes — <user_info> and friends — and carries no request.
-  // The guard lives here rather than at one call site, so prompt recovery and
-  // turn segmentation cannot disagree about what counts as a prompt.
-  return raw.trimStart().startsWith("<") ? "" : lastGenuinePrompt(raw);
+  return raw.trimStart().startsWith("<") ? "" : genuinePrompt(raw);
 }
 
 async function grokOwnerPrompt(input) {
@@ -518,8 +517,7 @@ async function grokOwnerPrompt(input) {
     // prompt_history is the typed prompt; chat_history is the fallback wrap.
   }
   try {
-    return await lastTranscriptMatch(grokChatHistory(updates), (record) =>
-      record?.type !== "user" || record.synthetic_reason ? "" : grokQueryText(record));
+    return await lastTranscriptMatch(grokChatHistory(updates), grokOwnerText);
   } catch {
     return "";
   }
@@ -645,21 +643,6 @@ async function resolveOwnerPrompt(input, runner) {
   } catch {
     return "";
   }
-}
-
-// Whether a record is the owner opening a turn, per host, for the quiet wait.
-function claudeOpensTurn(record) {
-  const message = claudeUserMessage(record);
-  return Boolean(message?.genuine && lastGenuinePrompt(message.text));
-}
-
-function grokOpensTurn(record) {
-  return record?.type === "user" && !record.synthetic_reason && Boolean(grokQueryText(record));
-}
-
-function codexOpensTurn(record) {
-  const payload = record?.type === "response_item" ? record.payload : null;
-  return payload?.type === "message" && payload.role === "user" && Boolean(lastGenuinePrompt(messageText(payload)));
 }
 
 // The cap is the only thing between a stuck reviewer and a hundred turns of

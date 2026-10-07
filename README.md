@@ -24,34 +24,27 @@ message and the owner's request — redacted and truncated — and answers:
   or delete, an answer only the owner has, or which reading of their words
   they meant.
 
-`CONTINUE` blocks the stop (in Pi, queues a follow-up) with a fixed line —
-"Keep going." and three variations, rotated. The reviewer only decides; it
-never writes to the agent. The agent has read far more than the reviewer, and
-a reviewer that wrote its own line ended up arguing with it: restating the
-owner's words against the agent's evidence, or claiming consent the owner never
-gave.
-
-A stop that follows a nudge with no tool call in between goes through
-unreviewed: the agent weighed the nudge and still holds, and a second review
-would only argue with it. Claude Code, Codex, and Pi show where the last nudge
-fell; on the other hosts every stop is reviewed.
+`CONTINUE` blocks the stop with a fixed line — "Keep going." and three
+variations, rotated. The reviewer only decides; a reviewer that wrote its own
+line ended up arguing with an agent that had read far more than it.
 
 Everything else lets the stop through: a missing binary, a timeout, an
-unparseable verdict, or a bare completion token (`Done.`) with no owner prompt
-to weigh it against.
+unparseable verdict, a bare completion token (`Done.`) with no owner prompt to
+weigh it against, or — on Claude Code, Codex, and Pi, which show where the
+last nudge fell — a stop after a nudge with no tool call in between: the agent
+weighed the nudge and holds.
 
 At most 100 continuations per owner turn; past the cap the stop is accepted
 unreviewed. The count is a tally per session and turn under
-`$XDG_STATE_HOME/keep-going` (the ghost home for Ghost). On Claude Code, whose
-stop names no turn, it is read from the transcript; Pi counts follow-ups on the
-session branch. Subagents on Claude Code and Muse are reviewed on the same
-terms, each with its own count.
+`$XDG_STATE_HOME/keep-going` (the ghost home for Ghost); Claude Code, whose
+stop names no turn, counts from its transcript, and Pi from the session
+branch. Subagents on Claude Code and Muse are reviewed on the same terms, each
+with its own count.
 
-On Codex, Claude Code, and Grok a fresh stop waits fifteen seconds first; if the owner's next message lands
-in the transcript during that window they were already following up, and the
-stop goes through. Only an owner message counts: the host's own writes, such
-as Claude Code landing the final assistant message after Stop has fired, do
-not. Subagent stops, and every other host's, are reviewed at once.
+On Codex, Claude Code, and Grok a fresh main-agent stop waits fifteen seconds
+first; an owner message landing in the transcript meanwhile lets the stop
+through. The host's own writes, such as Claude Code recording the final
+message after Stop fires, do not count.
 
 ## Install
 
@@ -79,42 +72,12 @@ omp plugin install github:ferdousbhai/keep-going
 npx --yes github:ferdousbhai/keep-going --muse   # --ghost, --grok, --cursor, --copilot, --agy, --opencode, --claude, --all
 ```
 
-How each newer host continues:
-
-- **Cursor CLI** sends neither the reply nor the request at stop, so the hook
-  also runs on `beforeSubmitPrompt` and `afterAgentResponse` to note them, and
-  answers a stop with `followup_message`. Cursor also runs Claude's settings
-  hooks; that copy stands down there. Cursor caps follow-ups at 5 a loop, and
-  its print mode (`cursor-agent -p`) runs no hooks at all.
-- **Copilot CLI** reads the turn from its `events.jsonl` and blocks with a
-  reason, which Copilot sends as the next prompt; Copilot ends a turn after 8
-  blocks in a row.
-- **Antigravity** reads the turn from its transcript and answers
-  `{"decision":"continue"}`; the nudge arrives as a system message.
-- **OpenCode** has no stop hook: the plugin
-  (`~/.config/opencode/plugins/keep-going.js`) reviews when a session goes idle
-  and sends the nudge as the next message. A one-shot `opencode run` exits at
-  that idle, so only a session that stays open continues.
-- **Oh My Pi** blocks on its `session_stop` hook.
-
-Copilot's, Antigravity's, and Ghost's reviewers are the owner's own agent
-CLI, whose hooks cannot be switched off for one run; `KEEP_GOING_REVIEWING` marks the
-reviewer's process so its stop is not reviewed in turn. OpenCode's reviewer
-runs with `--pure` and Oh My Pi's with `--no-extensions`, so neither loads
-keep-going.
-
-Not supported: Crush (its only hook runs before a tool call), Ori's own agent
-(`ori code`, no documented turn-end hook; `ori claude`, `ori codex`, and the
-other launchers run the real CLI and its hook), and Hermes and OpenClaw, which
-can only queue a follow-up message or revise a turn a few times.
-
 One route per host: a plugin and an `npx` hook together review every stop
-twice. Inside a Ghost turn the harness's own copy stands down: Ghost reviews the
-turn once through its `session_stop` hook. The turn is known by `GHOST` in the
-environment or, for Muse, by its Ghost conversation directory. `--all` writes a native file for Claude Code, Muse, Ghost, and Grok. Grok also
-scans `~/.claude/settings.json`, so `--claude` alone covers it; with both
-installed, keep-going ignores the Claude copy on Grok and the reviewer runs
-once.
+twice. `--all` covers Claude Code, Muse, Ghost, and Grok. Grok also runs
+`~/.claude/settings.json` hooks, so `--claude` alone covers it; with both
+installed, the Claude copy stands down on Grok. Inside a Ghost turn — `GHOST`
+in the environment, or for Muse a Ghost conversation directory — every other
+copy stands down and Ghost reviews through its own `session_stop` hook.
 
 Installs track `main`. To pin, use a tag: `--ref v0.17.0` for Codex,
 `#v0.17.0` for `npx`, `@v0.17.0` for Pi. The Claude plugin moves only on
@@ -122,34 +85,68 @@ Installs track `main`. To pin, use a tag: `--ref v0.17.0` for Codex,
 
 Installer flags:
 
-- `--link` registers this checkout instead of copying it, for working on
-  keep-going. Switching between `--link` and a copy replaces the registration.
-- `--audit-log PATH` writes `KEEP_GOING_AUDIT_LOG` into each hook command,
-  the only environment Muse passes to a hook. Reinstalling without it drops
-  the setting. The Codex and Claude Code plugins, Pi, Oh My Pi, and OpenCode read the variable
-  from the shell instead.
-- `--status` prints where keep-going is registered for the CLI hosts, any
-  missing event, other hooks on the same stop, and any double review.
-- `--uninstall` with a host flag removes it. The plugin: `claude plugin
-  uninstall keep-going`.
+- `--link` registers this checkout instead of a copy; switching either way
+  replaces the registration.
+- `--audit-log PATH` writes `KEEP_GOING_AUDIT_LOG` into each hook command, for
+  Muse, which passes a hook no environment; reinstalling without it drops it.
+- `--status` shows each host's registration, missing events, other hooks on
+  the same stop, and double reviews.
+- `--uninstall` with host flags removes them; the Claude plugin goes with
+  `claude plugin uninstall keep-going`.
 
-## Pi
+## Hosts
 
-Pi runs keep-going as an extension. It reviews only a normal final text
-response; tool turns, aborted responses, and turns with queued messages are
-left alone. `CONTINUE` queues one visible follow-up. The reviewer is a
-direct, tool-free call to Pi's active model with Pi's own authentication.
+- **Cursor CLI** sends neither the reply nor the request at stop, so the hook
+  also runs on `beforeSubmitPrompt` and `afterAgentResponse` to note them, and
+  answers a stop with `followup_message`. Its run of Claude's settings hooks
+  stands down. Cursor caps follow-ups at 5 a loop, and its print mode
+  (`cursor-agent -p`) runs no hooks.
+- **Copilot CLI** reads the turn from its `events.jsonl`; the block reason is
+  sent as the next prompt, and Copilot ends a turn after 8 blocks in a row.
+- **Antigravity** reads the turn from its transcript and answers
+  `{"decision":"continue"}`; the nudge arrives as a system message.
+- **OpenCode** has no stop hook: the plugin
+  (`~/.config/opencode/plugins/keep-going.js`) reviews when a session goes idle
+  and sends the nudge as the next message, so a one-shot `opencode run`, which
+  exits at that idle, never continues.
+- **Oh My Pi** blocks on its `session_stop` hook.
+- **Pi** reviews only a normal final text response; tool turns, aborted
+  responses, and turns with queued messages are left alone. `CONTINUE` queues
+  one visible follow-up. `/keep-going on|off|status` controls the session;
+  `off` also cancels a review in progress. Escape cancels the review with the
+  run; new input, a model change, or session navigation discards an in-flight
+  verdict. A persisted marker prevents double reviews, even with two copies of
+  the extension loaded.
 
-`/keep-going on|off|status` controls the current session; `off` also cancels a
-review in progress. Escape cancels the review with the run; new input, a model
-change, or session navigation discards an in-flight verdict. Provider errors
-and timeouts accept the stop. A persisted marker prevents double reviews, even
-with two copies of the extension loaded.
+Not supported: Crush (its only hook runs before a tool call), Ori's own agent
+(`ori code`, no documented turn-end hook; `ori claude`, `ori codex`, and the
+other launchers run the real CLI and its hook), and Hermes and OpenClaw, which
+can only queue a follow-up message or revise a turn a few times.
 
-Local development: `npm run build`, `pi install /absolute/path/to/keep-going`,
-`/reload`; install one source, not both. `npm run test:pi` runs end-to-end
-tests against an installed Pi with a mock provider; `npm run check` runs the
-build and unit tests without Pi.
+## Reviewers
+
+Each reviews on the host's own model: Codex on the session's, which its stop
+names; Pi on its active model, with Pi's authentication; Ghost through
+`ghostd hook-complete`; Muse and Grok, whose reviewers run without the owner's
+config, on their CLI's built-in default; every other host on its CLI's
+configured default. Thinking is as low as the host allows: `low` on Codex,
+Claude, and Grok; Pi off where the model's catalog allows it, else its lowest
+listed level; every other host at its CLI's default.
+
+Reviewers run without tools — Codex with its shell in a read-only sandbox;
+Muse, which has no such switch, without web tools in a scratch directory;
+Cursor in ask mode and Antigravity in plan mode, read-only in a scratch
+directory; OpenCode and Oh My Pi with their own tools in a scratch directory,
+since OpenCode's free tier refuses a reduced tool set and Oh My Pi's switch is
+unconfirmed.
+
+No reviewer re-enters keep-going: Codex runs with hooks disabled, Claude in
+safe mode, Grok in single-prompt mode, Cursor in print mode, OpenCode with
+`--pure`, Oh My Pi with `--no-extensions`, and Muse under a config overlay with no settings — a
+non-default `XDG_CONFIG_HOME` is unreachable from a hook, and its review then
+fails open. Copilot, Antigravity, and Ghost run the owner's own CLI, whose
+hooks cannot be switched off for one run, so `KEEP_GOING_REVIEWING` marks the
+reviewer's process and its stop goes unreviewed.
 
 ## Environment variables
 
@@ -159,20 +156,10 @@ build and unit tests without Pi.
 | `KEEP_GOING_{CURSOR,COPILOT,AGY,OPENCODE,OMP}_BIN` | `cursor-agent`, `copilot`, `agy`, `opencode`, `omp` |
 | `KEEP_GOING_QUIET_MS` | `15000`; the wait before a fresh stop is reviewed; `0` reviews at once |
 | `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's raw text and how the stop was decided |
-| `KEEP_GOING_HOME` | OS home; the installer writes under it |
 
-Reviewers run without tools — Codex with its shell in a read-only sandbox; Muse, which has no such switch, without web
-tools in a scratch directory; Cursor in ask mode and Antigravity in plan mode,
-read-only in a scratch directory; OpenCode and Oh My Pi with their own tools in a
-scratch directory, since OpenCode's free tier refuses a reduced tool set and
-Oh My Pi's switch is unconfirmed — and with as little thinking as the host
-allows: `low` on Codex, Claude, and Grok; Pi at off where the model's catalog
-allows it, else the lowest level the catalog lists; every other host at its
-CLI's default. Each reviews on the host's own model: Codex on the session's,
-which its stop names; Pi on its active model; Ghost through `ghostd
-hook-complete`; Muse and Grok, whose reviewers run without the owner's
-config, on their CLI's built-in default; every other host on its CLI's
-configured default.
-Muse reviews under a config overlay with no settings, so its own Stop hook does not
-re-enter; a non-default `XDG_CONFIG_HOME` is unreachable from a hook, and the
-review then fails open.
+## Development
+
+`npm run check` builds the bundles and runs the unit tests; `npm run test:pi`
+runs end-to-end tests against an installed Pi with a mock provider. To try the
+Pi extension: `npm run build`, `pi install /absolute/path/to/keep-going`,
+`/reload`; install one source, not both.
