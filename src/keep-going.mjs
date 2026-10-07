@@ -68,7 +68,7 @@ const ownTranscript = (input) => input.transcript_path;
 const digest = (text, length) => createHash("sha256").update(text).digest("hex").slice(0, length);
 
 // Everything that differs per host, keyed once: how its stop payload becomes
-// the common one, the inputs it must supply, the directory its tally belongs
+// the common one, the inputs it must supply beside session_id, the directory its tally belongs
 // under, the directories its transcripts may live in, how its nudges and owner
 // prompt are read, how its reviewer is run, and which log shows a follow-up
 // and how an owner's record reads there.
@@ -76,11 +76,11 @@ const RUNTIMES = {
   // Pi supplies a model call from its authenticated registry and reads its
   // nudges off the active session branch. No subprocess or tally is needed.
   pi: {
-    requires: ["session_id", "turn_id"],
+    requires: ["turn_id"],
     nudges: (input) => ({ continuations: input.continuation_count, held: input.held_after_nudge === true }),
   },
   codex: {
-    requires: ["turn_id", "session_id"],
+    requires: ["turn_id"],
     state: xdgStateHome,
     roots: () => [path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "sessions")],
     nudges: codexNudges,
@@ -89,7 +89,6 @@ const RUNTIMES = {
     followUp: { file: ownTranscript, owner: codexOwnerText },
   },
   claude: {
-    requires: ["session_id"],
     state: xdgStateHome,
     roots: () => [path.join(process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), ".claude"), "projects")],
     nudges: claudeNudges,
@@ -100,7 +99,7 @@ const RUNTIMES = {
   // Ghost needs no quiet wait: it asks no stop hook while the owner's queued
   // follow-up waits and drops a continuation one arrives during.
   ghost: {
-    requires: ["session_id", "owner_prompt", "ghost_home"],
+    requires: ["owner_prompt", "ghost_home"],
     state: (input) => input.ghost_home,
     run: runGhostModel,
   },
@@ -109,7 +108,6 @@ const RUNTIMES = {
   // stopped naming its turn should still be reviewed and capped per session,
   // not refused outright.
   muse: {
-    requires: ["session_id"],
     state: xdgStateHome,
     run: runMuseModel,
   },
@@ -123,7 +121,6 @@ const RUNTIMES = {
   // nudge lands inside the agent's own reasoning, leaving nothing to read
   // nudges from; the tally counts them instead.
   grok: {
-    requires: ["session_id"],
     state: xdgStateHome,
     // Grok spells these two keys in camelCase; read unrenamed, every stop
     // would look empty.
@@ -146,47 +143,51 @@ const RUNTIMES = {
   // own CLI; where its stop hooks have no off switch, KEEP_GOING_REVIEWING
   // keeps a reviewer's stop from being reviewed in turn.
   copilot: {
-    requires: ["session_id"],
     state: xdgStateHome,
     roots: () => [path.join(process.env.COPILOT_HOME || path.join(homedir(), ".copilot"), "session-state")],
     payload: copilotPayload,
-    run: runCopilotModel,
+    run: cliReviewer("copilot", "copilot", (prompt) => [
+      "-p", prompt, "--silent", "--stream", "off", "--available-tools", "",
+      "--no-custom-instructions", "--disable-builtin-mcps", "--no-ask-user", "--no-auto-update",
+    ], reviewerEnv),
   },
   // Antigravity sends its nudge in as a system message, so the last owner
   // prompt in its transcript stays the turn's request across continuations.
   agy: {
-    requires: ["session_id"],
     state: xdgStateHome,
     roots: () => [path.join(homedir(), ".gemini", "antigravity-cli", "brain")],
     payload: agyPayload,
     answer: (output) => (output.decision === "block" ? { decision: "continue", reason: output.reason } : {}),
-    run: runAgyModel,
+    // Plan mode and no auto-approval: a reviewer that tried a tool would be refused.
+    run: cliReviewer("agy", "agy", (prompt) => [
+      "-p", prompt, "--output-format", "text", "--mode", "plan", "--disable-slash-commands",
+    ], reviewerEnv),
   },
   // Cursor keeps a transcript in no documented shape, but hands its hooks the
   // prompt (beforeSubmitPrompt) and the reply (afterAgentResponse); the same
   // command records both and reviews at stop. Cursor caps its own follow-ups.
   cursor: {
-    requires: ["session_id"],
     state: xdgStateHome,
     payload: cursorPayload,
     answer: (output) => (output.decision === "block" ? { followup_message: output.reason } : {}),
-    run: runCursorModel,
+    // Ask mode answers without editing anything.
+    run: cliReviewer("cursor", "cursor-agent", (prompt) => [
+      "-p", "--mode", "ask", "--output-format", "text", "--trust", prompt,
+    ]),
   },
   // OpenCode runs keep-going as an in-process plugin (src/opencode.mjs) that
   // sends the nudge itself; its reviewer is `opencode run --pure`, which loads
   // no plugins.
   opencode: {
-    requires: ["session_id"],
     state: xdgStateHome,
-    run: runOpencodeModel,
+    run: cliReviewer("opencode", "opencode", (prompt) => ["run", "--pure", prompt]),
   },
   // Oh My Pi loads src/omp.mjs (package.json `omp.extensions`, which it
   // prefers over Pi's) on its session_stop hook; its reviewer runs with no
   // extensions, so keep-going does not review the review.
   omp: {
-    requires: ["session_id"],
     state: xdgStateHome,
-    run: runOmpModel,
+    run: cliReviewer("omp", "omp", (prompt) => ["-p", "--no-extensions", prompt]),
   },
 };
 
@@ -342,12 +343,6 @@ const INJECTED_PREFIXES = [
   "<hook_prompt",
 ];
 
-function isInjectedContext(text) {
-  const trimmed = text.trimStart();
-  if (HARNESS_MARKERS.has(text.trim())) return true;
-  return INJECTED_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
-}
-
 async function* jsonLines(file, range = {}) {
   const stream = createReadStream(file, { encoding: "utf8", ...range });
   const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -382,16 +377,13 @@ async function allowedTranscriptPath(input, runner) {
 function claudeUserMessage(record) {
   if (record?.type !== "user" || record.message?.role !== "user") return null;
 
-  const text = typeof record.message.content === "string"
-    ? record.message.content
-    : messageText(record.message);
   // A compaction summary says so in a field of its own. It recaps the session
   // in the owner's place, so counting it would restart the turn and handing it
   // to the reviewer would offer a recap of past work as the request to judge
   // the last message against — which nothing can fulfill.
-  if (!text || record.isCompactSummary === true || isInjectedContext(text)) return null;
+  if (record.isCompactSummary === true) return null;
   return {
-    text,
+    text: typeof record.message.content === "string" ? record.message.content : messageText(record.message),
     genuine:
       record.origin?.kind !== "task-notification" &&
       record.promptSource !== "system" &&
@@ -440,9 +432,10 @@ function claudeRecordKind(record) {
   if (record?.type === "assistant") {
     return record.message?.content?.some?.((part) => part?.type === "tool_use") ? "tool" : null;
   }
-  if (claudeOwnerText(record)) return "owner";
   const message = claudeUserMessage(record);
-  return message && HOOK_PROMPT_PATTERN.test(message.text) ? "nudge" : null;
+  if (!message) return null;
+  if (message.genuine && genuinePrompt(message.text)) return "owner";
+  return HOOK_PROMPT_PATTERN.test(message.text) ? "nudge" : null;
 }
 
 async function claudeNudges(input) {
@@ -469,7 +462,12 @@ async function codexNudges(input) {
 
 function genuinePrompt(text) {
   const trimmed = text.trim();
-  if (!trimmed || isInjectedContext(trimmed) || HOOK_PROMPT_PATTERN.test(trimmed)) return "";
+  if (
+    !trimmed ||
+    HARNESS_MARKERS.has(trimmed) ||
+    INJECTED_PREFIXES.some((prefix) => trimmed.startsWith(prefix)) ||
+    HOOK_PROMPT_PATTERN.test(trimmed)
+  ) return "";
   return trimmed;
 }
 
@@ -1043,50 +1041,16 @@ async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
 // Copilot, Antigravity, and Ghost's harness have no switch for their own
 // hooks, so their reviewer's stop is marked instead (see handleStop).
 // Cursor's print mode runs no hooks.
-const reviewerEnv = () => ({ ...process.env, KEEP_GOING_REVIEWING: "1" });
-
-async function runCopilotModel({ prompt, timeoutMs }) {
-  return inTemporaryDirectory("copilot", async (directory) => {
-    const copilot = process.env.KEEP_GOING_COPILOT_BIN || "copilot";
-    const args = [
-      "-p", prompt, "--silent", "--stream", "off", "--available-tools", "",
-      "--no-custom-instructions", "--disable-builtin-mcps", "--no-ask-user", "--no-auto-update",
-    ];
-    return assertExitOk(await runProcess(copilot, args, "", timeoutMs, reviewerEnv(), directory), "copilot").stdout;
-  });
+function reviewerEnv() {
+  return { ...process.env, KEEP_GOING_REVIEWING: "1" };
 }
 
-async function runAgyModel({ prompt, timeoutMs }) {
-  return inTemporaryDirectory("agy", async (directory) => {
-    const agy = process.env.KEEP_GOING_AGY_BIN || "agy";
-    // Plan mode and no auto-approval: a reviewer that tried a tool would be refused.
-    const args = ["-p", prompt, "--output-format", "text", "--mode", "plan", "--disable-slash-commands"];
-    return assertExitOk(await runProcess(agy, args, "", timeoutMs, reviewerEnv(), directory), "agy").stdout;
-  });
-}
-
-async function runOpencodeModel({ prompt, timeoutMs }) {
-  return inTemporaryDirectory("opencode", async (directory) => {
-    const opencode = process.env.KEEP_GOING_OPENCODE_BIN || "opencode";
-    const args = ["run", "--pure", prompt];
-    return assertExitOk(await runProcess(opencode, args, "", timeoutMs, process.env, directory), "opencode").stdout;
-  });
-}
-
-async function runOmpModel({ prompt, timeoutMs }) {
-  return inTemporaryDirectory("omp", async (directory) => {
-    const omp = process.env.KEEP_GOING_OMP_BIN || "omp";
-    const args = ["-p", "--no-extensions", prompt];
-    return assertExitOk(await runProcess(omp, args, "", timeoutMs, process.env, directory), "omp").stdout;
-  });
-}
-
-async function runCursorModel({ prompt, timeoutMs }) {
-  return inTemporaryDirectory("cursor", async (directory) => {
-    const cursor = process.env.KEEP_GOING_CURSOR_BIN || "cursor-agent";
-    // Ask mode answers without editing anything.
-    const args = ["-p", "--mode", "ask", "--output-format", "text", "--trust", prompt];
-    return assertExitOk(await runProcess(cursor, args, "", timeoutMs, process.env, directory), "cursor-agent").stdout;
+// A reviewer CLI that takes its prompt as an argument and prints its verdict,
+// run in a scratch directory; KEEP_GOING_<NAME>_BIN overrides the command.
+function cliReviewer(name, command, args, env = () => process.env) {
+  return ({ prompt, timeoutMs }) => inTemporaryDirectory(name, async (directory) => {
+    const bin = process.env[`KEEP_GOING_${name.toUpperCase()}_BIN`] || command;
+    return assertExitOk(await runProcess(bin, args(prompt), "", timeoutMs, env(), directory), command).stdout;
   });
 }
 
@@ -1175,7 +1139,7 @@ async function handleStop(input, runner, { runModel, delay } = {}) {
     input = await runtime.payload(input);
     if (!input) return {};
   }
-  for (const key of runtime.requires) {
+  for (const key of ["session_id", ...(runtime.requires ?? [])]) {
     if (typeof input[key] !== "string" || !input[key]) {
       throw new Error(`Stop input is missing ${key}`);
     }

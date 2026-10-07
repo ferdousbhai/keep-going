@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
-import { HOSTS, hookEntry } from "./hosts.mjs";
+import { STOP_EVENTS, hookEntry } from "./hosts.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const bundle = path.join(root, "plugins", "keep-going", "scripts", "keep-going.mjs");
@@ -40,7 +40,7 @@ export const HOOK_FILES = {
 export function hookFile(runner) {
   const { pluginRoot } = HOOK_FILES[runner];
   const entry = [hookEntry(`node "${pluginRoot}/scripts/keep-going.mjs" ${runner}`)];
-  const config = { hooks: Object.fromEntries(HOSTS[runner].events.map((event) => [event, entry])) };
+  const config = { hooks: Object.fromEntries(STOP_EVENTS[runner].map((event) => [event, entry])) };
   return `${JSON.stringify(config, null, 2)}\n`;
 }
 

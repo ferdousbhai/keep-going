@@ -14,7 +14,7 @@ import {
 import { homedir } from "node:os";
 import path from "node:path";
 
-import { HOOK_TIMEOUT, HOSTS, hookEntry } from "./hosts.mjs";
+import { HOOK_TIMEOUT, STOP_EVENTS, hookEntry } from "./hosts.mjs";
 
 const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..");
 const BUNDLED_HOOK = path.join(
@@ -90,7 +90,7 @@ function updateFlatConfig(config, runner, command, uninstall) {
   const shape = FLAT_HOSTS[runner];
   const current = shape.hooks(config);
   const hooks = isJsonObject(current) ? { ...current } : {};
-  for (const event of HOSTS[runner].events) {
+  for (const event of STOP_EVENTS[runner]) {
     const kept = (Array.isArray(hooks[event]) ? hooks[event] : []).filter((hook) => ourRunner(hookCommand(hook)) === null);
     if (!uninstall) kept.push(shape.entry(command));
     hooks[event] = kept;
@@ -127,7 +127,7 @@ function fileSource(runner) {
     const config = await readJson(file, null);
     const hooks = config === null ? null : flat ? flat.hooks(config) : config.hooks;
     if (!isJsonObject(hooks)) return [];
-    return HOSTS[runner].events.flatMap((event) =>
+    return STOP_EVENTS[runner].flatMap((event) =>
       registrationsIn(flat ? hooks[event] : groupHooks(hooks[event]), event, file));
   };
   read.host = runner;
@@ -152,7 +152,7 @@ async function claudePluginSource(paths) {
       for (const [event, groups] of Object.entries(config.hooks)) {
         // A plugin's hooks are Claude's, so Claude's events are the ones that
         // share a stop with ours.
-        if (HOSTS.claude.events.includes(event)) found.push(...registrationsIn(groupHooks(groups), event, `plugin ${name}`));
+        if (STOP_EVENTS.claude.includes(event)) found.push(...registrationsIn(groupHooks(groups), event, `plugin ${name}`));
       }
     }
   }
@@ -223,7 +223,7 @@ async function reportStatus(paths) {
   for (const [host, sources] of Object.entries(SOURCES)) {
     const all = (await Promise.all(sources.map((source) => source(paths)))).flat();
     const ours = all.filter((hook) => hook.ours);
-    const events = HOSTS[host].events;
+    const events = STOP_EVENTS[host];
     const missing = events.filter((event) => !ours.some((hook) => hook.event === event));
     rows.push([
       host,
@@ -328,7 +328,7 @@ function removeInstalledHooks(groups) {
 
 function updateHookConfig(config, runner, command, uninstall) {
   const hooks = isJsonObject(config.hooks) ? { ...config.hooks } : {};
-  for (const event of HOSTS[runner].events) {
+  for (const event of STOP_EVENTS[runner]) {
     // A copy at an old path or a hand-wired hook points wherever it was put.
     // Strip them all, or the new one lands beside it and every stop is
     // reviewed twice.

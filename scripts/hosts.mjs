@@ -2,22 +2,22 @@
 // registration of this hook shares. Two files write hooks — the build emits
 // the plugin's, the installer writes the settings — and a host that dispatches
 // two events has to be registered for both by whichever one a user chose.
-export const HOSTS = {
-  codex: { events: ["Stop"] },
+export const STOP_EVENTS = {
+  codex: ["Stop"],
   // A Stop registration is rewritten to SubagentStop only for hooks a session
   // registers at runtime, so a settings.json Stop hook never sees a subagent:
   // the event has to be asked for by name.
-  claude: { events: ["Stop", "SubagentStop"] },
-  muse: { events: ["Stop", "SubagentStop"] },
-  ghost: { events: ["session_stop"] },
-  grok: { events: ["Stop"] },
+  claude: ["Stop", "SubagentStop"],
+  muse: ["Stop", "SubagentStop"],
+  ghost: ["session_stop"],
+  grok: ["Stop"],
   // Cursor hands the prompt and the reply to hooks of their own; the stop
   // payload carries neither, so all three are registered.
-  cursor: { events: ["beforeSubmitPrompt", "afterAgentResponse", "stop"] },
-  copilot: { events: ["agentStop"] },
-  agy: { events: ["Stop"] },
+  cursor: ["beforeSubmitPrompt", "afterAgentResponse", "stop"],
+  copilot: ["agentStop"],
+  agy: ["Stop"],
   // A plugin rather than a hook: it watches the session go idle.
-  opencode: { events: ["session.idle"] },
+  opencode: ["session.idle"],
 };
 
 // The hook waits on a reviewer model call, so it has to outlast one.
