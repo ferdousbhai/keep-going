@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
-async function runPi(t, { duplicate = false, verdict = "CONTINUE", reviewerModel } = {}) {
+async function runPi(t, { duplicate = false, verdict = "CONTINUE" } = {}) {
   const home = await mkdtemp(path.join(tmpdir(), "keep-going-pi-e2e-"));
   const agentDir = path.join(home, "agent");
   await mkdir(agentDir);
@@ -57,7 +57,7 @@ async function runPi(t, { duplicate = false, verdict = "CONTINUE", reviewerModel
       api: "openai-completions",
       baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
       apiKey: "local-test-only",
-      models: ["fixture", "reviewer"].map((id) => ({ id, reasoning: false, contextWindow: 128000, maxTokens: 4096 })),
+      models: [{ id: "fixture", reasoning: false, contextWindow: 128000, maxTokens: 4096 }],
     },
   } }));
   const args = ["--offline", "--print", "--no-session", "--no-extensions", "--extension", root,
@@ -72,8 +72,6 @@ async function runPi(t, { duplicate = false, verdict = "CONTINUE", reviewerModel
   const audit = path.join(home, "audit.jsonl");
   const env = { ...process.env, HOME: home, PI_CODING_AGENT_DIR: agentDir,
     KEEP_GOING_AUDIT_LOG: audit, PI_OFFLINE: "1", PI_TELEMETRY: "0" };
-  if (reviewerModel) env.KEEP_GOING_PI_MODEL = reviewerModel;
-  else delete env.KEEP_GOING_PI_MODEL;
   const child = spawn(process.env.KEEP_GOING_PI_BIN || "pi", args, { cwd: home, env, stdio: ["ignore", "pipe", "pipe"] });
   t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
   let stdout = "", stderr = "";
@@ -103,15 +101,6 @@ test("real Pi continues once, then defers to an agent that holds; duplicate inst
   assert.match(JSON.stringify(main[1].input.messages), /Keep going\./);
   assert.doesNotMatch(JSON.stringify(main[1].input.messages), /Finish the calculation\./);
   assert.match(result.stdout, /2 \+ 2 = 4\. Done\./);
-});
-
-test("real Pi honors an explicit reviewer model", { timeout: 60_000 }, async (t) => {
-  const result = await runPi(t, { reviewerModel: "fixture/reviewer" });
-  assert.equal(result.mainCalls, 2);
-  assert.deepEqual(result.rows.map((row) => row.verdict), ["CONTINUE", "HELD"]);
-  for (const { input, review } of result.requests) {
-    assert.equal(input.model, review ? "reviewer" : "fixture");
-  }
 });
 
 test("real Pi accepts STOP and fails open on invalid reviewer output", { timeout: 60_000 }, async (t) => {

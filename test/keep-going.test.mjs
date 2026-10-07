@@ -27,14 +27,10 @@ const ENV_KEYS = [
   "CLAUDE_CONFIG_DIR",
   "HOME",
   "KEEP_GOING_CLAUDE_BIN",
-  "KEEP_GOING_CLAUDE_MODEL",
   "KEEP_GOING_CODEX_BIN",
-  "KEEP_GOING_CODEX_MODEL",
   "KEEP_GOING_GHOST_BIN",
   "KEEP_GOING_GROK_BIN",
-  "KEEP_GOING_GROK_MODEL",
   "KEEP_GOING_MUSE_BIN",
-  "KEEP_GOING_MUSE_MODEL",
   "KEEP_GOING_QUIET_MS",
   "GROK_HOOK_EVENT",
   "GROK_HOME",
@@ -149,7 +145,6 @@ writeFileSync(output, value);
 
   const previous = environmentSnapshot();
   process.env.KEEP_GOING_CODEX_BIN = modelMock;
-  process.env.KEEP_GOING_CODEX_MODEL = "gpt-5.5";
   process.env.MOCK_CALL_LOG = callLog;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
   process.env.XDG_STATE_HOME = path.join(root, "state");
@@ -163,6 +158,7 @@ writeFileSync(output, value);
       session_id: "session-test",
       transcript_path: transcript,
       turn_id: turnId,
+      model: "gpt-5.5",
       stop_hook_active: false,
       last_assistant_message: "Candidate final response.",
     },
@@ -245,7 +241,6 @@ if (pad > 0) process.stdout.write("y".repeat(pad));
   const previous = environmentSnapshot();
   process.env.CLAUDE_CONFIG_DIR = claudeHome;
   process.env.KEEP_GOING_CLAUDE_BIN = modelMock;
-  process.env.KEEP_GOING_CLAUDE_MODEL = "haiku";
   process.env.MOCK_CALL_LOG = callLog;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
   process.env.XDG_STATE_HOME = path.join(root, "state");
@@ -573,7 +568,6 @@ test("Claude classifies with no tools and the lowest advertised effort", async (
     const output = await handleStop(context.input, "claude");
     assert.deepEqual(output, {});
     const [call] = await context.calls();
-    assert.equal(call.model, "haiku");
     assert.equal(call.args[call.args.indexOf("--effort") + 1], "low");
     assert.ok(call.args.includes("--safe-mode"));
     assert.ok(call.args.includes("--no-session-persistence"));
@@ -588,25 +582,24 @@ test("Claude classifies with no tools and the lowest advertised effort", async (
   }
 });
 
-test("Codex and Claude review on a smaller tier unless one is configured", async () => {
-  // A one-word verdict does not need the host's frontier default. Claude's
-  // alias tracks the latest Sonnet; Codex has no family alias, so its default
-  // names a release and ages with it. Muse and Grok have no smaller tier to
-  // name and keep their own defaults.
-  for (const [runner, fixtureFor, variable, expected] of [
-    ["codex", fixture, "KEEP_GOING_CODEX_MODEL", "gpt-5.6-luna"],
-    ["claude", claudeFixture, "KEEP_GOING_CLAUDE_MODEL", "sonnet"],
-    ["muse", museFixture, "KEEP_GOING_MUSE_MODEL", undefined],
-    ["grok", grokFixture, "KEEP_GOING_GROK_MODEL", undefined],
+test("every reviewer runs on the host's own model", async () => {
+  // Codex names the session's model in its stop and runs its reviewer without
+  // the owner's config, so the stop's model is passed on. The other CLIs keep
+  // their own configured default, so no model is named. Muse's stop has a
+  // model field too, but a captured one read "unknown".
+  for (const [runner, fixtureFor, expected] of [
+    ["codex", fixture, "gpt-5.5"],
+    ["claude", claudeFixture, undefined],
+    ["muse", museFixture, undefined],
+    ["grok", grokFixture, undefined],
   ]) {
     const context = await fixtureFor();
     try {
-      delete process.env[variable];
       process.env.MOCK_REVIEW_RESPONSE = "STOP";
       await handleStop(context.input, runner);
       const [call] = await context.calls();
       const named = call.args.includes("--model") ? call.args[call.args.indexOf("--model") + 1] : undefined;
-      assert.equal(named, expected, `${runner} reviewed on ${named} with ${variable} unset`);
+      assert.equal(named, expected, `${runner} reviewed on ${named}`);
     } finally {
       await context.cleanup();
     }
@@ -816,7 +809,6 @@ process.stdout.write(process.env.MOCK_REVIEW_RESPONSE);
   const previous = environmentSnapshot();
   process.env.HOME = fakeHome;
   process.env.KEEP_GOING_MUSE_BIN = modelMock;
-  process.env.KEEP_GOING_MUSE_MODEL = "muse-spark-fixture";
   process.env.MOCK_CALL_LOG = callLog;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
   process.env.XDG_STATE_HOME = path.join(root, "state");

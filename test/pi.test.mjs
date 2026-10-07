@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import keepGoing, { reviewerModel, reviewReasoning, reviewWithPi } from "../src/pi.mjs";
+import keepGoing, { reviewReasoning, reviewWithPi } from "../src/pi.mjs";
 import { CONTINUATION_CAP, handleStop } from "../src/keep-going.mjs";
 
 const text = (value) => [{ type: "text", text: value }];
@@ -11,9 +11,8 @@ const reply = (value, stopReason = "stop") => ({ role: "assistant", content: tex
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "keep-going-pi-test-"));
-  const keys = ["KEEP_GOING_PI_MODEL", "KEEP_GOING_AUDIT_LOG", "XDG_STATE_HOME"];
+  const keys = ["KEEP_GOING_AUDIT_LOG", "XDG_STATE_HOME"];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
-  delete process.env.KEEP_GOING_PI_MODEL;
   process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
   process.env.XDG_STATE_HOME = root;
   t.after(async () => {
@@ -35,7 +34,6 @@ async function fixture(t) {
   let pending = false;
   let reviewer = async () => reply("STOP");
   const model = { provider: "test", id: "active-model" };
-  const alternative = { provider: "other", id: "vendor/reviewer" };
   const ctx = {
     cwd: "/private/workspace",
     model,
@@ -43,7 +41,6 @@ async function fixture(t) {
     sessionManager: { getBranch: () => branch, getSessionId: () => "pi-session" },
     hasPendingMessages: () => pending || sent.length > 0,
     modelRegistry: {
-      find: (provider, id) => provider === alternative.provider && id === alternative.id ? alternative : undefined,
       complete: async (...args) => { calls.push(args); return reviewer(...args); },
     },
     ui: {
@@ -62,7 +59,7 @@ async function fixture(t) {
     for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
   };
   return {
-    root, ctx, pi, branch, calls, sent, notifications, statuses, abort, emit, alternative,
+    root, ctx, pi, branch, calls, sent, notifications, statuses, abort, emit,
     review: (fn) => { reviewer = fn; },
     pending: (value) => { pending = value; },
     command: (args) => commands.get("keep-going").handler(args, ctx),
@@ -109,19 +106,6 @@ test("Pi uses its active model and sends the redacted final text and owner reque
   assert.equal(row.reviewer_model, "test/active-model");
   // Native branch state replaces the standalone hook's tally.
   await assert.rejects(stat(path.join(f.root, "keep-going", "continuations.json")), { code: "ENOENT" });
-});
-
-test("Pi model override is exact provider/model-id, including slashes in model IDs", async (t) => {
-  const f = await fixture(t);
-  process.env.KEEP_GOING_PI_MODEL = "other/vendor/reviewer";
-  await f.finish();
-  assert.equal(f.calls[0][0], f.alternative);
-  for (const invalid of ["reviewer", "/reviewer", "provider/", "missing/model"]) {
-    process.env.KEEP_GOING_PI_MODEL = invalid;
-    assert.throws(() => reviewerModel(f.ctx));
-  }
-  delete process.env.KEEP_GOING_PI_MODEL;
-  assert.throws(() => reviewerModel({ ...f.ctx, model: undefined }), /No Pi model/);
 });
 
 test("CONTINUE queues one custom follow-up, not a new owner prompt", async (t) => {
@@ -231,7 +215,7 @@ test("Pi fails open on provider errors, invalid verdicts, and incomplete reviewe
     f.review(run);
     await f.finish();
   }
-  process.env.KEEP_GOING_PI_MODEL = "not-found/model";
+  f.ctx.model = undefined;
   await f.finish();
   assert.equal(f.sent.length, 0);
   assert.equal(f.notifications.length, 6);
@@ -294,7 +278,7 @@ test("a queued message or changed session makes a completed verdict stale", asyn
 test("/keep-going off persists in the session and cancels an in-flight review", async (t) => {
   const f = await fixture(t);
   await f.command("status");
-  assert.match(f.notifications.at(-1)[0], /on; reviewer test\/active-model/);
+  assert.equal(f.notifications.at(-1)[0], "keep-going: on");
   f.review(() => new Promise(() => {}));
   const review = f.finish();
   await until(() => f.calls.length === 1);

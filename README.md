@@ -138,8 +138,7 @@ Installer flags:
 Pi runs keep-going as an extension. It reviews only a normal final text
 response; tool turns, aborted responses, and turns with queued messages are
 left alone. `CONTINUE` queues one visible follow-up. The reviewer is a
-direct, tool-free call to Pi's active model — or `KEEP_GOING_PI_MODEL`, an
-exact `provider/model-id` — with Pi's own authentication.
+direct, tool-free call to Pi's active model with Pi's own authentication.
 
 `/keep-going on|off|status` controls the current session; `off` also cancels a
 review in progress. Escape cancels the review with the run; new input, a model
@@ -158,10 +157,6 @@ build and unit tests without Pi.
 | --- | --- |
 | `KEEP_GOING_{CODEX,CLAUDE,MUSE,GHOST,GROK}_BIN` | `codex`, `claude`, `muse`, `ghostd`, `grok` |
 | `KEEP_GOING_{CURSOR,COPILOT,AGY,OPENCODE,OMP}_BIN` | `cursor-agent`, `copilot`, `agy`, `opencode`, `omp` |
-| `KEEP_GOING_CODEX_MODEL` | `gpt-5.6-luna` |
-| `KEEP_GOING_CLAUDE_MODEL` | `sonnet`; the latest Sonnet |
-| `KEEP_GOING_{MUSE,GROK,CURSOR,COPILOT,AGY,OPENCODE,OMP}_MODEL` | unset; the reviewer CLI picks its default |
-| `KEEP_GOING_PI_MODEL` | unset; Pi's active model |
 | `KEEP_GOING_QUIET_MS` | `15000`; the wait before a fresh stop is reviewed; `0` reviews at once |
 | `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's raw text and how the stop was decided |
 | `KEEP_GOING_HOME` | OS home; the installer writes under it |
@@ -173,13 +168,11 @@ scratch directory, since OpenCode's free tier refuses a reduced tool set and
 Oh My Pi's switch is unconfirmed — and with as little thinking as the host
 allows: `low` on Codex, Claude, and Grok; Pi at off where the model's catalog
 allows it, else the lowest level the catalog lists; every other host at its
-CLI's default. A one-word
-verdict does not need a frontier model, so Codex defaults to `gpt-5.6-luna`
-and Claude to `sonnet`, as Ghost reviews through `ghostd hook-complete`;
-Pi has no smaller tier to name and reviews on the active model. Codex runs
-with `--ignore-user-config`, so `KEEP_GOING_CODEX_MODEL` is the only way to
-choose its model, and its default names a release, not a family, so it is
-bumped by hand when a newer Luna ships.
+CLI's default. Each reviews on the host's own model: Codex on the session's,
+which its stop names; Pi on its active model; Ghost through `ghostd
+hook-complete`; Muse and Grok, whose reviewers run without the owner's
+config, on their CLI's built-in default; every other host on its CLI's
+configured default.
 Muse reviews under a config overlay with no settings, so its own Stop hook does not
 re-enter; a non-default `XDG_CONFIG_HOME` is unreachable from a hook, and the
 review then fails open.

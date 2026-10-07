@@ -123,7 +123,7 @@ const RUNTIMES = {
   // remaps to this runtime whenever GROK_HOOK_EVENT is set — unless a native
   // Grok hook is present, in which case the Claude copy yields. Dual install
   // writes ~/.grok/hooks/keep-going.json so Grok is covered even if that scan
-  // is off; grok picks its own default model.
+  // is off.
   // Its transcript is a log of session/update frames in which a blocked turn's
   // nudge lands inside the agent's own reasoning, leaving nothing to read
   // nudges from; the tally counts them instead.
@@ -224,19 +224,6 @@ The agent has read far more than you have. Do not second-guess its findings or
 its reading of the owner; judge only whether it stopped with work in hand.
 
 Reply with CONTINUE or STOP and nothing else.`;
-
-// The review is a one-word verdict, so the host's frontier default is more
-// model than it needs. Codex and Claude name a smaller tier the way Ghost's
-// smol bridge does; the other CLIs have no such tier to name, so the flag is
-// absent unless the variable names one. Claude's alias tracks the latest
-// Sonnet; Codex has no family alias, so its default is an exact release.
-const CODEX_DEFAULT_MODEL = "gpt-5.6-luna";
-const CLAUDE_DEFAULT_MODEL = "sonnet";
-
-function modelArgs(variable, fallback) {
-  const model = process.env[variable] || fallback;
-  return model ? ["--model", model] : [];
-}
 
 // With a native Grok hook installed, the Claude-settings copy Grok also
 // dispatches yields, so the stop is reviewed once.
@@ -865,7 +852,7 @@ async function inTemporaryDirectory(runner, work) {
   }
 }
 
-async function runCodexModel({ prompt, timeoutMs }) {
+async function runCodexModel({ prompt, timeoutMs, model }) {
   return inTemporaryDirectory("codex", async (directory) => {
     const outputPath = path.join(directory, "result.txt");
     const codex = process.env.KEEP_GOING_CODEX_BIN || "codex";
@@ -885,13 +872,15 @@ async function runCodexModel({ prompt, timeoutMs }) {
       directory,
       "--config",
       'approval_policy="never"',
-      // Codex rejects a level its model does not list. Every model it offers
-      // lists "low"; the default review model lists no "none".
+      // Codex rejects a level its model does not list; every model it offers
+      // lists "low", and not every one lists "none".
       "--config",
       'model_reasoning_effort="low"',
       "--output-last-message",
       outputPath,
-      ...modelArgs("KEEP_GOING_CODEX_MODEL", CODEX_DEFAULT_MODEL),
+      // The session's own model, which Codex names in every stop:
+      // --ignore-user-config hides the configured one.
+      ...(model ? ["--model", model] : []),
       "-",
     ];
     assertExitOk(await runProcess(codex, args, prompt, timeoutMs), "codex exec");
@@ -918,7 +907,6 @@ async function runClaudeModel({ prompt, timeoutMs }) {
       "dontAsk",
       "--output-format",
       "json",
-      ...modelArgs("KEEP_GOING_CLAUDE_MODEL", CLAUDE_DEFAULT_MODEL),
     ];
     const env = { ...process.env };
     delete env.CLAUDECODE;
@@ -1014,7 +1002,6 @@ async function runGrokModel({ prompt, timeoutMs }) {
       GROK_SYSTEM_PROMPT,
       "--cwd",
       directory,
-      ...modelArgs("KEEP_GOING_GROK_MODEL"),
     ];
     const result = assertExitOk(
       await runProcess(grok, args, "", timeoutMs, env, directory),
@@ -1055,7 +1042,6 @@ async function runMuseModel({ prompt, timeoutMs }) {
       "--no-foreign-personal-context",
       "--prompt-file",
       promptPath,
-      ...modelArgs("KEEP_GOING_MUSE_MODEL"),
     ];
     const result = assertExitOk(
       await runProcess(muse, args, "", timeoutMs, { ...process.env, XDG_CONFIG_HOME: configHome }, directory),
@@ -1095,7 +1081,6 @@ async function runCopilotModel({ prompt, timeoutMs }) {
     const args = [
       "-p", prompt, "--silent", "--stream", "off", "--available-tools", "",
       "--no-custom-instructions", "--disable-builtin-mcps", "--no-ask-user", "--no-auto-update",
-      ...modelArgs("KEEP_GOING_COPILOT_MODEL"),
     ];
     return assertExitOk(await runProcess(copilot, args, "", timeoutMs, reviewerEnv(), directory), "copilot").stdout;
   });
@@ -1105,7 +1090,7 @@ async function runAgyModel({ prompt, timeoutMs }) {
   return inTemporaryDirectory("agy", async (directory) => {
     const agy = process.env.KEEP_GOING_AGY_BIN || "agy";
     // Plan mode and no auto-approval: a reviewer that tried a tool would be refused.
-    const args = ["-p", prompt, "--output-format", "text", "--mode", "plan", "--disable-slash-commands", ...modelArgs("KEEP_GOING_AGY_MODEL")];
+    const args = ["-p", prompt, "--output-format", "text", "--mode", "plan", "--disable-slash-commands"];
     return assertExitOk(await runProcess(agy, args, "", timeoutMs, reviewerEnv(), directory), "agy").stdout;
   });
 }
@@ -1113,7 +1098,7 @@ async function runAgyModel({ prompt, timeoutMs }) {
 async function runOpencodeModel({ prompt, timeoutMs }) {
   return inTemporaryDirectory("opencode", async (directory) => {
     const opencode = process.env.KEEP_GOING_OPENCODE_BIN || "opencode";
-    const args = ["run", "--pure", ...modelArgs("KEEP_GOING_OPENCODE_MODEL"), prompt];
+    const args = ["run", "--pure", prompt];
     return assertExitOk(await runProcess(opencode, args, "", timeoutMs, process.env, directory), "opencode").stdout;
   });
 }
@@ -1121,7 +1106,7 @@ async function runOpencodeModel({ prompt, timeoutMs }) {
 async function runOmpModel({ prompt, timeoutMs }) {
   return inTemporaryDirectory("omp", async (directory) => {
     const omp = process.env.KEEP_GOING_OMP_BIN || "omp";
-    const args = ["-p", "--no-extensions", ...modelArgs("KEEP_GOING_OMP_MODEL"), prompt];
+    const args = ["-p", "--no-extensions", prompt];
     return assertExitOk(await runProcess(omp, args, "", timeoutMs, process.env, directory), "omp").stdout;
   });
 }
@@ -1130,13 +1115,13 @@ async function runCursorModel({ prompt, timeoutMs }) {
   return inTemporaryDirectory("cursor", async (directory) => {
     const cursor = process.env.KEEP_GOING_CURSOR_BIN || "cursor-agent";
     // Ask mode answers without editing anything.
-    const args = ["-p", "--mode", "ask", "--output-format", "text", "--trust", ...modelArgs("KEEP_GOING_CURSOR_MODEL"), prompt];
+    const args = ["-p", "--mode", "ask", "--output-format", "text", "--trust", prompt];
     return assertExitOk(await runProcess(cursor, args, "", timeoutMs, process.env, directory), "cursor-agent").stdout;
   });
 }
 
 // The verdict is the first CONTINUE or STOP standing as a word of its own,
-// wherever the reviewer put it: small reviewers write a sentence first, glue
+// wherever the reviewer put it: reviewers write a sentence first, glue
 // the verdict onto it ("...finished.STOP"), or answer twice
 // ("CONTINUECONTINUE").
 const VERDICT_PATTERN = /(?<![A-Za-z_])(CONTINUE|STOP)(?=$|[^A-Za-z_]|CONTINUE|STOP)/;
@@ -1286,6 +1271,7 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
       })}`,
       timeoutMs: CLASSIFIER_TIMEOUT_MS,
       ghostHome: input.ghost_home,
+      model: input.model,
     });
     verdict = parseReviewVerdict(rawReview);
   } catch (error) {

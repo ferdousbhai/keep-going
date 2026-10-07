@@ -18,23 +18,6 @@ function enabled(ctx) {
   return setting?.data?.enabled !== false;
 }
 
-export function reviewerModel(ctx) {
-  const override = process.env.KEEP_GOING_PI_MODEL;
-  if (!override) {
-    if (!ctx.model) throw new Error("No Pi model selected");
-    return ctx.model;
-  }
-  // Require an exact provider/id rather than guessing across providers. Model
-  // IDs can themselves contain slashes, so only the first slash is a separator.
-  const slash = override.indexOf("/");
-  if (slash < 1 || slash === override.length - 1) {
-    throw new Error("KEEP_GOING_PI_MODEL must be provider/model-id");
-  }
-  const model = ctx.modelRegistry.find(override.slice(0, slash), override.slice(slash + 1));
-  if (!model) throw new Error(`Unknown Pi reviewer model: ${override}`);
-  return model;
-}
-
 // A provider should honor AbortSignal, but a broken one must not keep the
 // extension waiting forever. The race also releases Pi promptly on Escape.
 async function abortable(work, signal) {
@@ -106,12 +89,7 @@ export default function keepGoing(pi) {
         ctx.ui.notify("Usage: /keep-going [on|off|status]", "warning");
         return;
       }
-      try {
-        const model = reviewerModel(ctx);
-        ctx.ui.notify(`keep-going: ${enabled(ctx) ? "on" : "off"}; reviewer ${model.provider}/${model.id}`, "info");
-      } catch (error) {
-        ctx.ui.notify(`keep-going: ${error.message}`, "warning");
-      }
+      ctx.ui.notify(`keep-going: ${enabled(ctx) ? "on" : "off"}`, "info");
     },
   });
 
@@ -151,8 +129,9 @@ export default function keepGoing(pi) {
     const signal = AbortSignal.any([ctx.signal, controller.signal]);
     const sessionId = ctx.sessionManager.getSessionId();
     try {
-      const model = reviewerModel(ctx);
-      ctx.ui.setStatus(NUDGE, `keep-going: reviewing with ${model.provider}/${model.id}`);
+      const model = ctx.model;
+      if (!model) throw new Error("No Pi model selected");
+      ctx.ui.setStatus(NUDGE, "keep-going: reviewing");
       const result = await handleStop({
         session_id: sessionId,
         turn_id: owner.id,
