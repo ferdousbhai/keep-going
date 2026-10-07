@@ -319,7 +319,7 @@ test("STOP accepts the stop", async () => {
   const context = await fixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
-    const output = await handleStop(context.input);
+    const output = await handleStop(context.input, "codex");
     assert.deepEqual(output, {});
     const calls = await context.calls();
     assert.deepEqual(calls.map((item) => item.model), ["gpt-5.5"]);
@@ -396,7 +396,7 @@ test("last_assistant_message is reviewed when the transcript is unavailable", as
   const context = await fixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
-    const output = await handleStop({ ...context.input, transcript_path: null });
+    const output = await handleStop({ ...context.input, transcript_path: null }, "codex");
     assert.deepEqual(output, { decision: "block", reason: NUDGES[0] });
     const [call] = await context.calls();
     assert.match(call.prompt, /"last_assistant_message":"Candidate final response\."/);
@@ -412,7 +412,7 @@ test("a missing reviewer executable fails open and clears the turn tally", async
   await handleStop(context.input, "codex", { runModel: async () => "CONTINUE" });
   assert.equal(await recordedContinuations(context.input, "codex"), 1);
   process.env.KEEP_GOING_CODEX_BIN += ".missing";
-  const output = await handleStop(context.input);
+  const output = await handleStop(context.input, "codex");
   assert.match(output.systemMessage, /ENOENT/);
   assert.equal(await recordedContinuations(context.input, "codex"), 0);
 });
@@ -1092,6 +1092,18 @@ test("Muse blocks an empty final message once, then accepts the retry", async ()
     assert.deepEqual(rows.map((row) => [row.verdict, row.counted_by]), [["CONTINUE", "empty"], ["STOP", "empty"]]);
     assert.equal(rows[0].rationale, first.reason);
     assert.equal(rows[1].rationale, "no last message on retry");
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("Grok's camelCase stopHookActive lets an empty retry end", async () => {
+  const context = await grokFixture();
+  try {
+    const input = { ...context.input, lastAssistantMessage: "" };
+    assert.equal((await handleStop(input, "grok")).decision, "block");
+    assert.deepEqual(await handleStop({ ...input, stopHookActive: true }, "grok"), {});
+    assert.deepEqual(await context.calls(), []);
   } finally {
     await context.cleanup();
   }

@@ -43,7 +43,7 @@ async function fileSize(file) {
 // all three skip the wait.
 async function followedUpDuringQuietWait(input, runtime, delay) {
   const quietMs = quietDelayMs();
-  if (quietMs <= 0 || input.stop_hook_active || input.stopHookActive || input.agent_id) return false;
+  if (quietMs <= 0 || input.stop_hook_active || input.agent_id) return false;
   const watch = runtime.followUp;
   if (!watch) return false;
   const file = watch.file(input);
@@ -65,14 +65,13 @@ async function followedUpDuringQuietWait(input, runtime, delay) {
 }
 
 const ownTranscript = (input) => input.transcript_path;
+const digest = (text, length) => createHash("sha256").update(text).digest("hex").slice(0, length);
 
-// Everything that differs per host, keyed once: the inputs it must supply, the
-// directory its state belongs under, the directories its transcripts may live
-// in, how its nudges are read, how its owner prompt is read, how its reviewer
-// is run, and which log shows a follow-up and how an owner's record reads. A host whose stop payload already
-// identifies the turn keeps its count in the tally, keyed on that identity.
-// Function declarations hoist, so the readers and the runners below are
-// already bound when this is evaluated.
+// Everything that differs per host, keyed once: how its stop payload becomes
+// the common one, the inputs it must supply, the directory its tally belongs
+// under, the directories its transcripts may live in, how its nudges and owner
+// prompt are read, how its reviewer is run, and which log shows a follow-up
+// and how an owner's record reads there.
 const RUNTIMES = {
   // Pi supplies a model call from its authenticated registry and reads its
   // nudges off the active session branch. No subprocess or tally is needed.
@@ -126,6 +125,13 @@ const RUNTIMES = {
   grok: {
     requires: ["session_id"],
     state: xdgStateHome,
+    // Grok spells these two keys in camelCase; read unrenamed, every stop
+    // would look empty.
+    payload: (input) => ({
+      ...input,
+      last_assistant_message: input.last_assistant_message ?? input.lastAssistantMessage,
+      stop_hook_active: input.stop_hook_active ?? input.stopHookActive,
+    }),
     roots: () => [path.join(process.env.GROK_HOME || path.join(homedir(), ".grok"), "sessions")],
     ownerPrompt: grokOwnerPrompt,
     run: runGrokModel,
@@ -134,9 +140,9 @@ const RUNTIMES = {
       owner: grokOwnerText,
     },
   },
-  // Copilot, Antigravity and Cursor send a stop that names neither the reply nor the request.
-  // `payload` reads both from what the host keeps (null: not a stop to review)
-  // and `answer` speaks the host's own continue. Their reviewers are the host's
+  // Copilot, Antigravity and Cursor send a stop that names neither the reply
+  // nor the request; `payload` reads both from what the host keeps (null: not
+  // a stop to review) and `answer` speaks the host's own continue. Their reviewers are the host's
   // own CLI; where its stop hooks have no off switch, KEEP_GOING_REVIEWING
   // keeps a reviewer's stop from being reviewed in turn.
   copilot: {
@@ -528,15 +534,12 @@ async function grokOwnerPrompt(input) {
 const isNudge = (text) => NUDGES.includes(text) || text === EMPTY_STOP_NUDGE;
 
 // A host may start its stop hook before it has recorded the reply that ended
-// the turn, so the reply to the latest message is waited for, briefly.
-const REPLY_FLUSH_POLLS = 30;
-const REPLY_FLUSH_POLL_MS = 100;
-
+// the turn, so the reply to the latest message is waited for, up to 3 s.
 async function untilReply(read) {
   for (let attempt = 0; ; attempt += 1) {
     const turn = await read();
-    if (turn.reply || attempt >= REPLY_FLUSH_POLLS) return turn;
-    await sleep(REPLY_FLUSH_POLL_MS);
+    if (turn.reply || attempt >= 30) return turn;
+    await sleep(100);
   }
 }
 
@@ -568,10 +571,6 @@ async function copilotPayload(input) {
   return { ...stop, owner_prompt: turn.prompt, last_assistant_message: turn.reply };
 }
 
-function agyRequest(content) {
-  return content.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/)?.[1] ?? content.trim();
-}
-
 async function agyPayload(input) {
   // Only the model choosing to stop is a stop; an error or the step limit is not.
   if (String(input.terminationReason ?? "").toLowerCase() !== "model_stop") return null;
@@ -588,7 +587,7 @@ async function agyPayload(input) {
     const content = typeof record?.content === "string" ? record.content.trim() : "";
     if (!content) continue;
     if (record.type === "USER_INPUT" && record.source === "USER_EXPLICIT") {
-      request = agyRequest(content);
+      request = content.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/)?.[1] ?? content;
       reply = "";
     } else if (record.type === "PLANNER_RESPONSE") {
       reply = content;
@@ -597,13 +596,10 @@ async function agyPayload(input) {
   return { ...stop, owner_prompt: request, last_assistant_message: reply };
 }
 
-const cursorRecord = (conversation) =>
-  path.join(xdgStateHome(), "keep-going", "cursor", `${createHash("sha256").update(conversation).digest("hex").slice(0, 32)}.json`);
-
 async function cursorPayload(input) {
   const conversation = typeof input.conversation_id === "string" ? input.conversation_id : "";
   if (!conversation) return null;
-  const file = cursorRecord(conversation);
+  const file = path.join(xdgStateHome(), "keep-going", "cursor", `${digest(conversation, 32)}.json`);
   const read = () => readFile(file, "utf8").then(JSON.parse, () => ({}));
   const save = async (turn) => {
     await mkdir(path.dirname(file), { recursive: true });
@@ -669,7 +665,7 @@ function payloadTurn(input) {
   const named = [input.agent_id, input.turn_id].find((value) => typeof value === "string" && value);
   if (named) return named;
   const ownerPrompt = typeof input.owner_prompt === "string" ? input.owner_prompt.trim() : "";
-  return ownerPrompt ? createHash("sha256").update(ownerPrompt).digest("hex").slice(0, 16) : "";
+  return ownerPrompt ? digest(ownerPrompt, 16) : "";
 }
 
 function turnKey(input) {
@@ -727,15 +723,6 @@ async function recordTurnState(input, runner, blocked, exact = null) {
     tally[key] = { count: from + 1, updated: Date.now() };
   }
   await writeTally(file, tally);
-}
-
-function stopCandidateText(input) {
-  // Grok spells this key and stopHookActive in camelCase while sending
-  // session_id and transcript_path in snake_case; an unread message is an
-  // accepted stop, so the difference would silently disable the hook there.
-  const candidate = input.last_assistant_message ?? input.lastAssistantMessage;
-  if (typeof candidate === "string") return candidate;
-  return messageText(candidate);
 }
 
 // A final message that asserts nothing beyond completion in a single token —
@@ -1172,23 +1159,22 @@ async function inGhostTurn(input) {
   return stat(path.join(input.cwd, ".conversation.jsonl")).then(() => true, () => false);
 }
 
-async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
+async function handleStop(input, runner, { runModel, delay } = {}) {
   // A reviewer's own stop (see reviewerEnv) is not a turn to review.
   if (process.env.KEEP_GOING_REVIEWING) return {};
   if (runner !== "ghost" && await inGhostTurn(input)) return {};
   // Cursor also dispatches Claude's settings hooks, with its own payload and
   // none of the events its review needs; only a native Cursor hook reviews it.
   if (runner === "claude" && input.cursor_version) return {};
-  if (RUNTIMES[runner]?.payload) {
-    const stop = await RUNTIMES[runner].payload(input);
-    if (!stop) return {};
-    input = stop;
-  }
   if (await yieldsToGrokNative(runner)) return {};
   // GROK_HOOK_EVENT is set only by Grok's hook runner, never by Claude Code.
   if (process.env.GROK_HOOK_EVENT) runner = "grok";
   const runtime = RUNTIMES[runner];
   if (!runtime) throw new Error(`Unsupported keep-going runtime: ${runner}`);
+  if (runtime.payload) {
+    input = await runtime.payload(input);
+    if (!input) return {};
+  }
   for (const key of runtime.requires) {
     if (typeof input[key] !== "string" || !input[key]) {
       throw new Error(`Stop input is missing ${key}`);
@@ -1197,7 +1183,8 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
   if (await followedUpDuringQuietWait(input, runtime, delay)) {
     return settleStop(input, runner, {}, { reason: "user followed up during quiet wait", countedBy: "quiet-wait" });
   }
-  const lastAssistantMessage = compactText(stopCandidateText(input), 12_000);
+  const candidate = input.last_assistant_message;
+  const lastAssistantMessage = compactText(typeof candidate === "string" ? candidate : messageText(candidate), 12_000);
   // A subagent stop carries its parent's transcript, whose nudges are the
   // parent's, so it is read only for the agent that owns it.
   let nudges = null;
@@ -1227,7 +1214,7 @@ async function handleStop(input, runner = "codex", { runModel, delay } = {}) {
   if (!lastAssistantMessage) {
     // Grok can fire Stop with no lastAssistantMessage. Accepting that stop
     // disables the hook. Block once; if the next stop is still empty, let it end.
-    if (input.stop_hook_active || input.stopHookActive) {
+    if (input.stop_hook_active) {
       return settleStop(input, runner, {}, { reason: "no last message on retry", countedBy: "empty" });
     }
     return settleStop(input, runner, { decision: "block", reason: EMPTY_STOP_NUDGE }, { countedBy: "empty" });
