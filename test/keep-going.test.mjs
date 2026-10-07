@@ -679,13 +679,11 @@ test("waiting on the owner ends the turn, and the reviewer does not second-guess
 // A Grok session on disk: the updates log the stop names, its owner's chat
 // history beside it, and the stop input pointing at the log.
 async function grokSession(context) {
-  const enc = path.join(process.env.GROK_HOME, "sessions", encodeURIComponent("/tmp/project"));
-  const sessionDir = path.join(enc, context.input.session_id);
+  const sessionDir = path.join(process.env.GROK_HOME, "sessions", encodeURIComponent("/tmp/project"), context.input.session_id);
   await mkdir(sessionDir, { recursive: true });
   const updates = path.join(sessionDir, "updates.jsonl");
   await writeFile(updates, "{}\n");
   return {
-    enc,
     sessionDir,
     chat: path.join(sessionDir, "chat_history.jsonl"),
     input: { ...context.input, transcript_path: updates },
@@ -826,13 +824,13 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", asyn
   }
 });
 
-test("Grok recovers owner_prompt from prompt_history", async () => {
+test("Grok recovers owner_prompt from chat_history", async () => {
   const context = await grokFixture();
   try {
-    const { enc, input } = await grokSession(context);
+    const { chat, input } = await grokSession(context);
     await writeFile(
-      path.join(enc, "prompt_history.jsonl"),
-      `${JSON.stringify({ session_id: context.input.session_id, prompt: "Ship the hook.", is_bash: false })}\n`,
+      chat,
+      `${JSON.stringify({ type: "user", content: [{ type: "text", text: "<user_query>Ship the hook.</user_query>" }] })}\n`,
     );
     process.env.MOCK_REVIEW_RESPONSE = "STOP";
     assert.equal(await resolveOwnerPrompt(input, "grok"), "Ship the hook.");
@@ -845,9 +843,9 @@ test("Grok recovers owner_prompt from prompt_history", async () => {
 });
 
 test("Grok reads the chat log's wrapper blocks as nobody's prompt", async () => {
-  // With no prompt_history the chat log is the fallback, and what the owner
-  // typed is tagged there. The untagged blocks beside it — <user_info> and
-  // friends — are the log's own, and prompt recovery takes none of them.
+  // What the owner typed is tagged in the chat log. The untagged blocks
+  // beside it — <user_info> and friends — are the log's own, and prompt
+  // recovery takes none of them.
   const context = await grokFixture();
   try {
     const { chat, input } = await grokSession(context);
@@ -1393,6 +1391,16 @@ test("the hook runs when reached through a symlink", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("the hook names no default runner: a command without one fails open", async () => {
+  const entry = path.join(import.meta.dirname, "..", "src", "keep-going.mjs");
+  const child = spawn(process.execPath, [entry], { env: { PATH: "" }, stdio: ["pipe", "pipe", "ignore"] });
+  let stdout = "";
+  child.stdout.on("data", (chunk) => stdout += chunk);
+  child.stdin.end(JSON.stringify({ session_id: "s", last_assistant_message: "Done." }));
+  await new Promise((resolve) => child.on("close", resolve));
+  assert.match(JSON.parse(stdout).systemMessage, /keep-going failed open: Unsupported keep-going runtime/);
 });
 
 test("oversized Stop input is refused before any reviewer is spawned", async () => {

@@ -311,7 +311,7 @@ test("Pi core fails open without a native reviewer", async (t) => {
   // An owner prompt is supplied so the input reaches the review: an owner-less
   // "Done." takes the stub skip.
   const input = { session_id: "s", turn_id: "u", last_assistant_message: "Done.", owner_prompt: "Calculate 2 + 2.", continuation_count: 0 };
-  assert.match((await handleStop(input, "pi")).systemMessage, /native extension/);
+  assert.match((await handleStop(input, "pi")).systemMessage, /keep-going was skipped/);
 });
 
 test("the Pi package ships a loadable, dependency-free extension", async () => {

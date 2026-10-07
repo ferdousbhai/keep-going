@@ -502,18 +502,7 @@ function grokOwnerText(record) {
 }
 
 async function grokOwnerPrompt(input) {
-  const updates = await allowedTranscriptPath(input, "grok");
-  try {
-    const last = await lastTranscriptMatch(path.join(path.dirname(path.dirname(updates)), "prompt_history.jsonl"), (record) => {
-      if (record?.is_bash) return "";
-      if (record?.session_id && record.session_id !== input.session_id) return "";
-      return typeof record?.prompt === "string" ? record.prompt.trim() : "";
-    });
-    if (last) return last;
-  } catch {
-    // prompt_history is the typed prompt; chat_history is the fallback wrap.
-  }
-  return lastTranscriptMatch(grokChatHistory(updates), grokOwnerText);
+  return lastTranscriptMatch(grokChatHistory(await allowedTranscriptPath(input, "grok")), grokOwnerText);
 }
 
 // A nudge comes back to some hosts as the next user message; it is never the
@@ -1177,9 +1166,7 @@ async function handleStop(input, runner, { runModel, delay } = {}) {
   let rawReview;
   let verdict;
   try {
-    const run = runModel ?? runtime.run;
-    if (!run) throw new Error(`${runner} review requires its native extension`);
-    rawReview = await run({
+    rawReview = await (runModel ?? runtime.run)({
       prompt: `${REVIEW_PROMPT}\n\n${JSON.stringify({
         last_assistant_message: lastAssistantMessage,
         owner_prompt: compactText(ownerPrompt, 12_000),
@@ -1213,7 +1200,7 @@ async function handleStop(input, runner, { runModel, delay } = {}) {
 
 async function main() {
   try {
-    const runner = process.argv[2] || "codex";
+    const runner = process.argv[2];
     const input = await readStdin();
     const output = await handleStop(input, runner);
     const answer = RUNTIMES[runner]?.answer;
