@@ -47,20 +47,17 @@ export function hookFile(runner) {
 // The test imports the definitions above to prove the committed files still
 // match them, so building only happens when this file is the entrypoint.
 if (process.argv[1] && await realpath(process.argv[1]).catch(() => "") === fileURLToPath(import.meta.url)) {
-  const options = {
+  const outputs = { "keep-going": bundle, pi: "extensions/keep-going.js", opencode: "extensions/opencode.js", omp: "extensions/omp.js" };
+  await Promise.all(Object.entries(outputs).map(([source, out]) => build({
+    entryPoints: [path.join(root, "src", `${source}.mjs`)],
+    outfile: path.resolve(root, out),
     bundle: true,
     platform: "node",
     format: "esm",
     target: "node22",
     minify: true,
     legalComments: "none",
-  };
-  await Promise.all([
-    build({ ...options, entryPoints: [path.join(root, "src", "keep-going.mjs")], outfile: bundle }),
-    build({ ...options, entryPoints: [path.join(root, "src", "pi.mjs")], outfile: path.join(root, "extensions", "keep-going.js") }),
-    build({ ...options, entryPoints: [path.join(root, "src", "opencode.mjs")], outfile: path.join(root, "extensions", "opencode.js") }),
-    build({ ...options, entryPoints: [path.join(root, "src", "omp.mjs")], outfile: path.join(root, "extensions", "omp.js") }),
-  ]);
+  })));
   await chmod(bundle, 0o755);
   const { version } = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
   for (const relative of VERSIONED) {

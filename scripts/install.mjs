@@ -28,8 +28,7 @@ const OPENCODE_PLUGIN = path.join(PACKAGE_ROOT, "extensions", "opencode.js");
 // OpenCode loads every module in its plugins directory; keep-going is one file there.
 const opencodePluginFile = ({ configHome }) => path.join(configHome, "opencode", "plugins", "keep-going.js");
 
-function usage() {
-  return `Usage: keep-going HOSTS [--link] [--audit-log PATH]
+const USAGE = `Usage: keep-going HOSTS [--link] [--audit-log PATH]
        keep-going --uninstall HOSTS
        keep-going --status
 
@@ -40,7 +39,6 @@ marketplace; see README.md.
 --link          register this checkout's hook instead of a copy
 --audit-log P   write KEEP_GOING_AUDIT_LOG=P into each hook command
 --status        show where keep-going is registered`;
-}
 
 const claudeConfigDir = (userHome) => process.env.CLAUDE_CONFIG_DIR || path.join(userHome, ".claude");
 
@@ -88,23 +86,6 @@ const FLAT_HOSTS = {
 
 const hookCommand = (hook) => (typeof hook?.command === "string" ? hook.command : typeof hook?.bash === "string" ? hook.bash : "");
 
-function flatSource(runner) {
-  const read = async (paths) => {
-    const file = TARGETS[runner](paths);
-    const config = await readJson(file, null);
-    const hooks = config === null ? null : FLAT_HOSTS[runner].hooks(config);
-    if (!isJsonObject(hooks)) return [];
-    return HOSTS[runner].events.flatMap((event) =>
-      (Array.isArray(hooks[event]) ? hooks[event] : []).map(hookCommand).filter(Boolean).map((command) => {
-        const ours = ourRunner(command);
-        return { event, where: file, command, ours: ours !== null, runner: ours };
-      }));
-  };
-  read.host = runner;
-  read.where = TARGETS[runner];
-  return read;
-}
-
 function updateFlatConfig(config, runner, command, uninstall) {
   const shape = FLAT_HOSTS[runner];
   const current = shape.hooks(config);
@@ -128,25 +109,26 @@ function ourRunner(command) {
   return command.trimEnd().split(/\s+/).at(-1);
 }
 
-function registrationsIn(groups, event, where) {
-  if (!Array.isArray(groups)) return [];
-  return groups
-    .flatMap((group) => (Array.isArray(group?.hooks) ? group.hooks : []))
-    .map(hookCommand)
-    .filter(Boolean)
-    .map((command) => {
-      const runner = ourRunner(command);
-      return { event, where, command, ours: runner !== null, runner };
-    });
+const groupHooks = (groups) => (Array.isArray(groups) ? groups : []).flatMap((group) => (Array.isArray(group?.hooks) ? group.hooks : []));
+
+function registrationsIn(hooks, event, where) {
+  return (Array.isArray(hooks) ? hooks : []).map(hookCommand).filter(Boolean).map((command) => {
+    const runner = ourRunner(command);
+    return { event, where, command, ours: runner !== null, runner };
+  });
 }
 
-function settingsSource(runner) {
+// A host's own hook file: a flat host lists hooks under each event, every
+// other host groups of them.
+function fileSource(runner) {
+  const flat = FLAT_HOSTS[runner];
   const read = async (paths) => {
     const file = TARGETS[runner](paths);
     const config = await readJson(file, null);
-    if (config === null) return [];
+    const hooks = config === null ? null : flat ? flat.hooks(config) : config.hooks;
+    if (!isJsonObject(hooks)) return [];
     return HOSTS[runner].events.flatMap((event) =>
-      registrationsIn(isJsonObject(config.hooks) ? config.hooks[event] : undefined, event, file));
+      registrationsIn(flat ? hooks[event] : groupHooks(hooks[event]), event, file));
   };
   read.host = runner;
   read.where = TARGETS[runner];
@@ -170,7 +152,7 @@ async function claudePluginSource(paths) {
       for (const [event, groups] of Object.entries(config.hooks)) {
         // A plugin's hooks are Claude's, so Claude's events are the ones that
         // share a stop with ours.
-        if (HOSTS.claude.events.includes(event)) found.push(...registrationsIn(groups, event, `plugin ${name}`));
+        if (HOSTS.claude.events.includes(event)) found.push(...registrationsIn(groupHooks(groups), event, `plugin ${name}`));
       }
     }
   }
@@ -205,14 +187,14 @@ codexSource.where = codexConfig;
 // another host is covered by it, which is what the install note and the
 // wrong-runtime warning need.
 const SOURCES = {
-  claude: [settingsSource("claude"), claudePluginSource],
-  muse: [settingsSource("muse")],
-  ghost: [settingsSource("ghost")],
-  grok: [settingsSource("grok"), settingsSource("claude")],
+  claude: [fileSource("claude"), claudePluginSource],
+  muse: [fileSource("muse")],
+  ghost: [fileSource("ghost")],
+  grok: [fileSource("grok"), fileSource("claude")],
   codex: [codexSource],
-  cursor: [flatSource("cursor")],
-  copilot: [flatSource("copilot")],
-  agy: [flatSource("agy")],
+  cursor: [fileSource("cursor")],
+  copilot: [fileSource("copilot")],
+  agy: [fileSource("agy")],
   opencode: [opencodeSource],
 };
 
@@ -324,7 +306,7 @@ function auditLogOption(args) {
   const index = args.indexOf("--audit-log");
   if (index === -1) return "";
   const value = args[index + 1];
-  if (!value || value.startsWith("--")) throw new Error(`--audit-log needs a path.\n\n${usage()}`);
+  if (!value || value.startsWith("--")) throw new Error(`--audit-log needs a path.\n\n${USAGE}`);
   // Absolute in the command: a relative path would resolve against whatever
   // directory each host runs its hooks from.
   return path.resolve(value);
@@ -344,9 +326,9 @@ function removeInstalledHooks(groups) {
   return kept;
 }
 
-function updateHookConfig(config, events, command, runner, uninstall) {
+function updateHookConfig(config, runner, command, uninstall) {
   const hooks = isJsonObject(config.hooks) ? { ...config.hooks } : {};
-  for (const event of events) {
+  for (const event of HOSTS[runner].events) {
     // A copy at an old path or a hand-wired hook points wherever it was put.
     // Strip them all, or the new one lands beside it and every stop is
     // reviewed twice.
@@ -368,7 +350,7 @@ function updateHookConfig(config, events, command, runner, uninstall) {
 async function main() {
   const args = process.argv.slice(2);
   if (args.includes("--help") || args.includes("-h")) {
-    process.stdout.write(`${usage()}\n`);
+    process.stdout.write(`${USAGE}\n`);
     return;
   }
   const userHome = homedir();
@@ -386,7 +368,7 @@ async function main() {
   const all = args.includes("--all") ? ["claude", "muse", "ghost", "grok"] : [];
   const runtimes = [...Object.keys(TARGETS), "opencode"].filter((name) => all.includes(name) || args.includes(`--${name}`));
   if (runtimes.length === 0) {
-    throw new Error(`Select a host.\n\n${usage()}`);
+    throw new Error(`Select a host.\n\n${USAGE}`);
   }
 
   // A checkout registered with --link runs whatever it currently holds, which
@@ -433,12 +415,8 @@ async function main() {
       continue;
     }
     const command = `${auditPrefix}${shellQuote(process.execPath)} ${shellQuote(hookFile)} ${runner}`;
-    await writeJsonAtomic(
-      settingsFile,
-      FLAT_HOSTS[runner]
-        ? updateFlatConfig(config, runner, command, uninstall)
-        : updateHookConfig(config, HOSTS[runner].events, command, runner, uninstall),
-    );
+    const update = FLAT_HOSTS[runner] ? updateFlatConfig : updateHookConfig;
+    await writeJsonAtomic(settingsFile, update(config, runner, command, uninstall));
     process.stdout.write(`${uninstall ? "Removed" : "Installed"} ${runner} hook in ${settingsFile}\n`);
   }
 

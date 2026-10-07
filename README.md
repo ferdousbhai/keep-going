@@ -99,8 +99,7 @@ Installer flags:
 - **Cursor CLI** sends neither the reply nor the request at stop, so the hook
   also runs on `beforeSubmitPrompt` and `afterAgentResponse` to note them, and
   answers a stop with `followup_message`. Its run of Claude's settings hooks
-  stands down. Cursor caps follow-ups at 5 a loop, and its print mode
-  (`cursor-agent -p`) runs no hooks.
+  stands down. Cursor caps follow-ups at 5 a loop.
 - **Copilot CLI** reads the turn from its `events.jsonl`; the block reason is
   sent as the next prompt, and Copilot ends a turn after 8 blocks in a row.
 - **Antigravity** reads the turn from its transcript and answers
