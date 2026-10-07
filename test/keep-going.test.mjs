@@ -98,13 +98,48 @@ function transcriptLine(payload, turnId) {
   });
 }
 
+// A mock reviewer CLI at KEEP_GOING_<BIN>_BIN, logging each call, with the
+// call log, audit log, and continuation tally under a scratch root.
+async function reviewerFixture(name, mockSource) {
+  const root = await mkdtemp(path.join(tmpdir(), `${name}-keep-going-test-`));
+  const modelMock = path.join(root, `mock-${name}.mjs`);
+  const callLog = path.join(root, "calls.jsonl");
+  await writeFile(modelMock, `#!/usr/bin/env node\n${mockSource}`);
+  await chmod(modelMock, 0o755);
+  const previous = environmentSnapshot();
+  Object.assign(process.env, {
+    [`KEEP_GOING_${name.toUpperCase()}_BIN`]: modelMock,
+    MOCK_CALL_LOG: callLog,
+    KEEP_GOING_AUDIT_LOG: path.join(root, "audit.jsonl"),
+    XDG_STATE_HOME: path.join(root, "state"),
+    // The quiet wait holds a fresh stop briefly; fixtures opt out so the
+    // suite stays fast, and the wait itself is covered by its own tests below.
+    KEEP_GOING_QUIET_MS: "0",
+  });
+  return {
+    root,
+    calls: () => readCalls(callLog),
+    async cleanup() {
+      restoreEnvironment(previous);
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
 async function fixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "keep-going-test-"));
-  const sessions = path.join(root, "codex", "sessions", "2026", "08", "26");
+  const context = await reviewerFixture("codex", `import { appendFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const model = args[args.indexOf("--model") + 1];
+const output = args[args.indexOf("--output-last-message") + 1];
+let prompt = "";
+for await (const chunk of process.stdin) prompt += chunk;
+appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ model, args, prompt }) + "\\n");
+writeFileSync(output, process.env.MOCK_REVIEW_RESPONSE);
+`);
+  process.env.CODEX_HOME = path.join(context.root, "codex");
+  const sessions = path.join(process.env.CODEX_HOME, "sessions", "2026", "08", "26");
   const transcript = path.join(sessions, "rollout.jsonl");
   const turnId = "turn-test";
-  const modelMock = path.join(root, "mock-codex.mjs");
-  const callLog = path.join(root, "calls.jsonl");
 
   // Codex sends a rollout path with every stop. The owner prompt, the nudge
   // reader, and the quiet wait read it; the count never does — the turn id
@@ -127,33 +162,8 @@ async function fixture() {
     ].join("\n"),
   );
 
-  await writeFile(
-    modelMock,
-    `#!/usr/bin/env node
-import { appendFileSync, writeFileSync } from "node:fs";
-const args = process.argv.slice(2);
-const model = args[args.indexOf("--model") + 1];
-const output = args[args.indexOf("--output-last-message") + 1];
-const value = process.env.MOCK_REVIEW_RESPONSE;
-let prompt = "";
-for await (const chunk of process.stdin) prompt += chunk;
-appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ model, args, prompt }) + "\\n");
-writeFileSync(output, value);
-`,
-  );
-  await chmod(modelMock, 0o755);
-
-  const previous = environmentSnapshot();
-  process.env.KEEP_GOING_CODEX_BIN = modelMock;
-  process.env.MOCK_CALL_LOG = callLog;
-  process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
-  process.env.XDG_STATE_HOME = path.join(root, "state");
-  process.env.CODEX_HOME = path.join(root, "codex");
-  // The quiet wait holds a fresh stop briefly; fixtures opt out so the
-  // suite stays fast, and the wait itself is covered by its own tests below.
-  process.env.KEEP_GOING_QUIET_MS = "0";
-
   return {
+    ...context,
     input: {
       session_id: "session-test",
       transcript_path: transcript,
@@ -162,22 +172,24 @@ writeFileSync(output, value);
       stop_hook_active: false,
       last_assistant_message: "Candidate final response.",
     },
-    calls: () => readCalls(callLog),
-    async cleanup() {
-      restoreEnvironment(previous);
-      await rm(root, { recursive: true, force: true });
-    },
   };
 }
 
 async function claudeFixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "claude-keep-going-test-"));
-  const claudeHome = path.join(root, "claude");
-  const projects = path.join(claudeHome, "projects", "-tmp-project");
+  const context = await reviewerFixture("claude", `import { appendFileSync } from "node:fs";
+let prompt = "";
+for await (const chunk of process.stdin) prompt += chunk;
+const args = process.argv.slice(2);
+const model = args[args.indexOf("--model") + 1];
+const value = process.env.MOCK_REVIEW_RESPONSE;
+appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ model, args, prompt }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "\\n" + value + "\\n" }));
+const pad = Number(process.env.MOCK_REVIEW_PAD || 0);
+if (pad > 0) process.stdout.write("y".repeat(pad));
+`);
+  process.env.CLAUDE_CONFIG_DIR = path.join(context.root, "claude");
+  const projects = path.join(process.env.CLAUDE_CONFIG_DIR, "projects", "-tmp-project");
   const transcript = path.join(projects, "session-test.jsonl");
-  const modelMock = path.join(root, "mock-claude.mjs");
-  const callLog = path.join(root, "calls.jsonl");
-
   await mkdir(projects, { recursive: true });
   await writeFile(
     transcript,
@@ -221,32 +233,8 @@ async function claudeFixture() {
     ].join("\n"),
   );
 
-  await writeFile(
-    modelMock,
-    `#!/usr/bin/env node
-import { appendFileSync } from "node:fs";
-let prompt = "";
-for await (const chunk of process.stdin) prompt += chunk;
-const args = process.argv.slice(2);
-const model = args[args.indexOf("--model") + 1];
-const value = process.env.MOCK_REVIEW_RESPONSE;
-appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ model, args, prompt }) + "\\n");
-process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "\\n" + value + "\\n" }));
-const pad = Number(process.env.MOCK_REVIEW_PAD || 0);
-if (pad > 0) process.stdout.write("y".repeat(pad));
-`,
-  );
-  await chmod(modelMock, 0o755);
-
-  const previous = environmentSnapshot();
-  process.env.CLAUDE_CONFIG_DIR = claudeHome;
-  process.env.KEEP_GOING_CLAUDE_BIN = modelMock;
-  process.env.MOCK_CALL_LOG = callLog;
-  process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
-  process.env.XDG_STATE_HOME = path.join(root, "state");
-  process.env.KEEP_GOING_QUIET_MS = "0";
-
   return {
+    ...context,
     input: {
       session_id: "session-test",
       transcript_path: transcript,
@@ -255,41 +243,20 @@ if (pad > 0) process.stdout.write("y".repeat(pad));
       background_tasks: [],
       session_crons: [],
     },
-    calls: () => readCalls(callLog),
-    async cleanup() {
-      restoreEnvironment(previous);
-      await rm(root, { recursive: true, force: true });
-    },
   };
 }
 
 async function ghostFixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "ghost-keep-going-test-"));
-  const modelMock = path.join(root, "mock-ghostd.mjs");
-  const callLog = path.join(root, "calls.jsonl");
-  const ghostHome = path.join(root, "ghosts", "casper");
-
-  await mkdir(ghostHome, { recursive: true });
-  await writeFile(
-    modelMock,
-    `#!/usr/bin/env node
-import { appendFileSync } from "node:fs";
+  const context = await reviewerFixture("ghost", `import { appendFileSync } from "node:fs";
 let input = "";
 for await (const chunk of process.stdin) input += chunk;
 appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ args: process.argv.slice(2), input: JSON.parse(input), reviewing: process.env.KEEP_GOING_REVIEWING ?? null }) + "\\n");
 process.stdout.write(JSON.stringify({ text: process.env.MOCK_REVIEW_RESPONSE }));
-`,
-  );
-  await chmod(modelMock, 0o755);
-
-  const previous = environmentSnapshot();
-  process.env.KEEP_GOING_GHOST_BIN = modelMock;
-  process.env.MOCK_CALL_LOG = callLog;
-  process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
-  process.env.XDG_STATE_HOME = path.join(root, "state");
-  process.env.KEEP_GOING_QUIET_MS = "0";
-
+`);
+  const ghostHome = path.join(context.root, "ghosts", "casper");
+  await mkdir(ghostHome, { recursive: true });
   return {
+    ...context,
     input: {
       type: "session_stop",
       session_id: "session-test",
@@ -306,11 +273,6 @@ process.stdout.write(JSON.stringify({ text: process.env.MOCK_REVIEW_RESPONSE }))
         content: [{ type: "text", text: "Candidate final response." }],
       },
       stop_hook_active: false,
-    },
-    calls: () => readCalls(callLog),
-    async cleanup() {
-      restoreEnvironment(previous);
-      await rm(root, { recursive: true, force: true });
     },
   };
 }
@@ -730,13 +692,7 @@ async function grokSession(context) {
 }
 
 async function grokFixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "grok-keep-going-test-"));
-  const modelMock = path.join(root, "mock-grok.mjs");
-  const callLog = path.join(root, "calls.jsonl");
-  await writeFile(
-    modelMock,
-    `#!/usr/bin/env node
-import { appendFileSync, existsSync } from "node:fs";
+  const context = await reviewerFixture("grok", `import { appendFileSync, existsSync } from "node:fs";
 import path from "node:path";
 const args = process.argv.slice(2);
 appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({
@@ -746,19 +702,10 @@ appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({
   overlayHasConfig: process.env.GROK_HOME ? existsSync(path.join(process.env.GROK_HOME, "config.toml")) : false,
 }) + "\\n");
 process.stdout.write(process.env.MOCK_REVIEW_RESPONSE + "\\n");
-`,
-  );
-  await chmod(modelMock, 0o755);
-
-  const previous = environmentSnapshot();
-  process.env.KEEP_GOING_GROK_BIN = modelMock;
-  process.env.MOCK_CALL_LOG = callLog;
-  process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
-  process.env.XDG_STATE_HOME = path.join(root, "state");
-  process.env.GROK_HOME = path.join(root, "grok-home");
-  process.env.KEEP_GOING_QUIET_MS = "0";
-
+`);
+  process.env.GROK_HOME = path.join(context.root, "grok-home");
   return {
+    ...context,
     // The payload Grok's native Stop hook actually sends, spelling intact.
     input: {
       hook_event_name: "Stop",
@@ -769,27 +716,11 @@ process.stdout.write(process.env.MOCK_REVIEW_RESPONSE + "\\n");
       stopHookActive: false,
       reason: "end_turn",
     },
-    calls: () => readCalls(callLog),
-    async cleanup() {
-      restoreEnvironment(previous);
-      await rm(root, { recursive: true, force: true });
-    },
   };
 }
 
 async function museFixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "muse-keep-going-test-"));
-  const modelMock = path.join(root, "mock-muse.mjs");
-  const callLog = path.join(root, "calls.jsonl");
-  // The reviewer restores the default home's auth into its hook-free overlay,
-  // so the fixture home carries a credential to be restored.
-  const fakeHome = path.join(root, "home");
-  await mkdir(path.join(fakeHome, ".config", "muse"), { recursive: true });
-  await writeFile(path.join(fakeHome, ".config", "muse", "auth.json"), "fixture-auth");
-  await writeFile(
-    modelMock,
-    `#!/usr/bin/env node
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+  const context = await reviewerFixture("muse", `import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 const args = process.argv.slice(2);
 const prompt = readFileSync(args[args.indexOf("--prompt-file") + 1], "utf8");
@@ -802,19 +733,14 @@ appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({
   overlayHasAuth: configHome ? existsSync(path.join(configHome, "muse", "auth.json")) : null,
 }) + "\\n");
 process.stdout.write(process.env.MOCK_REVIEW_RESPONSE);
-`,
-  );
-  await chmod(modelMock, 0o755);
-
-  const previous = environmentSnapshot();
-  process.env.HOME = fakeHome;
-  process.env.KEEP_GOING_MUSE_BIN = modelMock;
-  process.env.MOCK_CALL_LOG = callLog;
-  process.env.KEEP_GOING_AUDIT_LOG = path.join(root, "audit.jsonl");
-  process.env.XDG_STATE_HOME = path.join(root, "state");
-  process.env.KEEP_GOING_QUIET_MS = "0";
-
+`);
+  // The reviewer restores the default home's auth into its hook-free overlay,
+  // so the fixture home carries a credential to be restored.
+  process.env.HOME = path.join(context.root, "home");
+  await mkdir(path.join(process.env.HOME, ".config", "muse"), { recursive: true });
+  await writeFile(path.join(process.env.HOME, ".config", "muse", "auth.json"), "fixture-auth");
   return {
+    ...context,
     // The payload Muse's native Stop hook actually sends, spelling intact.
     input: {
       cwd: "/tmp/project",
@@ -826,11 +752,6 @@ process.stdout.write(process.env.MOCK_REVIEW_RESPONSE);
       stop_hook_active: false,
       transcript_path: null,
       turn_id: "turn-test",
-    },
-    calls: () => readCalls(callLog),
-    async cleanup() {
-      restoreEnvironment(previous);
-      await rm(root, { recursive: true, force: true });
     },
   };
 }
@@ -1215,19 +1136,27 @@ test("an owner message queued during the quiet wait lets a Claude stop through",
   }
 });
 
-test("a subagent stop skips the quiet wait", async () => {
-  // Its owner is the parent agent, which is waiting on it and cannot follow up.
-  const context = await claudeFixture();
-  try {
-    process.env.MOCK_REVIEW_RESPONSE = "STOP";
-    process.env.KEEP_GOING_QUIET_MS = "60000";
-    const output = await handleStop({ ...context.input, agent_id: "agent-1" }, "claude", {
-      delay: async () => { throw new Error("a subagent has no owner to wait for"); },
-    });
-    assert.deepEqual(output, {});
-    assert.equal((await context.calls()).length, 1);
-  } finally {
-    await context.cleanup();
+test("a retry, a subagent, and a stop with no transcript skip the quiet wait", async () => {
+  // A retry already waited once; a subagent's owner is the parent agent, which
+  // is waiting on it; and Muse sends transcript_path null, so no follow-up
+  // could ever be observed.
+  for (const [runner, fixtureFor, extra] of [
+    ["codex", fixture, { stop_hook_active: true }],
+    ["claude", claudeFixture, { agent_id: "agent-1" }],
+    ["muse", museFixture, {}],
+  ]) {
+    const context = await fixtureFor();
+    try {
+      process.env.MOCK_REVIEW_RESPONSE = "STOP";
+      process.env.KEEP_GOING_QUIET_MS = "60000";
+      const output = await handleStop({ ...context.input, ...extra }, runner, {
+        delay: async () => { throw new Error(`${runner} waited`); },
+      });
+      assert.deepEqual(output, {});
+      assert.equal((await context.calls()).length, 1);
+    } finally {
+      await context.cleanup();
+    }
   }
 });
 
@@ -1252,38 +1181,6 @@ test("Grok's quiet wait watches the chat history beside the updates log", async 
     });
     assert.equal((await context.calls()).length, 1);
     assert.equal((await auditRows()).at(-1).counted_by, "quiet-wait");
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("a retry after hook feedback skips the quiet wait", async () => {
-  const context = await fixture();
-  try {
-    process.env.MOCK_REVIEW_RESPONSE = "STOP";
-    process.env.KEEP_GOING_QUIET_MS = "60000";
-    const output = await handleStop({ ...context.input, stop_hook_active: true }, "codex", {
-      delay: async () => { throw new Error("quiet wait must not run on a retry"); },
-    });
-    assert.deepEqual(output, {});
-    assert.equal((await context.calls()).length, 1);
-  } finally {
-    await context.cleanup();
-  }
-});
-
-test("a stop with no transcript to watch is reviewed at once", async () => {
-  // Muse sends transcript_path null, so no follow-up could ever be observed.
-  // Holding it for the quiet wait would only add latency.
-  const context = await museFixture();
-  try {
-    process.env.MOCK_REVIEW_RESPONSE = "STOP";
-    process.env.KEEP_GOING_QUIET_MS = "60000";
-    const output = await handleStop(context.input, "muse", {
-      delay: async () => { throw new Error("nothing to watch, so no wait"); },
-    });
-    assert.deepEqual(output, {});
-    assert.equal((await context.calls()).length, 1);
   } finally {
     await context.cleanup();
   }
