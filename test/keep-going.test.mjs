@@ -281,7 +281,7 @@ async function ghostFixture() {
 import { appendFileSync } from "node:fs";
 let input = "";
 for await (const chunk of process.stdin) input += chunk;
-appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ args: process.argv.slice(2), input: JSON.parse(input) }) + "\\n");
+appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ args: process.argv.slice(2), input: JSON.parse(input), reviewing: process.env.KEEP_GOING_REVIEWING ?? null }) + "\\n");
 process.stdout.write(JSON.stringify({ text: process.env.MOCK_REVIEW_RESPONSE }));
 `,
   );
@@ -638,14 +638,16 @@ process.exitCode = 1;
   }
 });
 
-test("Ghost delegates classification to its smol-model bridge", async () => {
+test("Ghost delegates classification to ghostd, marked as a reviewer", async () => {
   const context = await ghostFixture();
   try {
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
     const output = await handleStop(context.input, "ghost");
     assert.deepEqual(output, { decision: "block", reason: NUDGES[0] });
     const [call] = await context.calls();
-    assert.deepEqual(call.args, ["hook-smol-complete"]);
+    assert.deepEqual(call.args, ["hook-complete"]);
+    // ghostd's harness runs the owner's own hooks; this one must not review it.
+    assert.equal(call.reviewing, "1");
     assert.equal(call.input.ghost_home, context.input.ghost_home);
     assert.match(call.input.prompt, /Reply with CONTINUE or STOP/);
     assert.match(call.input.prompt, /"last_assistant_message":"Candidate final response\."/);

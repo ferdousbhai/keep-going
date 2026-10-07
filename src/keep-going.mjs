@@ -1065,14 +1065,17 @@ async function runMuseModel({ prompt, timeoutMs }) {
   });
 }
 
+// ghostd reviews on the owner's own agent CLI with its hooks on, so the
+// reviewer's stop is marked (see handleStop).
 async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
   const ghostd = process.env.KEEP_GOING_GHOST_BIN || "ghostd";
   const result = assertExitOk(
     await runProcess(
       ghostd,
-      ["hook-smol-complete"],
+      ["hook-complete"],
       JSON.stringify({ ghost_home: ghostHome, prompt }),
       timeoutMs,
+      reviewerEnv(),
     ),
     "ghostd",
   );
@@ -1081,9 +1084,9 @@ async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
   return envelope.text;
 }
 
-// Copilot and Antigravity have no switch for their own hooks, so their
-// reviewer's stop is marked instead (see handleStop). Cursor's print mode
-// runs no hooks.
+// Copilot, Antigravity, and Ghost's harness have no switch for their own
+// hooks, so their reviewer's stop is marked instead (see handleStop).
+// Cursor's print mode runs no hooks.
 const reviewerEnv = () => ({ ...process.env, KEEP_GOING_REVIEWING: "1" });
 
 async function runCopilotModel({ prompt, timeoutMs }) {

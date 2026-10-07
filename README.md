@@ -56,7 +56,7 @@ not. Subagent stops, and every other host's, are reviewed at once.
 ## Install
 
 CLI hooks need Node.js 22+ and the host CLI (`codex`, `claude`, `muse`,
-`ghostd` with `hook-smol-complete`, `grok`, `cursor-agent`, `copilot`, `agy`,
+`ghostd` with `hook-complete`, `grok`, `cursor-agent`, `copilot`, `agy`,
 or `opencode`). The Pi extension needs Pi 0.84.2+.
 
 ```bash
@@ -97,8 +97,8 @@ How each newer host continues:
   that idle, so only a session that stays open continues.
 - **Oh My Pi** blocks on its `session_stop` hook.
 
-Copilot's and Antigravity's reviewers are the host's own CLI, whose hooks
-cannot be switched off for one run; `KEEP_GOING_REVIEWING` marks the
+Copilot's, Antigravity's, and Ghost's reviewers are the owner's own agent
+CLI, whose hooks cannot be switched off for one run; `KEEP_GOING_REVIEWING` marks the
 reviewer's process so its stop is not reviewed in turn. OpenCode's reviewer
 runs with `--pure` and Oh My Pi's with `--no-extensions`, so neither loads
 keep-going.
@@ -175,7 +175,7 @@ allows: `low` on Codex, Claude, and Grok; Pi at off where the model's catalog
 allows it, else the lowest level the catalog lists; every other host at its
 CLI's default. A one-word
 verdict does not need a frontier model, so Codex defaults to `gpt-5.6-luna`
-and Claude to `sonnet`, as Ghost reviews through `ghostd hook-smol-complete`;
+and Claude to `sonnet`, as Ghost reviews through `ghostd hook-complete`;
 Pi has no smaller tier to name and reviews on the active model. Codex runs
 with `--ignore-user-config`, so `KEEP_GOING_CODEX_MODEL` is the only way to
 choose its model, and its default names a release, not a family, so it is
