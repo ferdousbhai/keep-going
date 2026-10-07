@@ -151,8 +151,6 @@ reviewer's process and its stop goes unreviewed.
 
 | Variable | Default |
 | --- | --- |
-| `KEEP_GOING_{CODEX,CLAUDE,MUSE,GHOST,GROK}_BIN` | `codex`, `claude`, `muse`, `ghostd`, `grok` |
-| `KEEP_GOING_{CURSOR,COPILOT,AGY,OPENCODE,OMP}_BIN` | `cursor-agent`, `copilot`, `agy`, `opencode`, `omp` |
 | `KEEP_GOING_QUIET_MS` | `15000`; the wait before a fresh stop is reviewed; `0` reviews at once |
 | `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's raw text and how the stop was decided |
 

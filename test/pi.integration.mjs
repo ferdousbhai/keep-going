@@ -1,6 +1,6 @@
 // Optional end-to-end tests against an installed Pi 0.84.2+. All model calls
 // go to a loopback fixture; no credentials or paid inference are used.
-// Run: npm run test:pi (or KEEP_GOING_PI_BIN=/path/to/pi npm run test:pi).
+// Run: npm run test:pi (spawns the `pi` on PATH).
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -72,7 +72,7 @@ async function runPi(t, { duplicate = false, verdict = "CONTINUE" } = {}) {
   const audit = path.join(home, "audit.jsonl");
   const env = { ...process.env, HOME: home, PI_CODING_AGENT_DIR: agentDir,
     KEEP_GOING_AUDIT_LOG: audit, PI_OFFLINE: "1", PI_TELEMETRY: "0" };
-  const child = spawn(process.env.KEEP_GOING_PI_BIN || "pi", args, { cwd: home, env, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn("pi", args, { cwd: home, env, stdio: ["ignore", "pipe", "pipe"] });
   t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
   let stdout = "", stderr = "";
   child.stdout.on("data", (chunk) => stdout += chunk);

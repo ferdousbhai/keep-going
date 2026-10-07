@@ -26,12 +26,8 @@ import { HOOK_FILES, VERSIONED, hookFile, stampVersion } from "../scripts/build.
 const ENV_KEYS = [
   "CLAUDE_CONFIG_DIR",
   "HOME",
-  "KEEP_GOING_CLAUDE_BIN",
-  "KEEP_GOING_CODEX_BIN",
-  "KEEP_GOING_GHOST_BIN",
-  "KEEP_GOING_GROK_BIN",
-  "KEEP_GOING_MUSE_BIN",
   "KEEP_GOING_QUIET_MS",
+  "PATH",
   "GROK_HOOK_EVENT",
   "GROK_HOME",
   "CODEX_HOME",
@@ -98,17 +94,20 @@ function transcriptLine(payload, turnId) {
   });
 }
 
-// A mock reviewer CLI at KEEP_GOING_<BIN>_BIN, logging each call, with the
-// call log, audit log, and continuation tally under a scratch root.
+// A mock reviewer CLI under the runner's command name, logging each call, with
+// the call log, audit log, and continuation tally under a scratch root. PATH is
+// the mock's directory alone, so no test can reach a real CLI.
 async function reviewerFixture(name, mockSource) {
   const root = await mkdtemp(path.join(tmpdir(), `${name}-keep-going-test-`));
-  const modelMock = path.join(root, `mock-${name}.mjs`);
+  const bin = path.join(root, "bin");
+  const mock = path.join(bin, name === "ghost" ? "ghostd" : name);
   const callLog = path.join(root, "calls.jsonl");
-  await writeFile(modelMock, `#!/usr/bin/env node\n${mockSource}`);
-  await chmod(modelMock, 0o755);
+  await mkdir(bin);
+  await writeFile(mock, `#!${process.execPath}\n${mockSource}`);
+  await chmod(mock, 0o755);
   const previous = environmentSnapshot();
   Object.assign(process.env, {
-    [`KEEP_GOING_${name.toUpperCase()}_BIN`]: modelMock,
+    PATH: bin,
     MOCK_CALL_LOG: callLog,
     KEEP_GOING_AUDIT_LOG: path.join(root, "audit.jsonl"),
     XDG_STATE_HOME: path.join(root, "state"),
@@ -118,6 +117,8 @@ async function reviewerFixture(name, mockSource) {
   });
   return {
     root,
+    bin,
+    mock,
     calls: () => readCalls(callLog),
     async cleanup() {
       restoreEnvironment(previous);
@@ -373,7 +374,7 @@ test("a missing reviewer executable fails open and clears the turn tally", async
   t.after(() => context.cleanup());
   await handleStop(context.input, "codex", { runModel: async () => "CONTINUE" });
   assert.equal(await recordedContinuations(context.input, "codex"), 1);
-  process.env.KEEP_GOING_CODEX_BIN += ".missing";
+  await rm(context.mock);
   const output = await handleStop(context.input, "codex");
   assert.match(output.systemMessage, /ENOENT/);
   assert.equal(await recordedContinuations(context.input, "codex"), 0);
@@ -574,7 +575,7 @@ test("temporary reviewers remove their scratch directories after process failure
   ]) {
     const context = await createFixture();
     try {
-      await writeFile(process.env[`KEEP_GOING_${runner.toUpperCase()}_BIN`], `#!/usr/bin/env node
+      await writeFile(context.mock, `#!${process.execPath}
 import { appendFileSync } from "node:fs";
 for await (const chunk of process.stdin) {} // Consume input before exiting.
 const args = process.argv.slice(2);
@@ -862,11 +863,10 @@ test("Grok reads the chat log's wrapper blocks as nobody's prompt", async () => 
 
 test("Grok-dispatched Claude settings are reviewed by grok, not claude", async () => {
   const context = await grokFixture();
-  const claudeBin = path.join(path.dirname(process.env.KEEP_GOING_GROK_BIN), "must-not-run-claude.mjs");
+  const claudeBin = path.join(context.bin, "claude");
   try {
-    await writeFile(claudeBin, "#!/usr/bin/env node\nprocess.exit(2);\n");
+    await writeFile(claudeBin, `#!${process.execPath}\nprocess.exit(2);\n`);
     await chmod(claudeBin, 0o755);
-    process.env.KEEP_GOING_CLAUDE_BIN = claudeBin;
     process.env.GROK_HOOK_EVENT = "stop";
     process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
 

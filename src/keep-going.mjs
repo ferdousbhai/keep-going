@@ -812,7 +812,6 @@ async function inTemporaryDirectory(runner, work) {
 async function runCodexModel({ prompt, timeoutMs, model }) {
   return inTemporaryDirectory("codex", async (directory) => {
     const outputPath = path.join(directory, "result.txt");
-    const codex = process.env.KEEP_GOING_CODEX_BIN || "codex";
     const args = [
       "exec",
       "--ephemeral",
@@ -840,14 +839,13 @@ async function runCodexModel({ prompt, timeoutMs, model }) {
       ...(model ? ["--model", model] : []),
       "-",
     ];
-    assertExitOk(await runProcess(codex, args, prompt, timeoutMs), "codex exec");
+    assertExitOk(await runProcess("codex", args, prompt, timeoutMs), "codex exec");
     return readFile(outputPath, "utf8");
   });
 }
 
 async function runClaudeModel({ prompt, timeoutMs }) {
   return inTemporaryDirectory("claude", async (directory) => {
-    const claude = process.env.KEEP_GOING_CLAUDE_BIN || "claude";
     // No tools and no --json-schema: a plain-text verdict, not a StructuredOutput
     // tool call. Claude's lowest advertised effort is low (it has no none).
     const args = [
@@ -870,7 +868,7 @@ async function runClaudeModel({ prompt, timeoutMs }) {
     delete env.CLAUDE_CODE_EFFORT_LEVEL;
     delete env.CLAUDE_CODE_ENTRYPOINT;
     const result = assertExitOk(
-      await runProcess(claude, args, prompt, timeoutMs, env, directory),
+      await runProcess("claude", args, prompt, timeoutMs, env, directory),
       "claude",
     );
     let parsed;
@@ -936,7 +934,6 @@ async function runGrokModel({ prompt, timeoutMs }) {
       ].join("\n"),
       { encoding: "utf8", mode: 0o600 },
     );
-    const grok = process.env.KEEP_GOING_GROK_BIN || "grok";
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GROK_")));
     env.GROK_HOME = overlayHome;
     const args = [
@@ -961,7 +958,7 @@ async function runGrokModel({ prompt, timeoutMs }) {
       directory,
     ];
     const result = assertExitOk(
-      await runProcess(grok, args, "", timeoutMs, env, directory),
+      await runProcess("grok", args, "", timeoutMs, env, directory),
       "grok",
     );
     return result.stdout;
@@ -977,7 +974,6 @@ async function runGrokModel({ prompt, timeoutMs }) {
 // open.
 async function runMuseModel({ prompt, timeoutMs }) {
   return inTemporaryDirectory("muse", async (root) => {
-    const muse = process.env.KEEP_GOING_MUSE_BIN || "muse";
     const directory = path.join(root, "work");
     const configHome = path.join(root, "config");
     await mkdir(directory, { recursive: true });
@@ -1001,7 +997,7 @@ async function runMuseModel({ prompt, timeoutMs }) {
       promptPath,
     ];
     const result = assertExitOk(
-      await runProcess(muse, args, "", timeoutMs, { ...process.env, XDG_CONFIG_HOME: configHome }, directory),
+      await runProcess("muse", args, "", timeoutMs, { ...process.env, XDG_CONFIG_HOME: configHome }, directory),
       "muse",
     );
     return result.stdout;
@@ -1010,10 +1006,9 @@ async function runMuseModel({ prompt, timeoutMs }) {
 
 // ghostd reviews on the owner's own agent CLI.
 async function runGhostModel({ prompt, timeoutMs, ghostHome }) {
-  const ghostd = process.env.KEEP_GOING_GHOST_BIN || "ghostd";
   const result = assertExitOk(
     await runProcess(
-      ghostd,
+      "ghostd",
       ["hook-complete"],
       JSON.stringify({ ghost_home: ghostHome, prompt }),
       timeoutMs,
@@ -1034,12 +1029,10 @@ function reviewerEnv() {
 }
 
 // A reviewer CLI that takes its prompt as an argument and prints its verdict,
-// run in a scratch directory; KEEP_GOING_<NAME>_BIN overrides the command.
+// run in a scratch directory.
 function cliReviewer(name, command, args, env = () => process.env) {
-  return ({ prompt, timeoutMs }) => inTemporaryDirectory(name, async (directory) => {
-    const bin = process.env[`KEEP_GOING_${name.toUpperCase()}_BIN`] || command;
-    return assertExitOk(await runProcess(bin, args(prompt), "", timeoutMs, env(), directory), command).stdout;
-  });
+  return ({ prompt, timeoutMs }) => inTemporaryDirectory(name, async (directory) =>
+    assertExitOk(await runProcess(command, args(prompt), "", timeoutMs, env(), directory), command).stdout);
 }
 
 // The verdict is the first CONTINUE or STOP standing as a word of its own,

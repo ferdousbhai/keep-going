@@ -10,25 +10,27 @@ import ompKeepGoing from "../src/omp.mjs";
 const HOOK = path.resolve(import.meta.dirname, "..", "src", "keep-going.mjs");
 
 // Each host runs the hook as a command: stdin in, one JSON answer out. A mock
-// reviewer records the prompt it was asked and answers MOCK_REVIEW_RESPONSE.
+// under each reviewer's command name records the prompt it was asked and
+// answers MOCK_REVIEW_RESPONSE; PATH is the mocks' directory alone, so no test
+// can reach a real CLI.
 async function hostFixture() {
   const root = await mkdtemp(path.join(tmpdir(), "keep-going-hosts-"));
-  const reviewer = path.join(root, "reviewer.mjs");
+  const bin = path.join(root, "bin");
   const calls = path.join(root, "calls.jsonl");
-  await writeFile(reviewer, `#!/usr/bin/env node
+  await mkdir(bin);
+  for (const command of ["copilot", "agy", "cursor-agent", "opencode", "omp"]) {
+    await writeFile(path.join(bin, command), `#!${process.execPath}
 import { appendFileSync } from "node:fs";
 appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ args: process.argv.slice(2), reviewing: process.env.KEEP_GOING_REVIEWING ?? null }) + "\\n");
 process.stdout.write(process.env.MOCK_REVIEW_RESPONSE);
 `);
-  await chmod(reviewer, 0o755);
+    await chmod(path.join(bin, command), 0o755);
+  }
   const env = {
-    PATH: process.env.PATH,
+    PATH: bin,
     HOME: path.join(root, "home"),
     XDG_STATE_HOME: path.join(root, "state"),
     COPILOT_HOME: path.join(root, "home", ".copilot"),
-    KEEP_GOING_COPILOT_BIN: reviewer,
-    KEEP_GOING_AGY_BIN: reviewer,
-    KEEP_GOING_CURSOR_BIN: reviewer,
     KEEP_GOING_QUIET_MS: "0",
     MOCK_CALL_LOG: calls,
     MOCK_REVIEW_RESPONSE: "CONTINUE",
@@ -187,7 +189,7 @@ const said = (role, text, extra = {}) => ({ info: { role, id: `msg_${role}_${tex
 test("OpenCode: an idle session whose work remains gets the nudge as its next message", async () => {
   const context = await hostFixture();
   const saved = { ...process.env };
-  Object.assign(process.env, context.env, { KEEP_GOING_OPENCODE_BIN: context.env.KEEP_GOING_COPILOT_BIN });
+  Object.assign(process.env, context.env);
   try {
     const client = opencodeClient([
       said("user", "Port the parser"),
@@ -236,7 +238,7 @@ test("OpenCode: an idle session whose work remains gets the nudge as its next me
 test("Oh My Pi: session_stop blocks with the nudge while work remains", async () => {
   const context = await hostFixture();
   const saved = { ...process.env };
-  Object.assign(process.env, context.env, { KEEP_GOING_OMP_BIN: context.env.KEEP_GOING_COPILOT_BIN });
+  Object.assign(process.env, context.env);
   try {
     const handlers = {};
     ompKeepGoing({ on: (event, handler) => { handlers[event] = handler; } });
