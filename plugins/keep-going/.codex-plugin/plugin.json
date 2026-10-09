@@ -28,5 +28,21 @@
     "defaultPrompt": [
       "Explain how Keep Going decides whether to continue."
     ]
+  },
+  "hooks": {
+    "hooks": {
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"$PLUGIN_ROOT/scripts/keep-going.mjs\" codex",
+              "timeout": 240,
+              "statusMessage": "Deciding whether to keep going"
+            }
+          ]
+        }
+      ]
+    }
   }
 }

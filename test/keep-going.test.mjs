@@ -20,7 +20,7 @@ import {
   yieldsToGrokNative,
   resolveOwnerPrompt,
 } from "../src/keep-going.mjs";
-import { HOOK_FILES, VERSIONED, hookFile, stampVersion } from "../scripts/build.mjs";
+import { HOOK_FILES, VERSIONED, hookConfig, hookFile, stampVersion } from "../scripts/build.mjs";
 
 
 const ENV_KEYS = [
@@ -1302,15 +1302,20 @@ test("the committed manifests and hook files are what the build emits", async ()
     assert.equal(source, stampVersion(source, version), `${relative} is not stamped ${version}`);
   }
   for (const runner of Object.keys(HOOK_FILES)) {
-    assert.equal(await readText(`../${HOOK_FILES[runner].file}`), hookFile(runner));
+    const source = await readText(`../${HOOK_FILES[runner].file}`);
+    assert.equal(source, hookFile(runner, source), `${HOOK_FILES[runner].file} does not carry the ${runner} hooks`);
   }
+  // Codex and Claude Code both load hooks/hooks.json from a plugin whatever its
+  // manifest says, so a hook there runs on the host it wasn't written for.
+  await assert.rejects(readText("../plugins/keep-going/hooks/hooks.json"), { code: "ENOENT" });
 
   // Generation makes the two hook files agree with one table, not with each
   // other, so the host-specific halves are still spelled out: a swap in that
   // table would emit two self-consistent files that fail open on every stop.
-  assert.match(hookFile("codex"), /node \\"\$PLUGIN_ROOT\/scripts\/keep-going\.mjs\\" codex/);
+  const hookText = (runner) => JSON.stringify(hookConfig(runner), null, 2);
+  assert.match(hookText("codex"), /node \\"\$PLUGIN_ROOT\/scripts\/keep-going\.mjs\\" codex/);
   assert.match(
-    hookFile("claude"),
+    hookText("claude"),
     /node \\"\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/keep-going\.mjs\\" claude/,
   );
 

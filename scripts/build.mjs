@@ -28,19 +28,30 @@ export function stampVersion(source, version) {
   return source.replace(VERSION_FIELD, (_, prefix) => `${prefix}"${version}"`);
 }
 
-// Both hosts run the same bundle, and the two files differ only in the root
+// Both hosts run the same bundle, and their hooks differ only in the root
 // variable, the trailing runner word, and the events each host dispatches. Neither host substitutes the other's
 // variable, so a copy-paste between them fails open on every stop of whichever
 // host got the wrong one; writing both from here removes the copy-paste.
+//
+// Neither may sit at hooks/hooks.json: Codex and Claude Code both load that
+// file from every plugin, whatever the manifest names, so a hook there runs on
+// both hosts. Codex's goes inline in its manifest, Claude's in the file its
+// manifest names.
 export const HOOK_FILES = {
-  codex: { file: "plugins/keep-going/hooks/hooks.json", pluginRoot: "$PLUGIN_ROOT" },
+  codex: { file: "plugins/keep-going/.codex-plugin/plugin.json", pluginRoot: "$PLUGIN_ROOT", inline: true },
   claude: { file: "plugins/keep-going/claude-hooks.json", pluginRoot: "${CLAUDE_PLUGIN_ROOT}" },
 };
 
-export function hookFile(runner) {
+export function hookConfig(runner) {
   const { pluginRoot } = HOOK_FILES[runner];
   const entry = [hookEntry(`node "${pluginRoot}/scripts/keep-going.mjs" ${runner}`)];
-  const config = { hooks: Object.fromEntries(STOP_EVENTS[runner].map((event) => [event, entry])) };
+  return { hooks: Object.fromEntries(STOP_EVENTS[runner].map((event) => [event, entry])) };
+}
+
+// The file's text with the runner's hooks in it: the whole file, or for an
+// inline host its manifest (`current`) with the `hooks` field replaced.
+export function hookFile(runner, current) {
+  const config = HOOK_FILES[runner].inline ? { ...JSON.parse(current), hooks: hookConfig(runner) } : hookConfig(runner);
   return `${JSON.stringify(config, null, 2)}\n`;
 }
 
@@ -64,7 +75,8 @@ if (process.argv[1] && await realpath(process.argv[1]).catch(() => "") === fileU
     const file = path.join(root, relative);
     await writeFile(file, stampVersion(await readFile(file, "utf8"), version));
   }
-  for (const runner of Object.keys(HOOK_FILES)) {
-    await writeFile(path.join(root, HOOK_FILES[runner].file), hookFile(runner));
+  for (const [runner, { file, inline }] of Object.entries(HOOK_FILES)) {
+    const target = path.join(root, file);
+    await writeFile(target, hookFile(runner, inline ? await readFile(target, "utf8") : undefined));
   }
 }
