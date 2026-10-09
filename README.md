@@ -79,8 +79,8 @@ installed, the Claude copy stands down on Grok. Inside a Ghost turn — `GHOST`
 in the environment, or for Muse a Ghost conversation directory — every other
 copy stands down and Ghost reviews through its own `session_stop` hook.
 
-Installs track `main`. To pin, use a tag: `--ref v0.18.0` for Codex,
-`#v0.18.0` for `npx`, `@v0.18.0` for Pi. The Claude plugin moves only on
+Installs track `main`. To pin, use a tag: `--ref v0.18.1` for Codex,
+`#v0.18.1` for `npx`, `@v0.18.1` for Pi. The Claude plugin moves only on
 `claude plugin update`. There is no npm package.
 
 Installer flags:
