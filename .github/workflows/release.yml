@@ -26,7 +26,10 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
   release:
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -38,14 +41,6 @@ jobs:
           # walks when the tag carries none.
           fetch-depth: 0
           fetch-tags: true
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      # test.yml runs on this push too, but a separate workflow cannot gate
-      # this one. A tag that fails its own tests must not become a release.
-      - run: npm run check
       - name: Create the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

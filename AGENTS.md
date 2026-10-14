@@ -38,7 +38,8 @@ npm run test:pi    # end-to-end against an installed Pi with a mock provider
 
 CI (`.github/workflows/test.yml`) fails if `npm run check` leaves a diff in `extensions/`,
 `plugins/keep-going/` or `.claude-plugin/marketplace.json`: always commit the build output
-together with the source change.
+together with the source change. A release tag runs that check once, from `release.yml`, and
+the release is created only after it passes.
 
 ## Conventions and gotchas
 
