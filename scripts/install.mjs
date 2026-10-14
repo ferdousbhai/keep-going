@@ -414,7 +414,10 @@ async function main() {
       process.stdout.write(`Removed ${runner} hook in ${settingsFile}\n`);
       continue;
     }
-    const command = `${auditPrefix}${shellQuote(process.execPath)} ${shellQuote(hookFile)} ${runner}`;
+    // `node` is resolved from PATH, the same way the plugin manifest invokes it.
+    // An absolute process.execPath records a version-manager install directory,
+    // and that directory is removed on the next upgrade.
+    const command = `${auditPrefix}node ${shellQuote(hookFile)} ${runner}`;
     const update = FLAT_HOSTS[runner] ? updateFlatConfig : updateHookConfig;
     await writeJsonAtomic(settingsFile, update(config, runner, command, uninstall));
     process.stdout.write(`${uninstall ? "Removed" : "Installed"} ${runner} hook in ${settingsFile}\n`);

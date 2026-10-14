@@ -113,7 +113,7 @@ test("--audit-log writes the log path into each command and a plain reinstall dr
     for (const [config, event, runner] of [[claude, "Stop", "claude"], [claude, "SubagentStop", "claude"], [muse, "Stop", "muse"]]) {
       assert.equal(config.hooks[event].length, 1);
       const command = config.hooks[event][0].hooks[0].command;
-      assert.ok(command.startsWith(`KEEP_GOING_AUDIT_LOG='${expected}' '`), command);
+      assert.ok(command.startsWith(`KEEP_GOING_AUDIT_LOG='${expected}' node '`), command);
       assert.match(command, new RegExp(`keep-going\\.mjs' ${runner}$`));
     }
 
@@ -441,6 +441,23 @@ test("installer places and removes the OpenCode plugin", async () => {
     assert.match((await runInstaller(["--status"], env)).stdout, /opencode\s+registered/);
     assert.equal((await runInstaller(["--uninstall", "--opencode"], env)).code, 0);
     await assert.rejects(access(plugin), { code: "ENOENT" });
+  } finally {
+    await cleanup();
+  }
+});
+
+test("installed commands run node from PATH", async () => {
+  const { settings, home, env, cleanup } = await installHome("node-path");
+  try {
+    const result = await runInstaller(["--claude", "--grok"], env);
+    assert.equal(result.code, 0, result.stderr);
+    const claude = JSON.parse(await readFile(settings, "utf8"));
+    const grok = JSON.parse(await readFile(path.join(home, ".grok", "hooks", "keep-going.json"), "utf8"));
+    for (const command of [claude.hooks.Stop[0].hooks[0].command, grok.hooks.Stop[0].hooks[0].command]) {
+      assert.match(command, /^node '/);
+      assert.match(command, /keep-going\.mjs' (claude|grok)$/);
+      assert.doesNotMatch(command, /(^| )\/.*\/node( |$)/);
+    }
   } finally {
     await cleanup();
   }
