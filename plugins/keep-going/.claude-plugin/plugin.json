@@ -10,6 +10,7 @@
   "homepage": "https://github.com/ferdousbhai/keep-going",
   "repository": "https://github.com/ferdousbhai/keep-going",
   "license": "MIT",
+  "privacyPolicyUrl": "https://github.com/ferdousbhai/keep-going#privacy",
   "keywords": ["hooks", "stop", "continuity", "encouragement"],
   "hooks": "./claude-hooks.json"
 }
