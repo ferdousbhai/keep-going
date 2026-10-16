@@ -154,6 +154,19 @@ reviewer's process and its stop goes unreviewed.
 | `KEEP_GOING_QUIET_MS` | `15000`; the wait before a fresh stop is reviewed; `0` reviews at once |
 | `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's raw text and how the stop was decided |
 
+## Privacy
+
+At each stop the hook reads the owner's last request and the agent's last
+message from the host's transcript, redacts and truncates them, and pipes them
+to the reviewer: the owner's own installed CLI, signed in as the owner, so the
+text goes only to the model provider that CLI already talks to. keep-going runs
+no server and sends nothing anywhere else. On disk it keeps only a per-turn
+continuation count under `$XDG_STATE_HOME/keep-going`, keyed by session id and
+a digest of the prompt, never the prompt itself, plus the audit log if
+`KEEP_GOING_AUDIT_LOG` is set. Under Cursor CLI, which sends neither text at
+stop, it also keeps each conversation's latest prompt and reply there
+(mode 0600), overwritten every turn.
+
 ## Development
 
 `npm run check` builds the bundles and runs the unit tests; `npm run test:pi`

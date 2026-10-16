@@ -2,7 +2,7 @@
   "name": "keep-going",
   "displayName": "Keep Going",
   "version": "0.18.1",
-  "description": "Classifies the last assistant message as CONTINUE or STOP and answers a premature stop with \"Keep going.\" instead of letting the turn end; an agent that holds after a nudge is let stop.",
+  "description": "When Claude tries to end a turn with work left, a reviewer model reads the last reply and your request and sends Claude back with \"Keep going.\"; finished work, blockers and questions only you can answer stop as usual.",
   "author": {
     "name": "Ferdous Bhai",
     "url": "https://github.com/ferdousbhai"

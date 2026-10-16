@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#D9612B"/>
+  <!-- A stop sign the agent drives through: the octagon is open on the right. -->
+  <path d="M318 112 H194 L106 200 V312 L194 400 H318"
+        fill="none" stroke="#FFF7EF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M220 178 L340 256 L220 334 Z" fill="#FFF7EF" stroke="#FFF7EF" stroke-width="24" stroke-linejoin="round"/>
+  <path d="M372 196 L420 256 L372 316" fill="none" stroke="#FFF7EF" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
