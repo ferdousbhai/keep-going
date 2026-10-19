@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
@@ -135,7 +137,7 @@ const output = args[args.indexOf("--output-last-message") + 1];
 let prompt = "";
 for await (const chunk of process.stdin) prompt += chunk;
 appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ model, args, prompt }) + "\\n");
-writeFileSync(output, process.env.MOCK_REVIEW_RESPONSE);
+writeFileSync(output, process.env.MOCK_REVIEW_RESPONSE + "x".repeat(Number(process.env.MOCK_REVIEW_PAD || 0)));
 `);
   process.env.CODEX_HOME = path.join(context.root, "codex");
   const sessions = path.join(process.env.CODEX_HOME, "sessions", "2026", "08", "26");
@@ -454,13 +456,13 @@ test("Codex reads its own nudges, and neither they nor a subagent open a turn", 
       user("<turn_aborted>The user interrupted the previous turn on purpose.</turn_aborted>"),
     ]);
     assert.equal(await resolveOwnerPrompt(context.input, "codex"), "Build it now. token=supersecretvalue");
-    assert.deepEqual(await codexNudges(context.input), { continuations: 1, held: true });
+    assert.deepEqual(await codexNudges(context.input), { continuations: 1, held: true, ownerPrompt: await resolveOwnerPrompt(context.input, "codex") });
 
     // Any tool item after the nudge is work done on it.
     await appendRecords(context.input.transcript_path, [
       JSON.stringify({ type: "response_item", payload: { type: "custom_tool_call", name: "exec" } }),
     ]);
-    assert.deepEqual(await codexNudges(context.input), { continuations: 1, held: false });
+    assert.deepEqual(await codexNudges(context.input), { continuations: 1, held: false, ownerPrompt: await resolveOwnerPrompt(context.input, "codex") });
   } finally {
     await context.cleanup();
   }
@@ -1213,16 +1215,17 @@ test("a Claude agent that holds after a nudge is not reviewed again", async () =
     const tool = JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", name: "Bash" }] } });
     const said = (text) => JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
 
-    assert.deepEqual(await claudeNudges(context.input), { continuations: 0, held: false });
+    const ownerPrompt = await resolveOwnerPrompt(context.input, "claude");
+    assert.deepEqual(await claudeNudges(context.input), { continuations: 0, held: false, ownerPrompt });
     assert.equal((await handleStop(context.input, "claude", { runModel })).decision, "block");
 
     await appendRecords(context.input.transcript_path, [feedback, tool, said("Checked; the domain in the request looks like a typo. Which did you mean?")]);
-    assert.deepEqual(await claudeNudges(context.input), { continuations: 1, held: false });
+    assert.deepEqual(await claudeNudges(context.input), { continuations: 1, held: false, ownerPrompt });
     assert.equal((await handleStop(context.input, "claude", { runModel })).decision, "block");
     assert.equal(reviews, 2);
 
     await appendRecords(context.input.transcript_path, [feedback, said("I still need your answer on the domain.")]);
-    assert.deepEqual(await claudeNudges(context.input), { continuations: 2, held: true });
+    assert.deepEqual(await claudeNudges(context.input), { continuations: 2, held: true, ownerPrompt });
     assert.deepEqual(await handleStop(context.input, "claude", { runModel }), {});
     assert.equal(reviews, 2);
     const row = (await auditRows()).at(-1);
@@ -1433,6 +1436,41 @@ test("a reviewer that floods stdout is cut off at the output limit", async () =>
     assert.match(output.systemMessage, /exceeded 2 MB/);
     assert.equal(output.decision, undefined);
   } finally {
+    await context.cleanup();
+  }
+});
+
+test("a Codex reviewer result file obeys the same limit as child output", async () => {
+  const context = await fixture();
+  try {
+    process.env.MOCK_REVIEW_RESPONSE = "CONTINUE";
+    process.env.MOCK_REVIEW_PAD = String(2 * 1024 * 1024 + 1024);
+    const output = await handleStop(context.input, "codex");
+    assert.match(output.systemMessage, /reviewer result file exceeded 2 MB/);
+    assert.equal(output.decision, undefined);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("stop recovers the latest owner prompt and nudge state with one transcript read", async () => {
+  const context = await claudeFixture();
+  const original = fs.createReadStream;
+  let reads = 0;
+  fs.createReadStream = function (file, ...args) {
+    if (file === context.input.transcript_path) reads += 1;
+    return original.call(this, file, ...args);
+  };
+  syncBuiltinESMExports();
+  try {
+    let prompt;
+    await handleStop(context.input, "claude", { runModel: async (input) => { prompt = input; return "STOP"; } });
+    assert.equal(reads, 1);
+    assert.match(JSON.stringify(prompt), /Build it now/);
+    assert.doesNotMatch(JSON.stringify(prompt), /Earlier context/);
+  } finally {
+    fs.createReadStream = original;
+    syncBuiltinESMExports();
     await context.cleanup();
   }
 });

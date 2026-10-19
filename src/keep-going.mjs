@@ -392,11 +392,14 @@ function claudeUserMessage(record) {
 // after the latest one without running a tool. That is an agent that weighed
 // the nudge and still holds, and a second review would only argue with it.
 // classify names each record "owner", "nudge", "tool", or nothing.
-async function transcriptNudges(file, classify) {
+async function transcriptNudges(file, classify, pickOwner) {
+  let ownerPrompt = "";
   let continuations = 0;
   let worked = false;
   let hasOwner = false;
   for await (const record of jsonLines(file)) {
+    const text = pickOwner(record);
+    if (text) ownerPrompt = text;
     const kind = classify(record);
     if (kind === "owner") {
       hasOwner = true;
@@ -409,7 +412,7 @@ async function transcriptNudges(file, classify) {
       worked = true;
     }
   }
-  return { continuations, held: continuations > 0 && !worked };
+  return { continuations, held: continuations > 0 && !worked, ownerPrompt };
 }
 
 // What the owner typed in a record, or "": each host's reader below serves its
@@ -435,7 +438,7 @@ function claudeRecordKind(record) {
 }
 
 async function claudeNudges(input) {
-  return transcriptNudges(await allowedTranscriptPath(input, "claude"), claudeRecordKind);
+  return transcriptNudges(await allowedTranscriptPath(input, "claude"), claudeRecordKind, claudeOwnerText);
 }
 
 function codexOwnerText(record) {
@@ -452,8 +455,12 @@ function codexRecordKind(record) {
   return codexOwnerText(record) ? "owner" : null;
 }
 
+// The owner's text in the turn this stop names: Codex tags each record with it.
+const codexTurnOwnerText = (input) => (record) =>
+  record?.payload?.internal_chat_message_metadata_passthrough?.turn_id === input.turn_id ? codexOwnerText(record) : "";
+
 async function codexNudges(input) {
-  return transcriptNudges(await allowedTranscriptPath(input, "codex"), codexRecordKind);
+  return transcriptNudges(await allowedTranscriptPath(input, "codex"), codexRecordKind, codexTurnOwnerText(input));
 }
 
 function genuinePrompt(text) {
@@ -483,8 +490,7 @@ async function claudeOwnerPrompt(input) {
 }
 
 async function codexOwnerPrompt(input) {
-  return lastTranscriptMatch(await allowedTranscriptPath(input, "codex"), (record) =>
-    record?.payload?.internal_chat_message_metadata_passthrough?.turn_id === input.turn_id ? codexOwnerText(record) : "");
+  return lastTranscriptMatch(await allowedTranscriptPath(input, "codex"), codexTurnOwnerText(input));
 }
 
 // The stop names the updates log; what the owner typed lands in the chat
@@ -604,9 +610,10 @@ async function cursorPayload(input) {
   };
 }
 
-async function resolveOwnerPrompt(input, runner) {
+async function resolveOwnerPrompt(input, runner, transcriptOwnerPrompt) {
   const fromPayload = typeof input.owner_prompt === "string" ? input.owner_prompt.trim() : "";
   if (fromPayload) return fromPayload;
+  if (transcriptOwnerPrompt !== undefined) return transcriptOwnerPrompt;
   // A subagent stop carries the parent's transcript; that is the parent's request.
   const recover = RUNTIMES[runner].ownerPrompt;
   if (!recover || input.agent_id) return "";
@@ -829,7 +836,9 @@ async function runCodexModel({ prompt, timeoutMs, model }) {
       "-",
     ];
     assertExitOk(await runProcess("codex", args, prompt, timeoutMs), "codex exec");
-    return readFile(outputPath, "utf8");
+    const result = streamCollector(MODEL_OUTPUT_LIMIT, "reviewer result file exceeded 2 MB");
+    for await (const chunk of createReadStream(outputPath, { encoding: "utf8" })) result.push(chunk);
+    return result.text();
   });
 }
 
@@ -1154,7 +1163,7 @@ async function handleStop(input, runner, { runModel, delay } = {}) {
     return settleStop(input, runner, { decision: "block", reason: EMPTY_STOP_NUDGE }, { countedBy: "empty" });
   }
 
-  const ownerPrompt = await resolveOwnerPrompt(input, runner);
+  const ownerPrompt = await resolveOwnerPrompt(input, runner, nudges?.ownerPrompt);
   if (!ownerPrompt && VACUOUS_COMPLETIONS.has(lastAssistantMessage.trim().replace(/[.!]+$/, "").toLowerCase())) {
     return settleStop(input, runner, {}, { reason: "nothing to review", countedBy: "stub" });
   }
