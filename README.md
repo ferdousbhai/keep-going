@@ -106,8 +106,9 @@ Installer flags:
   `{"decision":"continue"}`; the nudge arrives as a system message.
 - **OpenCode** has no stop hook: the plugin
   (`~/.config/opencode/plugins/keep-going.js`) reviews when a session goes idle
-  and sends the nudge as the next message, so a one-shot `opencode run`, which
-  exits at that idle, never continues.
+  (on 2.x, when a run succeeds) and sends the nudge as the next message, so a
+  one-shot `opencode run`, which exits at that point, never continues. The one
+  file loads on OpenCode 1.x (its `server` entry) and 2.x (its `setup` entry).
 - **Oh My Pi** blocks on its `session_stop` hook.
 - **Pi** reviews only a normal final text response; tool turns, aborted
   responses, and turns with queued messages are left alone. `CONTINUE` queues
@@ -140,12 +141,14 @@ since OpenCode's free tier refuses a reduced tool set and Oh My Pi's switch is
 unconfirmed.
 
 No reviewer re-enters keep-going: Codex runs with hooks disabled, Claude in
-safe mode, Grok in single-prompt mode, Cursor in print mode, OpenCode with
+safe mode, Grok in single-prompt mode, Cursor in print mode, OpenCode 1.x with
 `--pure`, Oh My Pi with `--no-extensions`, and Muse under a config overlay with no settings — a
 non-default `XDG_CONFIG_HOME` is unreachable from a hook, and its review then
-fails open. Copilot, Antigravity, and Ghost run the owner's own CLI, whose
-hooks cannot be switched off for one run, so `KEEP_GOING_REVIEWING` marks the
-reviewer's process and its stop goes unreviewed.
+fails open. Copilot, Antigravity, Ghost, and OpenCode 2.x (which has no
+`--pure`; its reviewer runs `--standalone`, off the owner's background service)
+run the owner's own CLI, whose hooks cannot be switched off for one run, so
+`KEEP_GOING_REVIEWING` marks the reviewer's process and its stop goes
+unreviewed.
 
 ## Environment variables
 

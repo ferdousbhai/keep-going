@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { KeepGoing } from "../src/opencode.mjs";
+import opencodePlugin, { KeepGoing } from "../src/opencode.mjs";
 import ompKeepGoing from "../src/omp.mjs";
 
 const HOOK = path.resolve(import.meta.dirname, "..", "src", "keep-going.mjs");
@@ -228,6 +228,98 @@ test("OpenCode: an idle session whose work remains gets the nudge as its next me
     const failed = opencodeClient([said("user", "x"), said("assistant", "y", { error: { name: "MessageAbortedError" } })]);
     await (await KeepGoing({ client: failed, directory: context.root })).event({ event: { type: "session.idle", properties: { sessionID: "ses_3" } } });
     assert.deepEqual([sub.sent, failed.sent], [[], []]);
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+    await context.cleanup();
+  }
+});
+
+// A fake OpenCode 2.x plugin context: the session's messages, an event stream
+// the test feeds, and what the plugin sends.
+function opencodeV2Context(messages, { parentID, directory } = {}) {
+  const sent = [];
+  const queued = [];
+  let wake = () => {};
+  return {
+    sent,
+    emit: (event) => { queued.push(event); wake(); },
+    location: { directory },
+    session: {
+      get: async ({ sessionID }) => ({ id: sessionID, ...(parentID ? { parentID } : {}) }),
+      context: async () => messages,
+      prompt: async ({ sessionID, text }) => { sent.push({ id: sessionID, text }); },
+    },
+    event: {
+      subscribe: ({ signal }) => ({
+        async *[Symbol.asyncIterator]() {
+          while (!signal.aborted) {
+            if (queued.length) yield queued.shift();
+            else await new Promise((resolve) => { wake = resolve; signal.addEventListener("abort", resolve, { once: true }); });
+          }
+        },
+      }),
+    },
+  };
+}
+
+const settled = async (check) => {
+  for (let i = 0; i < 200 && !check(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+};
+
+test("OpenCode 2.x: the default export's setup nudges a finished run whose work remains", async () => {
+  const context = await hostFixture();
+  const saved = { ...process.env };
+  Object.assign(process.env, context.env);
+  const user = (id, text) => ({ type: "user", id, text, time: { created: 0 } });
+  const assistant = (id, text, extra = {}) => ({ type: "assistant", id, content: [{ type: "reasoning", text: "hm" }, { type: "text", text }], ...extra });
+  const idle = (outcome) => ({ type: "idle", id: `idle_${outcome}`, outcome });
+  try {
+    assert.equal(opencodePlugin.id, "keep-going");
+    assert.equal(opencodePlugin.server, KeepGoing);
+
+    const ctx = opencodeV2Context([
+      user("msg_1", "Port the parser"),
+      assistant("msg_2", "Ported two of five modules."),
+      idle("succeeded"),
+      { type: "synthetic", id: "msg_3", text: "host note" },
+      user("msg_4", "Keep going."),
+      assistant("msg_5", "Ported four of five modules."),
+      idle("succeeded"),
+    ], { directory: context.root });
+    const cleanup = await opencodePlugin.setup(ctx);
+    ctx.emit({ type: "session.execution.started", data: { sessionID: "ses_1" } });
+    ctx.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_1" } });
+    await settled(() => ctx.sent.length);
+    cleanup();
+    assert.deepEqual(ctx.sent, [{ id: "ses_1", text: "Keep going." }]);
+    const [call] = await context.calls();
+    assert.deepEqual(call.args.slice(0, 2), ["run", "--standalone"]);
+    assert.match(call.args.at(-1), /"owner_prompt":"Port the parser"/);
+    assert.match(call.args.at(-1), /Ported four of five modules/);
+
+    // A subagent's session, an errored reply, and an interrupted run are left alone.
+    for (const [messages, options] of [
+      [[user("m1", "x"), assistant("m2", "y")], { parentID: "ses_0" }],
+      [[user("m1", "x"), assistant("m2", "y", { error: { type: "unknown" } })], {}],
+      [[user("m1", "x"), assistant("m2", "y"), idle("interrupted")], {}],
+    ]) {
+      const quiet = opencodeV2Context(messages, { ...options, directory: context.root });
+      const stop = opencodePlugin.setup(quiet);
+      quiet.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_2" } });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      stop();
+      assert.deepEqual(quiet.sent, []);
+    }
+
+    // A failed or interrupted run is not reviewed at all.
+    const ended = opencodeV2Context([user("m1", "x"), assistant("m2", "y")], { directory: context.root });
+    const stopEnded = opencodePlugin.setup(ended);
+    ended.emit({ type: "session.execution.failed", data: { sessionID: "ses_3" } });
+    ended.emit({ type: "session.execution.interrupted", data: { sessionID: "ses_3" } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    stopEnded();
+    assert.equal((await context.calls()).length, 1);
   } finally {
     for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
     Object.assign(process.env, saved);

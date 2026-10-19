@@ -173,7 +173,8 @@ const RUNTIMES = {
   },
   // OpenCode runs keep-going as an in-process plugin (src/opencode.mjs) that
   // sends the nudge itself; its reviewer is `opencode run --pure`, which loads
-  // no plugins.
+  // no plugins. OpenCode 2.x dropped --pure; its plugin reviews with
+  // runOpencodeV2Model instead.
   opencode: {
     state: xdgStateHome,
     run: cliReviewer("opencode", "opencode", (prompt) => ["run", "--pure", prompt]),
@@ -1033,6 +1034,11 @@ function cliReviewer(name, command, args, env = () => process.env) {
     assertExitOk(await runProcess(command, args(prompt), "", timeoutMs, env(), directory), command).stdout);
 }
 
+// OpenCode 2.x has no way to run without plugins. --standalone keeps the
+// review off the owner's background service, and KEEP_GOING_REVIEWING makes
+// keep-going's own copy in that private server let the reviewer's stop through.
+const runOpencodeV2Model = cliReviewer("opencode", "opencode", (prompt) => ["run", "--standalone", prompt], reviewerEnv);
+
 // The verdict is the first CONTINUE or STOP standing as a word of its own,
 // wherever the reviewer put it: reviewers write a sentence first, glue
 // the verdict onto it ("...finished.STOP"), or answer twice
@@ -1237,6 +1243,7 @@ export {
   codexNudges,
   recordedContinuations,
   handleStop,
+  runOpencodeV2Model,
   hookOutputForVerdict,
   parseReviewVerdict,
   yieldsToGrokNative,
