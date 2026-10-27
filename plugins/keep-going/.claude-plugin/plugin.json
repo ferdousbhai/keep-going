@@ -1,7 +1,7 @@
 {
   "name": "keep-going",
   "displayName": "Keep Going",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "When Claude tries to end a turn with work left, a reviewer model reads the last reply and your request and sends Claude back with \"Keep going.\"; finished work, blockers and questions only you can answer stop as usual.",
   "author": {
     "name": "Ferdous Bhai",
