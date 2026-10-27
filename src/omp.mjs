@@ -15,10 +15,12 @@ const textOf = (message) => {
 export default function keepGoing(pi) {
   pi.on("session_stop", async (event, ctx) => {
     if (event.signal?.aborted) return undefined;
-    const request = event.messages?.findLast((message) => message.role === "user" && !isNudge(textOf(message)));
+    const messages = event.messages ?? [];
+    const asked = messages.findLastIndex((message) => message.role === "user" && !isNudge(textOf(message)));
     const stop = await handleStop({
       session_id: event.session_id,
-      owner_prompt: textOf(request),
+      owner_prompt: textOf(messages[asked]),
+      owner_replied_to: textOf(messages.slice(0, Math.max(asked, 0)).findLast((message) => message.role === "assistant" && textOf(message))),
       last_assistant_message: textOf(event.last_assistant_message),
       stop_hook_active: event.stop_hook_active,
       cwd: ctx?.cwd,

@@ -40,12 +40,14 @@ async function reviewIdle(id, directory, host) {
     const last = messages.at(-1);
     // An aborted or failed reply is not the agent choosing to stop.
     if (last?.role !== "assistant" || last.failed) return;
-    const request = messages.findLast((message) => message.role === "user" && !isNudge(message.text));
+    const asked = messages.findLastIndex((message) => message.role === "user" && !isNudge(message.text));
+    const request = messages[asked];
     const stop = await handleStop({
       session_id: id,
       // The owner's message names the turn, so its nudges count against it.
       turn_id: request?.id ?? "",
       owner_prompt: request?.text ?? "",
+      owner_replied_to: messages.slice(0, Math.max(asked, 0)).findLast((message) => message.role === "assistant" && message.text)?.text ?? "",
       // The latest message being a nudge means this stop answers one.
       stop_hook_active: request !== messages.findLast((message) => message.role === "user"),
       last_assistant_message: last.text,

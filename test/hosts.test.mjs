@@ -64,6 +64,8 @@ test("Copilot: reads the reply and request from events.jsonl and blocks to conti
   try {
     const transcript = path.join(context.env.COPILOT_HOME, "session-state", "s1", "events.jsonl");
     await jsonl(transcript, [
+      { type: "user.message", data: { content: "Why is CI red?" } },
+      { type: "assistant.message", data: { content: "Lint fails on two files. Shall I fix the build?" } },
       { type: "user.message", data: { content: "Fix the build" } },
       { type: "assistant.message", data: { content: "I started on it." } },
       { type: "user.message", data: { content: "Keep going." } },
@@ -78,6 +80,7 @@ test("Copilot: reads the reply and request from events.jsonl and blocks to conti
     const asked = call.args[call.args.indexOf("-p") + 1];
     // The nudge is not the request; the latest reply is the one reviewed.
     assert.match(asked, /"owner_prompt":"Fix the build"/);
+    assert.match(asked, /"owner_replied_to":"Lint fails on two files\. Shall I fix the build\?"/);
     assert.match(asked, /Half done; next I update the tests/);
     assert.equal(call.reviewing, "1");
 
@@ -94,6 +97,7 @@ test("Antigravity: reviews a model_stop from its transcript and answers continue
   try {
     const transcript = path.join(context.env.HOME, ".gemini", "antigravity-cli", "brain", "c1", ".system_generated", "logs", "transcript_full.jsonl");
     await jsonl(transcript, [
+      { type: "PLANNER_RESPONSE", source: "MODEL", content: "The docs are drafted. Ship them?" },
       { type: "USER_INPUT", source: "USER_EXPLICIT", content: "<USER_REQUEST>\nShip the docs\n</USER_REQUEST>\n<ADDITIONAL_METADATA>x</ADDITIONAL_METADATA>" },
       { type: "PLANNER_RESPONSE", source: "MODEL", content: "" },
       { type: "PLANNER_RESPONSE", source: "MODEL", content: "Drafted two of five pages." },
@@ -103,6 +107,7 @@ test("Antigravity: reviews a model_stop from its transcript and answers continue
     const [call] = await context.calls();
     const asked = call.args[call.args.indexOf("-p") + 1];
     assert.match(asked, /"owner_prompt":"Ship the docs"/);
+    assert.match(asked, /"owner_replied_to":"The docs are drafted\. Ship them\?"/);
     assert.match(asked, /Drafted two of five pages/);
 
     assert.deepEqual(await context.run("agy", { ...stop, terminationReason: "ERROR" }), {});
@@ -135,6 +140,12 @@ test("Cursor: records the prompt and reply from their hooks and reviews at stop"
     assert.match(second, /"owner_prompt":"Refactor the parser"/);
     assert.match(second, /All three files split and tested/);
     assert.doesNotMatch(second, /two files so far/);
+    // A first prompt answers nothing; the owner's next one answers the last reply.
+    assert.doesNotMatch(first, /"owner_replied_to":/);
+    assert.deepEqual(await say("beforeSubmitPrompt", "prompt", "yes"), {});
+    assert.deepEqual(await say("afterAgentResponse", "text", "Committed."), {});
+    await context.run("cursor", stop);
+    assert.match((await context.calls()).at(-1).args.at(-1), /"owner_replied_to":"All three files split and tested\."/);
 
     assert.deepEqual(await context.run("cursor", { ...stop, status: "aborted" }), {});
     // A follow-up's stop with no reply (a tool-only answer) is let through, not nudged again.

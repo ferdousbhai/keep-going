@@ -209,8 +209,9 @@ const NUDGES = [
 // or which reading of their words they meant. A reviewer that reads only
 // the words picks the literal reading, and a typo becomes an instruction.
 const REVIEW_PROMPT = `An agent just tried to end its turn. owner_prompt is the owner's request
-this turn and last_assistant_message is the agent's final message. Decide
-whether the turn is over.
+this turn and last_assistant_message is the agent's final message. When the
+request is a short reply, owner_replied_to is the agent's message it answers;
+read the two together. Decide whether the turn is over.
 
 CONTINUE — the agent stopped with work left that it can do now: it announced a
 step and did not take it, stopped partway through the request, or asked
@@ -223,7 +224,23 @@ meant.
 The agent has read far more than you have. Do not second-guess its findings or
 its reading of the owner; judge only whether it stopped with work in hand.
 
-Reply with CONTINUE or STOP and nothing else.`;
+Reply with CONTINUE or STOP, a colon, and one short sentence saying why.`;
+
+// A request this short ("yes", "do it", "yes to #1") means little without the
+// message it answers, so that message goes to the reviewer beside it.
+const SHORT_REQUEST_CHARS = 500;
+
+// The reviewer's whole input, built once so the eval script asks exactly what
+// the hook asks.
+function reviewPrompt({ ownerPrompt, lastAssistantMessage, ownerRepliedTo }) {
+  return `${REVIEW_PROMPT}\n\n${JSON.stringify({
+    last_assistant_message: compactText(lastAssistantMessage, 12_000),
+    owner_prompt: compactText(ownerPrompt, 12_000),
+    ...(ownerRepliedTo && ownerPrompt.length <= SHORT_REQUEST_CHARS
+      ? { owner_replied_to: compactText(ownerRepliedTo, 4_000) }
+      : {}),
+  })}`;
+}
 
 // With a native Grok hook installed, the Claude-settings copy Grok also
 // dispatches yields, so the stop is reviewed once.
@@ -392,15 +409,22 @@ function claudeUserMessage(record) {
 // has had since the owner's last prompt, and whether the agent stopped again
 // after the latest one without running a tool. That is an agent that weighed
 // the nudge and still holds, and a second review would only argue with it.
-// classify names each record "owner", "nudge", "tool", or nothing.
-async function transcriptNudges(file, classify, pickOwner) {
+// classify names each record "owner", "nudge", "tool", or nothing; pickReply
+// reads the agent's text, so the message the owner's prompt answers comes along.
+async function transcriptNudges(file, classify, pickOwner, pickReply) {
   let ownerPrompt = "";
+  let ownerRepliedTo = "";
+  let reply = "";
   let continuations = 0;
   let worked = false;
   let hasOwner = false;
   for await (const record of jsonLines(file)) {
     const text = pickOwner(record);
-    if (text) ownerPrompt = text;
+    if (text) {
+      ownerPrompt = text;
+      ownerRepliedTo = reply;
+    }
+    reply = pickReply(record) || reply;
     const kind = classify(record);
     if (kind === "owner") {
       hasOwner = true;
@@ -413,7 +437,7 @@ async function transcriptNudges(file, classify, pickOwner) {
       worked = true;
     }
   }
-  return { continuations, held: continuations > 0 && !worked, ownerPrompt };
+  return { continuations, held: continuations > 0 && !worked, ownerPrompt, ownerRepliedTo };
 }
 
 // What the owner typed in a record, or "": each host's reader below serves its
@@ -438,8 +462,12 @@ function claudeRecordKind(record) {
   return HOOK_PROMPT_PATTERN.test(message.text) ? "nudge" : null;
 }
 
+// Claude writes each content block as a record of its own, so the last one
+// with text before a prompt is the end of the message it answers.
+const claudeReplyText = (record) => (record?.type === "assistant" ? messageText(record.message).trim() : "");
+
 async function claudeNudges(input) {
-  return transcriptNudges(await allowedTranscriptPath(input, "claude"), claudeRecordKind, claudeOwnerText);
+  return transcriptNudges(await allowedTranscriptPath(input, "claude"), claudeRecordKind, claudeOwnerText, claudeReplyText);
 }
 
 function codexOwnerText(record) {
@@ -460,8 +488,15 @@ function codexRecordKind(record) {
 const codexTurnOwnerText = (input) => (record) =>
   record?.payload?.internal_chat_message_metadata_passthrough?.turn_id === input.turn_id ? codexOwnerText(record) : "";
 
+function codexReplyText(record) {
+  const payload = record?.type === "response_item" ? record.payload : null;
+  return payload?.type === "message" && payload.role === "assistant" ? messageText(payload).trim() : "";
+}
+
 async function codexNudges(input) {
-  return transcriptNudges(await allowedTranscriptPath(input, "codex"), codexRecordKind, codexTurnOwnerText(input));
+  return transcriptNudges(
+    await allowedTranscriptPath(input, "codex"), codexRecordKind, codexTurnOwnerText(input), codexReplyText,
+  );
 }
 
 function genuinePrompt(text) {
@@ -538,20 +573,26 @@ async function copilotPayload(input) {
   // Copilot fires agentStop before its last lines reach events.jsonl.
   const turn = await untilReply(async () => {
     let prompt = "";
+    let repliedTo = "";
+    let said = "";
     let reply = "";
     for await (const record of jsonLines(file)) {
       const content = typeof record?.data?.content === "string" ? record.data.content.trim() : "";
       if (record?.type === "user.message" && content) {
-        if (!isNudge(content)) prompt = content;
+        if (!isNudge(content)) {
+          prompt = content;
+          repliedTo = said;
+        }
         reply = "";
       } else if (record?.type === "assistant.message" && content) {
+        said = content;
         // Text alongside a tool call announces a step; the reply is a message that ends the turn.
         reply = record.data.toolRequests?.length ? "" : content;
       }
     }
-    return { prompt, reply };
+    return { prompt, repliedTo, reply };
   });
-  return { ...stop, owner_prompt: turn.prompt, last_assistant_message: turn.reply };
+  return { ...stop, owner_prompt: turn.prompt, owner_replied_to: turn.repliedTo, last_assistant_message: turn.reply };
 }
 
 async function agyPayload(input) {
@@ -565,18 +606,22 @@ async function agyPayload(input) {
   };
   if (typeof stop.transcript_path !== "string") return stop;
   let request = "";
+  let repliedTo = "";
   let reply = "";
+  let said = "";
   for await (const record of jsonLines(await allowedTranscriptPath(stop, "agy"))) {
     const content = typeof record?.content === "string" ? record.content.trim() : "";
     if (!content) continue;
     if (record.type === "USER_INPUT" && record.source === "USER_EXPLICIT") {
       request = content.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/)?.[1] ?? content;
+      repliedTo = said;
       reply = "";
     } else if (record.type === "PLANNER_RESPONSE") {
       reply = content;
+      said = content;
     }
   }
-  return { ...stop, owner_prompt: request, last_assistant_message: reply };
+  return { ...stop, owner_prompt: request, owner_replied_to: repliedTo, last_assistant_message: reply };
 }
 
 async function cursorPayload(input) {
@@ -592,8 +637,13 @@ async function cursorPayload(input) {
   if (event === "beforeSubmitPrompt" || event === "afterAgentResponse") {
     const saved = await read();
     const text = String((event === "beforeSubmitPrompt" ? input.prompt : input.text) ?? "").trim();
-    // A nudge keeps the owner's request; any prompt starts a reply afresh.
-    await save(event === "afterAgentResponse" ? { ...saved, reply: text } : { prompt: isNudge(text) ? saved.prompt : text, reply: "" });
+    // A nudge keeps the owner's request; any prompt starts a reply afresh. A
+    // stop uses up `reply`, so `said` keeps the message a new prompt answers.
+    await save(
+      event === "afterAgentResponse" ? { ...saved, reply: text, said: text }
+        : isNudge(text) ? { ...saved, reply: "" }
+        : { prompt: text, replied_to: saved.said ?? "", said: saved.said, reply: "" },
+    );
     return null;
   }
   if (input.status !== undefined && input.status !== "completed") return null;
@@ -605,6 +655,7 @@ async function cursorPayload(input) {
     ...input,
     session_id: conversation,
     owner_prompt: turn.prompt ?? "",
+    owner_replied_to: turn.replied_to ?? "",
     last_assistant_message: turn.reply ?? "",
     // Cursor counts the follow-ups this loop has sent.
     stop_hook_active: input.loop_count > 0,
@@ -707,6 +758,14 @@ async function recordTurnState(input, runner, blocked, exact) {
     tally[key] = { count: from + 1, updated: Date.now() };
   }
   await writeTally(file, tally);
+}
+
+// A task whose status names an end is over; anything else listed is running.
+const FINISHED_TASK = new Set(["completed", "failed", "killed", "stopped", "cancelled"]);
+
+function runningBackgroundWork(input) {
+  return Array.isArray(input.background_tasks) &&
+    input.background_tasks.some((task) => task && typeof task === "object" && !FINISHED_TASK.has(task.status));
 }
 
 // A final message that asserts nothing beyond completion in a single token —
@@ -890,7 +949,7 @@ async function runClaudeModel({ prompt, timeoutMs }) {
 
 // Grok's default system prompt is a coding agent; this one keeps --single to
 // the verdict.
-const GROK_SYSTEM_PROMPT = "Reply with exactly CONTINUE or STOP. No preamble, no analysis.";
+const GROK_SYSTEM_PROMPT = "Reply with CONTINUE or STOP, a colon, and one short sentence saying why. No preamble.";
 
 // Nested `grok --single` otherwise inherits the parent session's home: MCP
 // servers, plugins, high reasoning, and the coding agent. That is a full
@@ -1045,10 +1104,14 @@ const runOpencodeV2Model = cliReviewer("opencode", "opencode", (prompt) => ["run
 // ("CONTINUECONTINUE").
 const VERDICT_PATTERN = /(?<![A-Za-z_])(CONTINUE|STOP)(?=$|[^A-Za-z_]|CONTINUE|STOP)/;
 
-function parseReviewVerdict(text) {
-  const match = VERDICT_PATTERN.exec(String(text ?? ""));
+// What follows the verdict, past its colon, is the reviewer's reason. It goes
+// to the audit log and nowhere else.
+function parseReview(text) {
+  const raw = String(text ?? "");
+  const match = VERDICT_PATTERN.exec(raw);
   if (!match) throw new Error("Reviewer output must be CONTINUE or STOP");
-  return match[1];
+  const reason = raw.slice(match.index + match[1].length).replace(/^[\s:.\u2014\u2013-]+/, "").trim();
+  return { verdict: match[1], reason: compactText(reason, 500) };
 }
 
 function hookOutputForVerdict(verdict, continuations = 0) {
@@ -1178,19 +1241,35 @@ async function handleStop(input, runner, { runModel, delay } = {}) {
     return settleStop(input, runner, {}, { verdict: "HELD", reason: "stopped again after a nudge without running a tool", countedBy });
   }
 
+  // Claude Code lists the work still running in the stop itself. An agent
+  // that stops beside it often has more it can do meanwhile, and a reviewer
+  // reading only its words lets that through some of the time; so the first
+  // stop of a stretch is nudged without one. Later stops in the stretch go to
+  // the reviewer, so an agent polling a long job is not pushed to the cap,
+  // and a subagent's stop may list its parent's work, so it never qualifies.
+  if (!input.stop_hook_active && !input.agent_id && runningBackgroundWork(input)) {
+    return settleStop(
+      input,
+      runner,
+      hookOutputForVerdict("CONTINUE", continuations),
+      { verdict: "CONTINUE", reason: "background work still running", countedBy },
+      fromTranscript ? continuations : null,
+    );
+  }
+
+  // The reply the request answers comes from wherever the request did.
+  const ownerRepliedTo = typeof input.owner_replied_to === "string" ? input.owner_replied_to : nudges?.ownerRepliedTo;
+
   let rawReview;
-  let verdict;
+  let review;
   try {
     rawReview = await (runModel ?? runtime.run)({
-      prompt: `${REVIEW_PROMPT}\n\n${JSON.stringify({
-        last_assistant_message: lastAssistantMessage,
-        owner_prompt: compactText(ownerPrompt, 12_000),
-      })}`,
+      prompt: reviewPrompt({ ownerPrompt, lastAssistantMessage, ownerRepliedTo }),
       timeoutMs: CLASSIFIER_TIMEOUT_MS,
       ghostHome: input.ghost_home,
       model: input.model,
     });
-    verdict = parseReviewVerdict(rawReview);
+    review = parseReview(rawReview);
   } catch (error) {
     // Failing open lets the stop through, so it ends the turn like any other
     // accepted stop. This is the path a reviewer timeout takes — the stuck
@@ -1207,8 +1286,8 @@ async function handleStop(input, runner, { runModel, delay } = {}) {
   return settleStop(
     input,
     runner,
-    hookOutputForVerdict(verdict, continuations),
-    { verdict, countedBy, reviewerOutput: rawReview },
+    hookOutputForVerdict(review.verdict, continuations),
+    { verdict: review.verdict, reason: review.reason, countedBy, reviewerOutput: rawReview },
     fromTranscript ? continuations : null,
   );
 }
@@ -1245,7 +1324,12 @@ export {
   handleStop,
   runOpencodeV2Model,
   hookOutputForVerdict,
-  parseReviewVerdict,
+  parseReview,
+  reviewPrompt,
   yieldsToGrokNative,
   resolveOwnerPrompt,
+  claudeRecordKind,
+  claudeOwnerText,
+  claudeReplyText,
+  runClaudeModel,
 };

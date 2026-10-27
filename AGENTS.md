@@ -16,6 +16,9 @@ work left, and answers `CONTINUE` with "Keep going." Node 22+, ESM, no runtime d
   `hookEntry` (both the build and the installer must emit identical hook entries).
 - `scripts/install.mjs` — the `npx github:ferdousbhai/keep-going --<host>` installer
   (`--link`, `--audit-log`, `--status`, `--uninstall`, `--help`); writes each host's settings file.
+- `scripts/eval.mjs` — labels the stops in local Claude Code transcripts by outcome (nudge acted
+  on or declined, owner's "continue"/"yes" after a let-through stop) and, with `--replay N`,
+  re-reviews a sample with the current `REVIEW_PROMPT`. Run it before and after a prompt change.
 - `scripts/build.mjs` — esbuild bundles `src/*.mjs` into the shipped files, stamps
   `package.json`'s version into the plugin manifests, and writes the Codex/Claude hook configs.
 - Generated, committed, do not hand-edit: `plugins/keep-going/scripts/keep-going.mjs`,

@@ -85,6 +85,16 @@ async function until(predicate) {
   assert.fail("condition never became true");
 }
 
+test("Pi sends a short request with the reply it answers", async (t) => {
+  const f = await fixture(t);
+  f.branch.unshift(
+    { id: "owner-0", type: "message", message: { role: "user", content: text("Is the deploy ready?") } },
+    { id: "assistant-0", type: "message", message: { role: "assistant", content: text("It is. Shall I deploy?") } },
+  );
+  await f.finish(reply("Deployed."));
+  assert.match(f.calls[0][1].messages[0].content[0].text, /"owner_replied_to":"It is\. Shall I deploy\?"/);
+});
+
 test("Pi uses its active model and sends the redacted final text and owner request, not the cwd", async (t) => {
   const f = await fixture(t);
   await f.finish(reply("Done. token=private-value"));
@@ -97,6 +107,8 @@ test("Pi uses its active model and sends the redacted final text and owner reque
   assert.match(prompt, /token=\[REDACTED\]/);
   assert.match(prompt, /"owner_prompt":"private owner request"/);
   assert.doesNotMatch(prompt, /private-value|private\/workspace/);
+  // The first request answers nothing.
+  assert.doesNotMatch(prompt, /"owner_replied_to":/);
   assert.equal(options.maxTokens, 2048);
   assert.equal(options.reasoning, false); // the fixture model does not reason
   assert.equal(f.sent.length, 0);

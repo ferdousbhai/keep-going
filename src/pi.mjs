@@ -141,6 +141,9 @@ export default function keepGoing(pi) {
         reviewer_model: `${model.provider}/${model.id}`,
         last_assistant_message: text,
         owner_prompt: textOf(owner.message),
+        // The agent's last words before the owner spoke: what a "yes" answers.
+        owner_replied_to: textOf(branch.slice(0, ownerIndex).findLast((entry) => entry.type === "message" &&
+          entry.message.role === "assistant" && textOf(entry.message).trim())?.message ?? {}),
       }, "pi", {
         runModel: (request) => reviewWithPi(ctx, model, request, signal),
       });

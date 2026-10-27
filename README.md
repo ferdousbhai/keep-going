@@ -14,7 +14,9 @@ that is done](docs/keep-going.gif)
 ## How it works
 
 When the agent tries to end a turn, a reviewer model sees the last assistant
-message and the owner's request — redacted and truncated — and answers:
+message and the owner's request — redacted and truncated — and answers. A short
+request ("yes", "do it") comes with the agent's message it answers, so the
+reviewer knows what was agreed to.
 
 - `CONTINUE` — the agent stopped with work in hand: it announced a step and
   did not take it, stopped partway, or asked permission for an obvious next
@@ -26,7 +28,14 @@ message and the owner's request — redacted and truncated — and answers:
 
 `CONTINUE` blocks the stop with a fixed line — "Keep going." and three
 variations, rotated. The reviewer only decides; a reviewer that wrote its own
-line ended up arguing with an agent that had read far more than it.
+line ended up arguing with an agent that had read far more than it. The one
+sentence it gives for its verdict goes to the audit log, never to the agent.
+
+On Claude Code, whose stop lists the background work still running, a main
+agent that stops beside running work is nudged without a review, once per
+stretch: it often has more it can do meanwhile, and a reviewer reading only its
+words let some of those stops through. A stop answering that nudge goes to the
+reviewer as usual.
 
 Everything else lets the stop through: a missing binary, a timeout, an
 unparseable verdict, a bare completion token (`Done.`) with no owner prompt to
@@ -155,7 +164,7 @@ unreviewed.
 | Variable | Default |
 | --- | --- |
 | `KEEP_GOING_QUIET_MS` | `15000`; the wait before a fresh stop is reviewed; `0` reviews at once |
-| `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's raw text and how the stop was decided |
+| `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's reason, its raw text, and how the stop was decided |
 
 ## Privacy
 
@@ -167,12 +176,18 @@ no server and sends nothing anywhere else. On disk it keeps only a per-turn
 continuation count under `$XDG_STATE_HOME/keep-going`, keyed by session id and
 a digest of the prompt, never the prompt itself, plus the audit log if
 `KEEP_GOING_AUDIT_LOG` is set. Under Cursor CLI, which sends neither text at
-stop, it also keeps each conversation's latest prompt and reply there
-(mode 0600), overwritten every turn.
+stop, it also keeps each conversation's latest prompt and its two latest
+replies there (mode 0600), overwritten every turn.
 
 ## Development
 
 `npm run check` builds the bundles and runs the unit tests; `npm run test:pi`
-runs end-to-end tests against an installed Pi with a mock provider. To try the
+runs end-to-end tests against an installed Pi with a mock provider.
+
+`node scripts/eval.mjs` labels the stops in your Claude Code transcripts by what
+happened next — a nudge the agent acted on or declined, a stop you answered
+with "continue" or "yes" — and `--replay N` re-reviews N of each with the
+current prompt, so a prompt change can be measured before it ships. It reads
+only your local transcripts and sends them to `claude`, as the hook does. To try the
 Pi extension: `npm run build`, `pi install /absolute/path/to/keep-going`,
 `/reload`; install one source, not both.
