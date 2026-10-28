@@ -141,6 +141,10 @@ test("Pi lets a stop through unreviewed when the agent holds after a nudge", asy
   f.branch.push({ id: "tool-pass", type: "message", message: { ...reply("Checking."), content: [{ type: "toolCall" }], stopReason: "toolUse" } });
   await f.finish(reply("Checked; still waiting on your answer."));
   assert.equal(f.calls.length, 2);
+  // The second review sees what the agent said when it was nudged.
+  const asked = (call) => call[1].messages[0].content[0].text;
+  assert.doesNotMatch(asked(f.calls[0]), /"previous_nudge":/);
+  assert.match(asked(f.calls[1]), /"previous_nudge":"Waiting on your answer\."/);
   f.deliver();
   // Stopped again with no tool since the nudge: it holds, and the hook defers.
   await f.finish(reply("Still waiting on your answer."));

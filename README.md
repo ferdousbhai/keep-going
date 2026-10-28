@@ -14,17 +14,24 @@ that is done](docs/keep-going.gif)
 ## How it works
 
 When the agent tries to end a turn, a reviewer model sees the last assistant
-message and the owner's request — redacted and truncated — and answers. A short
-request ("yes", "do it") comes with the agent's message it answers, so the
-reviewer knows what was agreed to.
+message, the owner's request, the agent's message that request answers, and —
+after a nudge, on Claude Code, Codex, and Pi — what the agent said when it was
+nudged, all redacted and truncated. It answers:
 
 - `CONTINUE` — the agent stopped with work in hand: it announced a step and
   did not take it, stopped partway, or asked permission for an obvious next
-  step.
-- `STOP` — the request is done, the agent is blocked, or it is waiting on
-  something only the owner can give: consent to deploy, publish, send, spend,
+  step. Answering the latest message is not necessarily finishing the request,
+  which may carry forward from earlier turns.
+- `STOP` — the request is done, the agent is blocked, it is waiting on
+  something only the owner can give (consent to deploy, publish, send, spend,
   or delete, an answer only the owner has, or which reading of their words
-  they meant.
+  they meant), or it is waiting on work already running that will report
+  back.
+
+After a nudge, further progress can earn another; repeating the same promise
+or an already-explained blocker does not. The carried-forward requests and
+the previous nudge come from a reviewer prompt
+[Will Brown posted](https://x.com/willcb).
 
 `CONTINUE` blocks the stop with a fixed line — "Keep going." and three
 variations, rotated. The reviewer only decides; a reviewer that wrote its own
@@ -32,10 +39,8 @@ line ended up arguing with an agent that had read far more than it. The one
 sentence it gives for its verdict goes to the audit log, never to the agent.
 
 On Claude Code, whose stop lists the background work still running, a main
-agent that stops beside running work is nudged without a review, once per
-stretch: it often has more it can do meanwhile, and a reviewer reading only its
-words let some of those stops through. A stop answering that nudge goes to the
-reviewer as usual.
+agent that stops beside running work is let through with no wait and no
+review: it is woken when that work reports back.
 
 Everything else lets the stop through: a missing binary, a timeout, an
 unparseable verdict, a bare completion token (`Done.`) with no owner prompt to
@@ -48,7 +53,8 @@ unreviewed. The count is a tally per session and turn under
 `$XDG_STATE_HOME/keep-going` (the ghost home for Ghost); Claude Code, whose
 stop names no turn, counts from its transcript, and Pi from the session
 branch. Subagents on Claude Code and Muse are reviewed on the same terms, each
-with its own count.
+with its own count, except that waiting on running work does not end a
+subagent's turn: its stop ends its run, and nothing it waits on will wake it.
 
 On Codex, Claude Code, and Grok a fresh main-agent stop waits fifteen seconds
 first; an owner message landing in the transcript meanwhile lets the stop
@@ -134,11 +140,14 @@ can only queue a follow-up message or revise a turn a few times.
 
 ## Reviewers
 
-Each reviews on the host's own model: Codex on the session's, which its stop
-names; Pi on its active model, with Pi's authentication; Ghost through
-`ghostd hook-complete`; Muse and Grok, whose reviewers run without the owner's
-config, on their CLI's built-in default; every other host on its CLI's
-configured default. Thinking is as low as the host allows: `low` on Codex,
+Claude Code reviews on its latest Sonnet (`--model sonnet`) and Codex on the
+newest Luna in the catalog Codex serves the signed-in account (`codex debug
+models`), falling back to the session's model when it lists none: a verdict
+needs no frontier model, and both come with the plan the host already runs on.
+The rest review on the host's own model: Pi on its active model, with Pi's
+authentication; Ghost through `ghostd hook-complete`; Muse and Grok, whose
+reviewers run without the owner's config, on their CLI's built-in default;
+every other host on its CLI's configured default. Thinking is as low as the host allows: `low` on Codex,
 Claude, and Grok; Pi off where the model's catalog allows it, else its lowest
 listed level; every other host at its CLI's default.
 
@@ -186,7 +195,8 @@ runs end-to-end tests against an installed Pi with a mock provider.
 
 `node scripts/eval.mjs` labels the stops in your Claude Code transcripts by what
 happened next — a nudge the agent acted on or declined, a stop you answered
-with "continue" or "yes" — and `--replay N` re-reviews N of each with the
+with "continue" or "yes", a stop made while background work it launched was
+still running — and `--replay N` re-reviews N of each with the
 current prompt, so a prompt change can be measured before it ships. It reads
 only your local transcripts and sends them to `claude`, as the hook does. To try the
 Pi extension: `npm run build`, `pi install /absolute/path/to/keep-going`,

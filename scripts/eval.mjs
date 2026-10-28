@@ -7,6 +7,11 @@
 //   declined  nudged, and the agent stopped again without a tool
 //   missed    let through, and the owner's next message was a bare "continue"
 //   answered  let through, and the owner's next message was a short "yes ..."
+//   waiting   any of these with background work still running, rebuilt from
+//             the transcript's launches and completions: the owner's rule is
+//             that such a stop ends, whatever followed. Claude Code lets these
+//             through unreviewed; the label measures the prompt for hosts
+//             that cannot see what is running.
 //
 // These are proxies, not ground truth: an agent can decline a nudge it should
 // have taken, and a "yes" can answer a permission the agent never needed. They
@@ -35,7 +40,33 @@ import {
   runClaudeModel,
 } from "../src/keep-going.mjs";
 
-const EXPECTED = { useful: "CONTINUE", declined: "STOP", missed: "CONTINUE", answered: "STOP" };
+const EXPECTED = { useful: "CONTINUE", declined: "STOP", missed: "CONTINUE", answered: "STOP", waiting: "STOP" };
+
+// The background work a record starts or ends. Claude Code records a launch in
+// the tool's result (a shell's backgroundTaskId, an async agent's agentId, a
+// workflow's taskId, a monitor's "task" id) and an end as a task notification
+// or an agent's hand-back naming the same id, in whichever record carries it.
+function taskEvents(record) {
+  const started = [];
+  const result = record?.toolUseResult;
+  if (result && typeof result === "object") {
+    if (result.backgroundTaskId) started.push(result.backgroundTaskId);
+    if (result.isAsync && result.agentId) started.push(result.agentId);
+    if (result.status === "async_launched" && result.taskId) started.push(result.taskId);
+  }
+  const raw = JSON.stringify(record);
+  for (const match of raw.matchAll(/Monitor started \(task (\w+)/g)) started.push(match[1]);
+  const ended = [
+    ...[...raw.matchAll(/<task-id>(\w+)<\/task-id>/g)].map((match) => match[1]),
+    ...[...raw.matchAll(/agent-message from=\\"(\w+)\\"/g)].map((match) => match[1]),
+  ];
+  if (record?.type === "assistant") {
+    for (const part of record.message?.content ?? []) {
+      if (part?.type === "tool_use" && part.name === "TaskStop") ended.push(part.input?.task_id ?? part.input?.shell_id);
+    }
+  }
+  return { started, ended };
+}
 const BARE_CONTINUE = /^(continue|keep going|go on|carry on|proceed|finish( it)?)[.!]*$/i;
 const SHORT_YES = /^(yes|yep|yeah|go ahead|do it|ship it)\b/i;
 // What the host writes in the agent's place when a reply fails; no stop to review.
@@ -72,32 +103,45 @@ const agentStopped = (record) =>
 // exactly what the hook would have handed the reviewer at that stop.
 function labelStops(file, recs) {
   const cases = [];
+  // A subagent's stop is reviewed whatever is running, as in the hook.
+  const subagent = file.includes(`${path.sep}subagents${path.sep}`);
+  const running = new Set();
+  const labelled = (item, label) => ({ ...item, label: !subagent && running.size ? "waiting" : label });
   let ownerPrompt = "";
   let ownerRepliedTo = "";
+  let previousNudge = "";
   let reply = "";
   let open = null;
   const close = (label) => {
-    if (open) cases.push({ ...open, label });
+    if (open) cases.push({ ...open, label: open.label ?? label });
     open = null;
   };
   for (const record of recs) {
+    const tasks = taskEvents(record);
+    for (const id of tasks.started) running.add(id);
+    for (const id of tasks.ended) running.delete(id);
     if (options.since && typeof record.timestamp === "string" && record.timestamp < options.since) continue;
     const kind = claudeRecordKind(record);
     if (kind === "tool") close("useful");
     else if (agentStopped(record)) close("declined");
     if (kind === "nudge") {
       if (reply && !NOT_A_STOP.test(reply)) {
-        open = { file, timestamp: record.timestamp, ownerPrompt, ownerRepliedTo, lastAssistantMessage: reply };
+        // Labelled by what was running when the stop was made, not when the
+        // agent next stopped.
+        open = { file, timestamp: record.timestamp, ownerPrompt, ownerRepliedTo, previousNudge, subagent, lastAssistantMessage: reply };
+        if (!subagent && running.size) open.label = "waiting";
       }
+      previousNudge = reply;
     }
     const owner = claudeOwnerText(record);
     if (owner) {
       const label = BARE_CONTINUE.test(owner) ? "missed" : owner.length < 80 && SHORT_YES.test(owner) ? "answered" : null;
       if (label && ownerPrompt && reply && !NOT_A_STOP.test(reply)) {
-        cases.push({ file, timestamp: record.timestamp, ownerPrompt, ownerRepliedTo, lastAssistantMessage: reply, label });
+        cases.push(labelled({ file, timestamp: record.timestamp, ownerPrompt, ownerRepliedTo, previousNudge, lastAssistantMessage: reply }, label));
       }
       ownerPrompt = owner;
       ownerRepliedTo = reply;
+      previousNudge = "";
     }
     reply = claudeReplyText(record) || reply;
   }

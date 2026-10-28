@@ -133,6 +133,14 @@ async function reviewerFixture(name, mockSource) {
 async function fixture() {
   const context = await reviewerFixture("codex", `import { appendFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
+if (args[0] === "debug") {
+  process.stdout.write(process.env.MOCK_CODEX_CATALOG ?? JSON.stringify({ models: [
+    { slug: "gpt-5.6-luna", visibility: "list", priority: 9 },
+    { slug: "gpt-6-luna", visibility: "list", priority: 5 },
+    { slug: "gpt-7-luna-preview", visibility: "hide", priority: 1 },
+  ] }));
+  process.exit(0);
+}
 const model = args[args.indexOf("--model") + 1];
 const output = args[args.indexOf("--output-last-message") + 1];
 let prompt = "";
@@ -288,7 +296,7 @@ test("STOP accepts the stop", async () => {
     const output = await handleStop(context.input, "codex");
     assert.deepEqual(output, {});
     const calls = await context.calls();
-    assert.deepEqual(calls.map((item) => item.model), ["gpt-5.5"]);
+    assert.deepEqual(calls.map((item) => item.model), ["gpt-6-luna"]);
     assert.ok(calls[0].args.includes('model_reasoning_effort="low"'));
     assert.match(calls[0].prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.match(calls[0].prompt, /"owner_prompt":"Build it now. token=\[REDACTED\]"/);
@@ -458,13 +466,13 @@ test("Codex reads its own nudges, and neither they nor a subagent open a turn", 
       user("<turn_aborted>The user interrupted the previous turn on purpose.</turn_aborted>"),
     ]);
     assert.equal(await resolveOwnerPrompt(context.input, "codex"), "Build it now. token=supersecretvalue");
-    assert.deepEqual(await codexNudges(context.input), { continuations: 1, held: true, ownerPrompt: await resolveOwnerPrompt(context.input, "codex"), ownerRepliedTo: "" });
+    assert.deepEqual(await codexNudges(context.input), { continuations: 1, held: true, ownerPrompt: await resolveOwnerPrompt(context.input, "codex"), ownerRepliedTo: "", previousNudge: "Candidate final response." });
 
     // Any tool item after the nudge is work done on it.
     await appendRecords(context.input.transcript_path, [
       JSON.stringify({ type: "response_item", payload: { type: "custom_tool_call", name: "exec" } }),
     ]);
-    assert.deepEqual(await codexNudges(context.input), { continuations: 1, held: false, ownerPrompt: await resolveOwnerPrompt(context.input, "codex"), ownerRepliedTo: "" });
+    assert.deepEqual(await codexNudges(context.input), { continuations: 1, held: false, ownerPrompt: await resolveOwnerPrompt(context.input, "codex"), ownerRepliedTo: "", previousNudge: "Candidate final response." });
   } finally {
     await context.cleanup();
   }
@@ -540,7 +548,7 @@ test("Claude classifies with no tools and the lowest advertised effort", async (
     assert.ok(call.args.includes("--no-session-persistence"));
     assert.equal(call.args[call.args.indexOf("--tools") + 1], "");
     assert.ok(!call.args.includes("--json-schema"));
-    assert.match(call.prompt, /Reply with CONTINUE or STOP, a colon, and one short sentence saying why/);
+    assert.match(call.prompt, /Reply with one short sentence saying why, then CONTINUE or STOP alone on the\s+last line/);
     assert.match(call.prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.match(call.prompt, /"owner_prompt":"Build it now. token=\[REDACTED\]"/);
     // A short request travels with the message it answers.
@@ -551,14 +559,15 @@ test("Claude classifies with no tools and the lowest advertised effort", async (
   }
 });
 
-test("every reviewer runs on the host's own model", async () => {
-  // Codex names the session's model in its stop and runs its reviewer without
-  // the owner's config, so the stop's model is passed on. The other CLIs keep
-  // their own configured default, so no model is named. Muse's stop has a
-  // model field too, but a captured one read "unknown".
+test("Claude and Codex review on their small tier, every other reviewer on the host's own model", async () => {
+  // A verdict needs no frontier model. Claude names its latest Sonnet by
+  // alias; Codex's newest listed Luna comes from its own catalog, so no
+  // version is pinned. The other CLIs keep their own configured default, so
+  // no model is named. Muse's stop has a model field, but a captured one read
+  // "unknown".
   for (const [runner, fixtureFor, expected] of [
-    ["codex", fixture, "gpt-5.5"],
-    ["claude", claudeFixture, undefined],
+    ["codex", fixture, "gpt-6-luna"],
+    ["claude", claudeFixture, "sonnet"],
     ["muse", museFixture, undefined],
     ["grok", grokFixture, undefined],
   ]) {
@@ -575,6 +584,21 @@ test("every reviewer runs on the host's own model", async () => {
   }
 });
 
+test("Codex reviews on the session's model when its catalog lists no Luna", async () => {
+  for (const catalog of [JSON.stringify({ models: [{ slug: "gpt-5.6-terra", visibility: "list", priority: 8 }] }), "not json"]) {
+    const context = await fixture();
+    try {
+      process.env.MOCK_CODEX_CATALOG = catalog;
+      process.env.MOCK_REVIEW_RESPONSE = "STOP";
+      await handleStop(context.input, "codex");
+      assert.deepEqual((await context.calls()).map((item) => item.model), ["gpt-5.5"]);
+    } finally {
+      delete process.env.MOCK_CODEX_CATALOG;
+      await context.cleanup();
+    }
+  }
+});
+
 test("temporary reviewers remove their scratch directories after process failure", async () => {
   for (const [runner, createFixture] of [
     ["codex", fixture], ["claude", claudeFixture], ["grok", grokFixture], ["muse", museFixture],
@@ -585,6 +609,7 @@ test("temporary reviewers remove their scratch directories after process failure
 import { appendFileSync } from "node:fs";
 for await (const chunk of process.stdin) {} // Consume input before exiting.
 const args = process.argv.slice(2);
+if (args[0] === "debug") process.exit(1); // Codex's model catalog, not a reviewer.
 const directory = args.includes("--cd") ? args[args.indexOf("--cd") + 1] : process.cwd();
 appendFileSync(process.env.MOCK_CALL_LOG, JSON.stringify({ directory }) + "\\n");
 process.exitCode = 1;
@@ -611,7 +636,7 @@ test("Ghost delegates classification to ghostd, marked as a reviewer", async () 
     // ghostd's harness runs the owner's own hooks; this one must not review it.
     assert.equal(call.reviewing, "1");
     assert.equal(call.input.ghost_home, context.input.ghost_home);
-    assert.match(call.input.prompt, /Reply with CONTINUE or STOP/);
+    assert.match(call.input.prompt, /then CONTINUE or STOP alone/);
     assert.match(call.input.prompt, /"last_assistant_message":"Candidate final response\."/);
     assert.match(call.input.prompt, /"owner_prompt":"Please finish the requested change\."/);
   } finally {
@@ -676,32 +701,49 @@ test("the agent hears a fixed line, never the reviewer's", async () => {
   assert.deepEqual(hookOutputForVerdict("STOP", 3), {});
 });
 
-test("the reviewer's reason follows its verdict", () => {
+test("the reviewer's reason comes before a last-line verdict, or after a leading one", () => {
+  // Asked for last, the verdict follows the reasoning. Replayed, a reviewer
+  // asked for it first wrote "STOP: ... as a subagent nothing will wake it,
+  // so..." and argued itself out of its own verdict.
+  assert.deepEqual(parseReview("It announced the migration and stopped.\nCONTINUE"), { verdict: "CONTINUE", reason: "It announced the migration and stopped." });
+  assert.deepEqual(parseReview("Waiting on the owner's consent.\n\n**STOP**"), { verdict: "STOP", reason: "Waiting on the owner's consent." });
   assert.deepEqual(parseReview("STOP: waiting on CI, which reports back."), { verdict: "STOP", reason: "waiting on CI, which reports back." });
   assert.deepEqual(parseReview("CONTINUE \u2014 it announced the migration and stopped."), { verdict: "CONTINUE", reason: "it announced the migration and stopped." });
   assert.deepEqual(parseReview("STOP"), { verdict: "STOP", reason: "" });
   assert.equal(parseReview(`CONTINUE: ${"x".repeat(5000)}`).reason.length < 600, true);
 });
 
-test("a long request is judged on its own words", () => {
+test("the reviewer sees what the request answers and what the agent said at the last nudge", () => {
+  // A long request can carry forward work from the message it answers, so it
+  // goes along whatever the request's length.
   const ask = (ownerPrompt) => reviewPrompt({ ownerPrompt, lastAssistantMessage: "Done.", ownerRepliedTo: "Shall I deploy?" });
   assert.match(ask("yes"), /"owner_replied_to":"Shall I deploy\?"/);
-  assert.doesNotMatch(ask("x".repeat(501)), /"owner_replied_to":/);
-  assert.doesNotMatch(reviewPrompt({ ownerPrompt: "yes", lastAssistantMessage: "Done." }), /"owner_replied_to":/);
+  assert.match(ask("x".repeat(501)), /"owner_replied_to":"Shall I deploy\?"/);
+  assert.doesNotMatch(reviewPrompt({ ownerPrompt: "yes", lastAssistantMessage: "Done." }), /"owner_replied_to":|"previous_nudge":/);
+  assert.match(
+    reviewPrompt({ ownerPrompt: "Migrate it.", lastAssistantMessage: "Next I'll run the migration.", previousNudge: "Next I'll run the migration." }),
+    /"previous_nudge":"Next I'll run the migration\."/,
+  );
 });
 
-test("waiting on running work is left to the agent", () => {
-  // Tried and measured: calling it STOP spared ~470 of 701 nudges the agent
-  // declined, but cost ~220 of 374 it acted on, since an agent waiting on a
-  // job often has other work in hand. A declined nudge costs one reply, and
-  // the stop after it goes through unreviewed; a lost one leaves work undone.
-  assert.doesNotMatch(REVIEW_PROMPT, /work already running/);
+test("waiting on running work that will report back ends the turn, except for a subagent", () => {
+  assert.match(REVIEW_PROMPT, /waiting on\s+work already running/);
+  // A subagent's stop ends its run and nothing wakes it. Replayed, subagents
+  // acted on 61 of 67 nudges, most of them sent while they waited.
+  assert.match(REVIEW_PROMPT, /When subagent is true/);
+  assert.match(reviewPrompt({ ownerPrompt: "Scan it.", lastAssistantMessage: "Two scans are still running.", subagent: true }), /"subagent":true/);
+  assert.doesNotMatch(reviewPrompt({ ownerPrompt: "Scan it.", lastAssistantMessage: "Done." }), /"subagent"/);
 });
 
-test("waiting on the owner ends the turn, and the reviewer does not second-guess the agent", () => {
+test("waiting on the owner ends the turn, a repeat after a nudge does too, and the reviewer does not second-guess the agent", () => {
   assert.match(REVIEW_PROMPT, /consent to deploy,\s+publish,\s+send,\s+spend,\s+or delete/);
-  assert.match(REVIEW_PROMPT, /which reading of\s+their words they\s+meant/);
+  assert.match(REVIEW_PROMPT, /which reading of\s+their\s+words they\s+meant/);
+  assert.match(REVIEW_PROMPT, /repeating the same promise or an\s+already-explained blocker does not/);
   assert.match(REVIEW_PROMPT, /Do not second-guess its findings/);
+  // "Or an external event", from the same source, was replayed and let
+  // through 19 of 25 stops the agent, nudged, went on to work on: most were
+  // waiting on running work with more in hand.
+  assert.doesNotMatch(REVIEW_PROMPT, /external event/);
 });
 
 // A Grok session on disk: the updates log the stop names, its owner's chat
@@ -832,7 +874,7 @@ test("Grok is reviewed by Grok, on the message spelling it actually sends", asyn
     assert.equal(call.args[call.args.indexOf("--effort") + 1], "low");
     assert.equal(
       call.args[call.args.indexOf("--system-prompt-override") + 1],
-      "Reply with CONTINUE or STOP, a colon, and one short sentence saying why. No preamble.",
+      "Reply with one short sentence saying why, then CONTINUE or STOP alone on the last line. No preamble.",
     );
     assert.equal(call.args[call.args.indexOf("--permission-mode") + 1], "dontAsk");
     assert.match(call.args[call.args.indexOf("--single") + 1], /Candidate final response\./);
@@ -1016,7 +1058,7 @@ test("Muse is reviewed by muse exec in a hook-free overlay", async () => {
 
     // The reviewer sees the redacted final message and nothing else: no cwd,
     // no transcript content.
-    assert.match(call.prompt, /Reply with CONTINUE or STOP/);
+    assert.match(call.prompt, /then CONTINUE or STOP alone/);
     assert.match(call.prompt, /"owner_prompt":""/);
     assert.doesNotMatch(call.prompt, /supersecretvalue/);
     assert.match(call.prompt, /token=\[REDACTED\]/);
@@ -1229,31 +1271,37 @@ test("the quiet wait defaults to fifteen seconds and parses defensively", () => 
   }
 });
 
-test("a Claude stop beside running background work is nudged without a review", async () => {
-  // Replayed, the reviewer let 1 to 4 of 30 such stops through where the
-  // agent, nudged, went on to work. Claude Code lists what is still running in
-  // the stop itself (captured from a real payload), so this one needs no model.
+test("a Claude stop beside running background work goes through with no wait and no review", async () => {
+  // The owner's rule: an agent waiting on work that will report back is left
+  // alone. Claude Code lists what is still running in the stop itself
+  // (captured from a real payload), so this needs no model.
   const context = await claudeFixture();
+  const previous = process.env.KEEP_GOING_QUIET_MS;
+  process.env.KEEP_GOING_QUIET_MS = "60000";
   try {
     let reviews = 0;
-    const runModel = async () => { reviews += 1; return "STOP"; };
+    const runModel = async () => { reviews += 1; return "CONTINUE"; };
     const running = [{ id: "b6ukwo9d7", type: "shell", status: "running", description: "Sleep", command: "sleep 45" }];
     const stop = { ...context.input, background_tasks: running };
 
-    assert.deepEqual(await handleStop(stop, "claude", { runModel }), { decision: "block", reason: NUDGES[0] });
+    const started = Date.now();
+    assert.deepEqual(await handleStop(stop, "claude", { runModel }), {});
+    assert.ok(Date.now() - started < 5_000, "a stop beside running work does not wait");
+    assert.deepEqual(await handleStop({ ...stop, stop_hook_active: true }, "claude", { runModel }), {});
     assert.equal(reviews, 0);
     const row = (await auditRows()).at(-1);
-    assert.equal(row.verdict, "CONTINUE");
+    assert.equal(row.verdict, "STOP");
     assert.equal(row.rationale, "background work still running");
 
-    // A stop that answers a nudge, a subagent's stop, and finished work all
+    // A subagent's stop, which may list its parent's work, and finished work
     // go to the reviewer as before.
-    assert.deepEqual(await handleStop({ ...stop, stop_hook_active: true }, "claude", { runModel }), {});
-    assert.deepEqual(await handleStop({ ...stop, agent_id: "agent-1" }, "claude", { runModel }), {});
-    assert.deepEqual(await handleStop({ ...stop, background_tasks: [{ ...running[0], status: "completed" }] }, "claude", { runModel }), {});
-    assert.deepEqual(await handleStop({ ...stop, background_tasks: [] }, "claude", { runModel }), {});
-    assert.equal(reviews, 4);
+    process.env.KEEP_GOING_QUIET_MS = "0";
+    assert.equal((await handleStop({ ...stop, agent_id: "agent-1" }, "claude", { runModel })).decision, "block");
+    assert.equal((await handleStop({ ...stop, background_tasks: [{ ...running[0], status: "completed" }] }, "claude", { runModel })).decision, "block");
+    assert.equal(reviews, 2);
   } finally {
+    if (previous === undefined) delete process.env.KEEP_GOING_QUIET_MS;
+    else process.env.KEEP_GOING_QUIET_MS = previous;
     await context.cleanup();
   }
 });
@@ -1265,22 +1313,25 @@ test("a Claude agent that holds after a nudge is not reviewed again", async () =
   const context = await claudeFixture();
   try {
     let reviews = 0;
-    const runModel = async () => { reviews += 1; return "CONTINUE"; };
+    let asked = "";
+    const runModel = async ({ prompt }) => { reviews += 1; asked = prompt; return "CONTINUE"; };
     const feedback = JSON.stringify({ type: "user", isMeta: true, message: { role: "user", content: "Stop hook feedback:\nKeep going." } });
     const tool = JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", name: "Bash" }] } });
     const said = (text) => JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
 
     const ownerPrompt = await resolveOwnerPrompt(context.input, "claude");
-    assert.deepEqual(await claudeNudges(context.input), { continuations: 0, held: false, ownerPrompt, ownerRepliedTo: "Earlier answer." });
+    assert.deepEqual(await claudeNudges(context.input), { continuations: 0, held: false, ownerPrompt, ownerRepliedTo: "Earlier answer.", previousNudge: "" });
     assert.equal((await handleStop(context.input, "claude", { runModel })).decision, "block");
 
     await appendRecords(context.input.transcript_path, [feedback, tool, said("Checked; the domain in the request looks like a typo. Which did you mean?")]);
-    assert.deepEqual(await claudeNudges(context.input), { continuations: 1, held: false, ownerPrompt, ownerRepliedTo: "Earlier answer." });
+    assert.deepEqual(await claudeNudges(context.input), { continuations: 1, held: false, ownerPrompt, ownerRepliedTo: "Earlier answer.", previousNudge: "Candidate final response." });
     assert.equal((await handleStop(context.input, "claude", { runModel })).decision, "block");
     assert.equal(reviews, 2);
+    // The reviewer weighs what the agent did after the nudge against what it said before it.
+    assert.match(asked, /"previous_nudge":"Candidate final response\."/);
 
     await appendRecords(context.input.transcript_path, [feedback, said("I still need your answer on the domain.")]);
-    assert.deepEqual(await claudeNudges(context.input), { continuations: 2, held: true, ownerPrompt, ownerRepliedTo: "Earlier answer." });
+    assert.deepEqual(await claudeNudges(context.input), { continuations: 2, held: true, ownerPrompt, ownerRepliedTo: "Earlier answer.", previousNudge: "Checked; the domain in the request looks like a typo. Which did you mean?" });
     assert.deepEqual(await handleStop(context.input, "claude", { runModel }), {});
     assert.equal(reviews, 2);
     const row = (await auditRows()).at(-1);

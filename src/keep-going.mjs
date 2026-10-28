@@ -206,39 +206,49 @@ const NUDGES = [
 
 // Waiting on the owner is spelled out because it is the one stop no amount
 // of the agent's own work resolves: consent, an answer only the owner has,
-// or which reading of their words they meant. A reviewer that reads only
-// the words picks the literal reading, and a typo becomes an instruction.
-const REVIEW_PROMPT = `An agent just tried to end its turn. owner_prompt is the owner's request
-this turn and last_assistant_message is the agent's final message. When the
-request is a short reply, owner_replied_to is the agent's message it answers;
-read the two together. Decide whether the turn is over.
+// or which reading of their words they meant. So is waiting on running work:
+// the owner's rule is that the hook stands aside while work it started will
+// report back, though a nudge there often found the agent more to do.
+// Carried-forward work and the previous nudge are after a prompt Will Brown
+// posted (x.com/willcb).
+const REVIEW_PROMPT = `An agent just tried to end its turn. owner_prompt is the owner's latest
+message, owner_replied_to the agent's message it answers, and
+last_assistant_message the agent's final message. previous_nudge, when present,
+is what the agent said when it was last told to keep going this turn. Decide
+whether the turn is over.
 
 CONTINUE — the agent stopped with work left that it can do now: it announced a
 step and did not take it, stopped partway through the request, or asked
-permission for an obvious next step within it.
+permission for an obvious next step within it. Answering the latest message
+does not necessarily finish the request; consider requests carried forward
+from earlier turns.
 STOP — the request is done, the agent reports a real blocker, or it is waiting
 on something only the owner can give: consent to deploy, publish, send, spend,
 or delete, an answer only the owner has, or which reading of their words they
-meant.
+meant, or it is waiting on work already running (agents, builds, CI, deploys)
+that will report back. When subagent is true, the agent is a subagent: its stop
+ends its run, and nothing it is waiting on will wake it, so waiting is not a
+reason for it to stop.
+
+If there was a previous nudge, consider what happened afterward. Further useful
+progress can justify another; repeating the same promise or an
+already-explained blocker does not.
 
 The agent has read far more than you have. Do not second-guess its findings or
 its reading of the owner; judge only whether it stopped with work in hand.
 
-Reply with CONTINUE or STOP, a colon, and one short sentence saying why.`;
-
-// A request this short ("yes", "do it", "yes to #1") means little without the
-// message it answers, so that message goes to the reviewer beside it.
-const SHORT_REQUEST_CHARS = 500;
+Reply with one short sentence saying why, then CONTINUE or STOP alone on the
+last line.`;
 
 // The reviewer's whole input, built once so the eval script asks exactly what
 // the hook asks.
-function reviewPrompt({ ownerPrompt, lastAssistantMessage, ownerRepliedTo }) {
+function reviewPrompt({ ownerPrompt, lastAssistantMessage, ownerRepliedTo, previousNudge, subagent }) {
   return `${REVIEW_PROMPT}\n\n${JSON.stringify({
+    ...(subagent ? { subagent: true } : {}),
     last_assistant_message: compactText(lastAssistantMessage, 12_000),
     owner_prompt: compactText(ownerPrompt, 12_000),
-    ...(ownerRepliedTo && ownerPrompt.length <= SHORT_REQUEST_CHARS
-      ? { owner_replied_to: compactText(ownerRepliedTo, 4_000) }
-      : {}),
+    ...(ownerRepliedTo ? { owner_replied_to: compactText(ownerRepliedTo, 4_000) } : {}),
+    ...(previousNudge ? { previous_nudge: compactText(previousNudge, 4_000) } : {}),
   })}`;
 }
 
@@ -410,11 +420,13 @@ function claudeUserMessage(record) {
 // after the latest one without running a tool. That is an agent that weighed
 // the nudge and still holds, and a second review would only argue with it.
 // classify names each record "owner", "nudge", "tool", or nothing; pickReply
-// reads the agent's text, so the message the owner's prompt answers comes along.
+// reads the agent's text, so the message the owner's prompt answers comes
+// along, and so does the one the latest nudge answered.
 async function transcriptNudges(file, classify, pickOwner, pickReply) {
   let ownerPrompt = "";
   let ownerRepliedTo = "";
   let reply = "";
+  let previousNudge = "";
   let continuations = 0;
   let worked = false;
   let hasOwner = false;
@@ -429,15 +441,17 @@ async function transcriptNudges(file, classify, pickOwner, pickReply) {
     if (kind === "owner") {
       hasOwner = true;
       continuations = 0;
+      previousNudge = "";
       worked = false;
     } else if (kind === "nudge" && hasOwner) {
       continuations += 1;
+      previousNudge = reply;
       worked = false;
     } else if (kind === "tool") {
       worked = true;
     }
   }
-  return { continuations, held: continuations > 0 && !worked, ownerPrompt, ownerRepliedTo };
+  return { continuations, held: continuations > 0 && !worked, ownerPrompt, ownerRepliedTo, previousNudge };
 }
 
 // What the owner typed in a record, or "": each host's reader below serves its
@@ -865,7 +879,26 @@ async function inTemporaryDirectory(runner, work) {
   }
 }
 
+// The newest Luna, Codex's small tier, read from the catalog Codex itself
+// serves the signed-in account, so no model name is pinned here: Codex lists
+// its models newest first by priority. Null, and the session's model reviews,
+// when the catalog has no Luna or cannot be read.
+async function latestLuna(timeoutMs) {
+  try {
+    const result = await runProcess("codex", ["debug", "models"], "", timeoutMs);
+    if (result.code !== 0) return null;
+    const catalog = JSON.parse(result.stdout);
+    const lunas = (Array.isArray(catalog?.models) ? catalog.models : []).filter((entry) =>
+      typeof entry?.slug === "string" && /\bluna\b/i.test(entry.slug) && entry.visibility === "list");
+    lunas.sort((a, b) => (a.priority ?? Infinity) - (b.priority ?? Infinity));
+    return lunas[0]?.slug ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function runCodexModel({ prompt, timeoutMs, model }) {
+  model = (await latestLuna(10_000)) ?? model;
   return inTemporaryDirectory("codex", async (directory) => {
     const outputPath = path.join(directory, "result.txt");
     const args = [
@@ -890,8 +923,8 @@ async function runCodexModel({ prompt, timeoutMs, model }) {
       'model_reasoning_effort="low"',
       "--output-last-message",
       outputPath,
-      // The session's own model, which Codex names in every stop:
-      // --ignore-user-config hides the configured one.
+      // The newest Luna, else the session's model, which Codex names in
+      // every stop: --ignore-user-config hides the configured one.
       ...(model ? ["--model", model] : []),
       "-",
     ];
@@ -906,8 +939,12 @@ async function runClaudeModel({ prompt, timeoutMs }) {
   return inTemporaryDirectory("claude", async (directory) => {
     // No tools and no --json-schema: a plain-text verdict, not a StructuredOutput
     // tool call. Claude's lowest advertised effort is low (it has no none).
+    // `sonnet` is Claude's alias for its latest Sonnet: a verdict needs no
+    // frontier model, and every Claude plan that runs Claude Code offers it.
     const args = [
       "--print",
+      "--model",
+      "sonnet",
       "--safe-mode",
       "--tools",
       "",
@@ -949,7 +986,7 @@ async function runClaudeModel({ prompt, timeoutMs }) {
 
 // Grok's default system prompt is a coding agent; this one keeps --single to
 // the verdict.
-const GROK_SYSTEM_PROMPT = "Reply with CONTINUE or STOP, a colon, and one short sentence saying why. No preamble.";
+const GROK_SYSTEM_PROMPT = "Reply with one short sentence saying why, then CONTINUE or STOP alone on the last line. No preamble.";
 
 // Nested `grok --single` otherwise inherits the parent session's home: MCP
 // servers, plugins, high reasoning, and the coding agent. That is a full
@@ -1103,11 +1140,17 @@ const runOpencodeV2Model = cliReviewer("opencode", "opencode", (prompt) => ["run
 // the verdict onto it ("...finished.STOP"), or answer twice
 // ("CONTINUECONTINUE").
 const VERDICT_PATTERN = /(?<![A-Za-z_])(CONTINUE|STOP)(?=$|[^A-Za-z_]|CONTINUE|STOP)/;
+// The reviewer is asked for its reason first and its verdict alone on the last
+// line, so the verdict follows the reasoning instead of the reasoning
+// defending it. A reviewer that answers verdict first still parses.
+const LAST_LINE_VERDICT = /(?:^|\n)[\s*_`]*(CONTINUE|STOP)[\s*_`.!]*$/;
 
-// What follows the verdict, past its colon, is the reviewer's reason. It goes
-// to the audit log and nowhere else.
+// The reason, before a last-line verdict or after a leading one, goes to the
+// audit log and nowhere else.
 function parseReview(text) {
   const raw = String(text ?? "");
+  const last = LAST_LINE_VERDICT.exec(raw);
+  if (last) return { verdict: last[1], reason: compactText(raw.slice(0, last.index).trim(), 500) };
   const match = VERDICT_PATTERN.exec(raw);
   if (!match) throw new Error("Reviewer output must be CONTINUE or STOP");
   const reason = raw.slice(match.index + match[1].length).replace(/^[\s:.\u2014\u2013-]+/, "").trim();
@@ -1192,6 +1235,13 @@ async function handleStop(input, runner, { runModel, delay } = {}) {
       throw new Error(`Stop input is missing ${key}`);
     }
   }
+  // Claude Code lists the work still running in the stop itself. An agent
+  // waiting on it is woken when it reports back, so the stop goes through
+  // with no wait and no review. A subagent's stop may list its parent's work,
+  // so it is reviewed as usual.
+  if (!input.agent_id && runningBackgroundWork(input)) {
+    return settleStop(input, runner, {}, { reason: "background work still running", countedBy: "background" });
+  }
   if (await followedUpDuringQuietWait(input, runtime, delay)) {
     return settleStop(input, runner, {}, { reason: "user followed up during quiet wait", countedBy: "quiet-wait" });
   }
@@ -1241,30 +1291,16 @@ async function handleStop(input, runner, { runModel, delay } = {}) {
     return settleStop(input, runner, {}, { verdict: "HELD", reason: "stopped again after a nudge without running a tool", countedBy });
   }
 
-  // Claude Code lists the work still running in the stop itself. An agent
-  // that stops beside it often has more it can do meanwhile, and a reviewer
-  // reading only its words lets that through some of the time; so the first
-  // stop of a stretch is nudged without one. Later stops in the stretch go to
-  // the reviewer, so an agent polling a long job is not pushed to the cap,
-  // and a subagent's stop may list its parent's work, so it never qualifies.
-  if (!input.stop_hook_active && !input.agent_id && runningBackgroundWork(input)) {
-    return settleStop(
-      input,
-      runner,
-      hookOutputForVerdict("CONTINUE", continuations),
-      { verdict: "CONTINUE", reason: "background work still running", countedBy },
-      fromTranscript ? continuations : null,
-    );
-  }
-
-  // The reply the request answers comes from wherever the request did.
+  // The reply the request answers comes from wherever the request did, and
+  // the agent's words at the last nudge from wherever the nudges were read.
   const ownerRepliedTo = typeof input.owner_replied_to === "string" ? input.owner_replied_to : nudges?.ownerRepliedTo;
+  const previousNudge = typeof input.previous_nudge === "string" ? input.previous_nudge : nudges?.previousNudge;
 
   let rawReview;
   let review;
   try {
     rawReview = await (runModel ?? runtime.run)({
-      prompt: reviewPrompt({ ownerPrompt, lastAssistantMessage, ownerRepliedTo }),
+      prompt: reviewPrompt({ ownerPrompt, lastAssistantMessage, ownerRepliedTo, previousNudge, subagent: Boolean(input.agent_id) }),
       timeoutMs: CLASSIFIER_TIMEOUT_MS,
       ghostHome: input.ghost_home,
       model: input.model,
@@ -1332,4 +1368,5 @@ export {
   claudeOwnerText,
   claudeReplyText,
   runClaudeModel,
+  runCodexModel,
 };

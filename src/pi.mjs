@@ -144,6 +144,11 @@ export default function keepGoing(pi) {
         // The agent's last words before the owner spoke: what a "yes" answers.
         owner_replied_to: textOf(branch.slice(0, ownerIndex).findLast((entry) => entry.type === "message" &&
           entry.message.role === "assistant" && textOf(entry.message).trim())?.message ?? {}),
+        // The agent's last words before the latest nudge: what it promised then.
+        previous_nudge: count > 0
+          ? textOf(thisTurn.slice(0, thisTurn.findLastIndex(isNudge)).findLast((entry) => entry.type === "message" &&
+            entry.message.role === "assistant" && textOf(entry.message).trim())?.message ?? {})
+          : "",
       }, "pi", {
         runModel: (request) => reviewWithPi(ctx, model, request, signal),
       });
