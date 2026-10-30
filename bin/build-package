@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Build the committed tree into the arch=any package with native Arch tools;
+# signing stays on the maintainer's machine (bin/release).
+# Usage: bin/build-package [output-directory]
+set -euo pipefail
+cd "$(dirname "$0")/.."
+if (( EUID == 0 )); then
+  [[ ${KEEP_GOING_ARCH_ROOT:-} == 1 ]] || { echo 'Run as a regular Arch user, or through bin/arch-run.' >&2; exit 1; }
+  pacman -S --needed --noconfirm base-devel git nodejs
+  exec runuser -u builder -- "$PWD/bin/build-package" "$@"
+fi
+for tool in makepkg node bsdtar git; do
+  command -v "$tool" >/dev/null || { echo "Native Arch build requires $tool on PATH." >&2; exit 1; }
+done
+git() { command git -c safe.directory="$PWD" "$@"; }
+version=$(git show HEAD:package.json | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).version)')
+[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+output=$(realpath -m "${1:-target/packages}")
+mkdir -p "$output"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+commit=$(git rev-parse HEAD)
+git archive --prefix="keep-going-$version/" "$commit" | gzip -n > "$work/source.tar.gz"
+git show "$commit":packaging/aur/keep-going/PKGBUILD > "$work/PKGBUILD"
+grep -qxF "pkgver=$version" "$work/PKGBUILD" \
+  || { echo "PKGBUILD pkgver does not match package.json $version; run npm run build." >&2; exit 1; }
+sum=$(sha256sum "$work/source.tar.gz" | cut -d" " -f1)
+sed -i -e 's|^source=.*|source=(source.tar.gz)|' -e "s/^sha256sums=.*/sha256sums=('$sum')/" "$work/PKGBUILD"
+(cd "$work" && PKGDEST="$output" PKGEXT=.pkg.tar.zst makepkg --force)
+package="$output/keep-going-$version-1-any.pkg.tar.zst"
+info=$(bsdtar -xOf "$package" .PKGINFO)
+for field in 'pkgname = keep-going' "pkgver = $version-1" 'arch = any'; do
+  grep -qxF "$field" <<< "$info" || { echo "Invalid package metadata: $field" >&2; exit 1; }
+done
+# The packaged command must run and register a hook at the packaged path.
+mkdir "$work/root" "$work/home"
+bsdtar -xf "$package" -C "$work/root" usr
+# A clean environment: the builder's XDG_*_HOME and *_HOME variables would
+# otherwise point the installer at their real configuration.
+env -i PATH="$PATH" HOME="$work/home" node "$work/root/usr/lib/keep-going/scripts/install.mjs" --ghost >/dev/null
+grep -qF "node '$work/root/usr/lib/keep-going/plugins/keep-going/scripts/keep-going.mjs' ghost" "$work/home/.config/ghost/hooks.json"
+[[ ! -e $work/home/.local/share/keep-going ]]
+printf '%s\n' "$commit" > "$output/source-commit.txt"

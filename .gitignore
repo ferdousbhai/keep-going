@@ -5,3 +5,4 @@ coverage/
 !.agents/
 !.agents/plugins/
 !.agents/plugins/marketplace.json
+target/

@@ -1,0 +1,68 @@
+#!/bin/bash
+# Publish the CI-built arch=any package as a signed pacman repository on the
+# tag's draft release, signed only in the local keyring, then publish the
+# release. Pushing the tag already ran the tests, built the package and
+# drafted the release (.github/workflows/release.yml).
+# Usage: bin/release <version> [release-workflow-run-id]
+set -euo pipefail
+cd "$(dirname "$0")/.."
+version=${1:?usage: bin/release <version> [release-workflow-run-id]}
+[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid version' >&2; exit 1; }
+tag=v$version
+gh_repo=ferdousbhai/keep-going
+repo=keep-going
+fingerprint=52130299581DAD685226900CA89CA1A6A1E74251
+step() { printf '\n==> %s\n' "$*"; }
+source_commit=$(git rev-parse "$tag^{commit}")
+package_version=$(git show "$source_commit:package.json" | sed -n 's/^  "version": "\(.*\)",$/\1/p' | head -1)
+[[ $package_version == "$version" ]] \
+  || { echo "package.json at $tag says version ${package_version:-<none>}, not $version." >&2; exit 1; }
+remote_commit=$(gh api "repos/$gh_repo/commits/$tag" --jq .sha)
+[[ $source_commit == "$remote_commit" ]] || { echo 'Local and remote tags disagree.' >&2; exit 1; }
+gpg --batch --list-secret-keys "$fingerprint" >/dev/null 2>&1 \
+  || { echo "The package-signing key $fingerprint is not in this keyring." >&2; exit 1; }
+step "Waiting for the release workflow for $tag"
+run=${2:-}
+if [[ -z $run ]]; then
+  for _ in {1..24}; do
+    run=$(gh run list --repo "$gh_repo" --workflow release.yml --commit "$source_commit" --event push \
+      --json databaseId --jq '.[0].databaseId // empty')
+    [[ -z $run ]] || break
+    sleep 5
+  done
+fi
+[[ $run =~ ^[0-9]+$ ]] || { echo 'No release workflow run found.' >&2; exit 1; }
+gh run watch "$run" --repo "$gh_repo" --exit-status
+run_info=$(gh run view "$run" --repo "$gh_repo" --json headSha,event,conclusion,workflowName \
+  --jq '[.headSha,.event,.conclusion,.workflowName] | @tsv')
+[[ $run_info == "$source_commit"$'\tpush\tsuccess\trelease' ]] \
+  || { echo 'CI must be a successful release push run for the exact release commit.' >&2; exit 1; }
+gh release view "$tag" --repo "$gh_repo" >/dev/null \
+  || { echo "No GitHub release for $tag; the release workflow drafts it." >&2; exit 1; }
+mkdir -p target
+out=$(mktemp -d "$PWD/target/release-repo-$version.XXXXXX")
+mkdir "$out/assets"
+gh run download "$run" --repo "$gh_repo" --name keep-going-package --dir "$out/package"
+[[ $(cat "$out/package/source-commit.txt") == "$source_commit" ]] || { echo 'Artifact source commit mismatch.' >&2; exit 1; }
+package="keep-going-$version-1-any.pkg.tar.zst"
+info=$(bsdtar -xOf "$out/package/$package" .PKGINFO)
+for field in 'pkgname = keep-going' "pkgver = $version-1" 'arch = any'; do
+  grep -qxF "$field" <<< "$info" || { echo "Invalid package metadata: $field" >&2; exit 1; }
+done
+cp "$out/package/$package" "$out/assets/"
+# The package is validated before any signature is requested or the draft touched.
+cd "$out/assets"
+gpg --local-user "$fingerprint" --detach-sign "$package"
+gpg --verify "$package.sig" "$package"
+repo-add --sign --key "$fingerprint" --verify "$repo.db.tar.gz" "$package"
+for f in "$repo.db" "$repo.db.sig" "$repo.files" "$repo.files.sig"; do
+  cp --remove-destination "$(readlink -f "$f")" "$f"
+done
+gpg --armor --export "$fingerprint" > "$repo-signing-key.asc"
+git -C "$OLDPWD" show "$source_commit:packaging/repo/install.sh" > install.sh
+step "Uploading the signed repository to $tag"
+gh release upload "$tag" --repo "$gh_repo" --clobber ./*
+if [[ $(gh release view "$tag" --repo "$gh_repo" --json isDraft --jq .isDraft) == true ]]; then
+  gh release edit "$tag" --repo "$gh_repo" --draft=false --latest
+fi
+printf 'Published %s. verify-release.yml now installs it on x86_64 and aarch64; locally: sudo bin/verify-release %s\n' "$tag" "$version"

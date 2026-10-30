@@ -83,9 +83,22 @@ claude plugin install keep-going@keep-going
 omp plugin install github:ferdousbhai/keep-going
 
 # Muse Code, Ghost, Grok Build, Cursor CLI, Copilot CLI, Antigravity, OpenCode,
-# or Claude Code without the plugin
+# or Claude Code without the plugin — macOS and other Linux
 npx --yes github:ferdousbhai/keep-going --muse   # --ghost, --grok, --cursor, --copilot, --agy, --opencode, --claude, --all
 ```
+
+On Omarchy and other Arch Linux systems, install the signed package instead
+and register hosts with its `keep-going` command:
+
+```bash
+curl -fsSL https://ferdousbhai.com/keep-going/install.sh | sudo bash
+keep-going --ghost --claude   # as yourself; any host flags above
+```
+
+Hooks then run `/usr/lib/keep-going`, so updates arrive with `omarchy update`
+(or `pacman -Syu`) instead of another `npx` run. The installer re-points hooks
+an earlier `npx` install registered for you (`keep-going --migrate`, keeping
+`--audit-log`); hooks linked to a checkout are left alone.
 
 One route per host: a plugin and an `npx` hook together review every stop
 twice. `--all` covers Claude Code, Muse, Ghost, and Grok. Grok also runs

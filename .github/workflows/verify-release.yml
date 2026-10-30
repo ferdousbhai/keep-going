@@ -1,0 +1,38 @@
+name: Verify published release
+# bin/release publishes the draft once the signed repository is uploaded;
+# this installs that exact release through its install.sh on both
+# architectures the arch=any package serves.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to verify, such as v0.22.0
+        required: true
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Install Arch chroot tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y arch-install-scripts zstd
+      - name: Verify the release
+        run: sudo bin/verify-release "${RELEASE_TAG#v}" '${{ matrix.arch }}'

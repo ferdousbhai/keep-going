@@ -75,6 +75,11 @@ if (process.argv[1] && await realpath(process.argv[1]).catch(() => "") === fileU
     const file = path.join(root, relative);
     await writeFile(file, stampVersion(await readFile(file, "utf8"), version));
   }
+  // The Arch package's recipe carries the same version, as pkgver.
+  const recipe = path.join(root, "packaging", "aur", "keep-going", "PKGBUILD");
+  const stamped = (await readFile(recipe, "utf8")).replace(/^pkgver=.*$/m, `pkgver=${version}`);
+  if (!stamped.includes(`\npkgver=${version}\n`)) throw new Error("PKGBUILD declares no pkgver to stamp");
+  await writeFile(recipe, stamped);
   for (const [runner, { file, inline }] of Object.entries(HOOK_FILES)) {
     const target = path.join(root, file);
     await writeFile(target, hookFile(runner, inline ? await readFile(target, "utf8") : undefined));

@@ -1,0 +1,29 @@
+# Maintainer: Ferdous Bhai <23114244+ferdousbhai@users.noreply.github.com>
+# pkgver is stamped from package.json by `npm run build`.
+pkgname=keep-going
+pkgver=0.21.0
+pkgrel=1
+pkgdesc="Stop hook that tells coding agents (Claude Code, Ghost, Muse, Grok, Cursor, Copilot, ...) to keep going when work remains"
+arch=('any')
+url="https://github.com/ferdousbhai/keep-going"
+license=('MIT')
+depends=('nodejs>=22')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')  # bin/build-package builds the committed tree and pins its checksum
+
+package() {
+  cd "$srcdir/keep-going-$pkgver"
+  local lib="$pkgdir/usr/lib/keep-going"
+  # The committed, prebuilt bundles: nothing is built here and nothing runs
+  # at install time. Hooks are per-user, registered by `keep-going --<host>`.
+  install -Dm755 scripts/install.mjs "$lib/scripts/install.mjs"
+  install -Dm644 scripts/hosts.mjs "$lib/scripts/hosts.mjs"
+  install -Dm755 plugins/keep-going/scripts/keep-going.mjs "$lib/plugins/keep-going/scripts/keep-going.mjs"
+  install -Dm644 extensions/opencode.js "$lib/extensions/opencode.js"
+  printf '%s\n' 'Installed by pacman: hooks registered by keep-going point into this directory.' \
+    > "$lib/system-package"
+  install -d "$pkgdir/usr/bin"
+  ln -s /usr/lib/keep-going/scripts/install.mjs "$pkgdir/usr/bin/keep-going"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

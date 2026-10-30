@@ -1,0 +1,27 @@
+#!/bin/bash
+# Install exactly one published release in a disposable native Arch root and
+# check the package and the hook it registers. No automatic deletion.
+set -euo pipefail
+version=${1:?usage: bin/verify-release <version> [x86_64|aarch64]}
+[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid version' >&2; exit 1; }
+arch=${2:-$(uname -m)}
+case "$arch" in x86_64|aarch64) ;; *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; esac
+[[ $(uname -m) == "$arch" ]] || { echo 'A native runner is required.' >&2; exit 1; }
+cd "$(dirname "$0")/.."
+releases=https://github.com/ferdousbhai/keep-going/releases/download/v$version
+exec bin/arch-run env EXPECTED_VERSION="$version" EXPECTED_ARCH="$arch" \
+  KEEP_GOING_RELEASES_URL="$releases" bash -euo pipefail -c '
+    [[ $(uname -m) == "$EXPECTED_ARCH" ]]
+    curl --fail --location --retry 3 "$KEEP_GOING_RELEASES_URL/install.sh" -o /tmp/install.sh
+    bash /tmp/install.sh
+    [[ $(pacman -Q keep-going | cut -d" " -f2) == "$EXPECTED_VERSION-1" ]]
+    hook=/usr/lib/keep-going/plugins/keep-going/scripts/keep-going.mjs
+    test -x "$hook"
+    useradd -m verifier
+    runuser -u verifier -- keep-going --ghost --claude
+    runuser -u verifier -- keep-going --ghost --claude
+    grep -c "node '"'"'$hook'"'"' ghost" /home/verifier/.config/ghost/hooks.json | grep -qx 1
+    grep -c "node '"'"'$hook'"'"' claude" /home/verifier/.claude/settings.json | grep -qx 2
+    test ! -e /home/verifier/.local/share/keep-going
+    printf "{}" | runuser -u verifier -- node "$hook" claude
+  '

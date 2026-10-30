@@ -16,6 +16,14 @@ work left, and answers `CONTINUE` with "Keep going." Node 22+, ESM, no runtime d
   `hookEntry` (both the build and the installer must emit identical hook entries).
 - `scripts/install.mjs` — the `npx github:ferdousbhai/keep-going --<host>` installer
   (`--link`, `--audit-log`, `--status`, `--uninstall`, `--help`); writes each host's settings file.
+  Under the Arch package (a `system-package` marker beside `scripts/`) it registers the packaged
+  hook in place, as `--link` does, and adds `--migrate` (re-point npx-copy hooks).
+- Arch package: `packaging/aur/keep-going/PKGBUILD` (arch=any, installs the committed bundles to
+  `/usr/lib/keep-going` and `/usr/bin/keep-going`; `pkgver` stamped by the build).
+  `packaging/repo/` — the signed-repo `install.sh` (its `add_signed_repo` is shared byte-for-byte
+  with the other products and hash-pinned) and its tests. `bin/build-package` (native, unsigned),
+  `bin/arch-run` (disposable Arch chroot for CI), `bin/release` (maintainer-only signing and
+  publishing), `bin/verify-release`.
 - `scripts/eval.mjs` — labels the stops in local Claude Code transcripts by outcome (nudge acted
   on or declined, owner's "continue"/"yes" after a let-through stop) and, with `--replay N`,
   re-reviews a sample with the current `REVIEW_PROMPT`. Run it before and after a prompt change.
@@ -37,10 +45,12 @@ npm ci
 npm run check      # build, then unit tests — what CI runs
 npm test           # unit tests only
 npm run test:pi    # end-to-end against an installed Pi with a mock provider
+bash packaging/repo/test.sh && python3 packaging/repo/test_arch.py   # installer + release scripts
+bin/build-package                        # the Arch package from HEAD, as a regular Arch user
 ```
 
 CI (`.github/workflows/test.yml`) fails if `npm run check` leaves a diff in `extensions/`,
-`plugins/keep-going/` or `.claude-plugin/marketplace.json`: always commit the build output
+`plugins/keep-going/`, `.claude-plugin/marketplace.json` or the PKGBUILD: always commit the build output
 together with the source change. A release tag runs that check once, from `release.yml`, and
 the release is created only after it passes.
 
@@ -55,5 +65,9 @@ the release is created only after it passes.
 - Release: bump `version` in `package.json`, `npm run check` (stamps the manifests), update the
   pinned-version examples in README.md, commit "Release X.Y.Z", then push an annotated tag made
   with `git tag -a --cleanup=verbatim vX.Y.Z -F notes.md` (without `--cleanup=verbatim` git
-  strips the `##` headings). `.github/workflows/release.yml` creates the GitHub release from the
-  tag. There is no npm package (`"private": true`). Do not tag or push unless asked.
+  strips the `##` headings). `.github/workflows/release.yml` tests, builds the Arch package and
+  drafts the GitHub release from the tag; then `bin/release X.Y.Z` (signing key only in the
+  maintainer's keyring, never CI) uploads the signed repository and `install.sh` and publishes,
+  which runs `verify-release.yml`. The draft keeps `releases/latest` (the repository's Server)
+  on a release that has a database. There is no npm package (`"private": true`). Do not tag,
+  push or run release scripts unless asked.

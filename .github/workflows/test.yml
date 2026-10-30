@@ -25,4 +25,9 @@ jobs:
       # and all of them ship from the tree. A skipped build has to fail here
       # rather than release stale files.
       - name: Verify committed build output
-        run: git diff --exit-code -- extensions plugins/keep-going .claude-plugin/marketplace.json
+        run: git diff --exit-code -- extensions plugins/keep-going .claude-plugin/marketplace.json packaging/aur/keep-going/PKGBUILD
+      - name: Installer and release script checks
+        run: |
+          bash packaging/repo/test.sh
+          python3 packaging/repo/test_arch.py
+          bash -n bin/build-package bin/arch-run bin/release bin/verify-release packaging/aur/keep-going/PKGBUILD
