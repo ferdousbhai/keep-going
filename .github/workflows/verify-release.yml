@@ -27,9 +27,11 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
+      # A published release is checked with its own scripts; run by hand, with the branch's,
+      # so an older release can be checked again after the check itself was fixed.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || env.RELEASE_TAG }}
       - name: Install Arch chroot tools
         run: |
           sudo apt-get update
