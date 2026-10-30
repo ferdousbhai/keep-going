@@ -158,6 +158,8 @@ tar -C pkg -czf "$PKGDEST/keep-going-0.4.2-1-any.pkg.tar.zst" .PKGINFO usr
             mocks = root / 'mocks'
             mocks.mkdir()
             executable(mocks / 'makepkg', 'echo built >> "$CALL_LOG"\n')
+            # The refusal comes before any tool runs; CI's Ubuntu has no bsdtar.
+            executable(mocks / 'bsdtar', 'exit 1\n')
             log = root / 'calls'
             env = dict(os.environ, PATH=f'{mocks}:{os.environ["PATH"]}', CALL_LOG=str(log))
             result = subprocess.run(['bash', str(root / 'bin/build-package'), str(root / 'output')], env=env, capture_output=True, text=True)
