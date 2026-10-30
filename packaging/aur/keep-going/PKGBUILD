@@ -1,7 +1,7 @@
 # Maintainer: Ferdous Bhai <23114244+ferdousbhai@users.noreply.github.com>
 # pkgver is stamped from package.json by `npm run build`.
 pkgname=keep-going
-pkgver=0.21.0
+pkgver=0.22.0
 pkgrel=1
 pkgdesc="Stop hook that tells coding agents (Claude Code, Ghost, Muse, Grok, Cursor, Copilot, ...) to keep going when work remains"
 arch=('any')
