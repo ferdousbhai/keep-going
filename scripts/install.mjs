@@ -4,6 +4,7 @@ import {
   access,
   chmod,
   copyFile,
+  lstat,
   mkdir,
   readFile,
   rename,
@@ -25,12 +26,18 @@ const BUNDLED_HOOK = path.join(
   "keep-going.mjs",
 );
 const OPENCODE_PLUGIN = path.join(PACKAGE_ROOT, "extensions", "opencode.js");
+// The Arch package installs this tree at /usr/lib/keep-going with this marker
+// beside it. pacman then owns the files and replaces them on every update, so
+// hooks point at them in place, as --link does, instead of at a copy in the
+// home directory that only another npx run would refresh.
+const PACKAGED = await access(path.join(PACKAGE_ROOT, "system-package")).then(() => true, () => false);
 // OpenCode loads every module in its plugins directory; keep-going is one file there.
 const opencodePluginFile = ({ configHome }) => path.join(configHome, "opencode", "plugins", "keep-going.js");
 
 const USAGE = `Usage: keep-going HOSTS [--link] [--audit-log PATH]
        keep-going --uninstall HOSTS
        keep-going --status
+       keep-going --migrate
 
 HOSTS: --claude --muse --ghost --grok --cursor --copilot --agy --opencode,
 or --all for Claude Code, Muse, Ghost, and Grok. Codex installs through its
@@ -38,7 +45,10 @@ marketplace; see README.md.
 
 --link          register this checkout's hook instead of a copy
 --audit-log P   write KEEP_GOING_AUDIT_LOG=P into each hook command
---status        show where keep-going is registered`;
+--status        show where keep-going is registered
+--migrate       from the system package: re-point every hook registered at the
+                npx copy (~/.local/share/keep-going) to the package, keeping
+                its options; other registrations are left alone`;
 
 const claudeConfigDir = (userHome) => process.env.CLAUDE_CONFIG_DIR || path.join(userHome, ".claude");
 
@@ -347,6 +357,48 @@ function updateHookConfig(config, runner, command, uninstall) {
   return updated;
 }
 
+// `node` is resolved from PATH, the same way the plugin manifest invokes it.
+// An absolute process.execPath records a version-manager install directory,
+// and that directory is removed on the next upgrade.
+const nodeCommand = (hookFile, runner) => `node ${shellQuote(hookFile)} ${runner}`;
+
+async function writeHost(runner, paths, command, uninstall) {
+  const settingsFile = TARGETS[runner](paths);
+  const config = await readJson(settingsFile, uninstall ? null : {});
+  if (config !== null) {
+    const update = FLAT_HOSTS[runner] ? updateFlatConfig : updateHookConfig;
+    await writeJsonAtomic(settingsFile, update(config, runner, command, uninstall));
+  }
+  process.stdout.write(`${uninstall ? "Removed" : "Installed"} ${runner} hook in ${settingsFile}\n`);
+}
+
+// What the Arch installer runs for the user who invoked it. Only hosts whose
+// hooks run the npx copy move, each keeping whatever its command set before
+// the path (an audit log); a hook linked to a checkout, a plugin, and a host
+// never registered all stay as they are.
+async function migrateCopies(paths, copiedHook) {
+  const copy = `node ${shellQuote(copiedHook)} `;
+  let moved = 0;
+  for (const runner of Object.keys(TARGETS)) {
+    const old = (await fileSource(runner)(paths)).find((hook) => hook.ours && hook.command.includes(copy));
+    if (!old) continue;
+    const prefix = old.command.slice(0, old.command.indexOf(copy));
+    await writeHost(runner, paths, `${prefix}${nodeCommand(BUNDLED_HOOK, runner)}`, false);
+    moved += 1;
+  }
+  // A copied OpenCode plugin is a regular file; the packaged one is a link.
+  const plugin = opencodePluginFile(paths);
+  if ((await lstat(plugin).catch(() => null))?.isFile()) {
+    await rm(plugin, { force: true });
+    await symlink(OPENCODE_PLUGIN, plugin);
+    process.stdout.write(`Installed opencode plugin at ${plugin}\n`);
+    moved += 1;
+  }
+  process.stdout.write(moved
+    ? `Reviewer registered from ${BUNDLED_HOOK}; it updates with the system.\n`
+    : "No hooks registered at the npx copy; register hosts with: keep-going --claude (or --ghost, --muse, ...)\n");
+}
+
 async function main() {
   const args = process.argv.slice(2);
   if (args.includes("--help") || args.includes("-h")) {
@@ -358,6 +410,12 @@ async function main() {
   const configHome = process.env.XDG_CONFIG_HOME || path.join(userHome, ".config");
   if (args.includes("--status")) {
     process.stdout.write(`${await reportStatus({ userHome, configHome })}\n`);
+    return;
+  }
+
+  if (args.includes("--migrate")) {
+    if (!PACKAGED) throw new Error("--migrate re-points hooks to the system package; run it as the packaged keep-going command.");
+    await migrateCopies({ userHome, configHome }, path.join(dataHome, "keep-going", "keep-going.mjs"));
     return;
   }
 
@@ -375,7 +433,7 @@ async function main() {
   // is what anyone developing the hook wants and what a user should never get
   // by accident. Both spellings are always stripped, so switching between them
   // replaces the registration instead of leaving both to review every stop.
-  const link = args.includes("--link");
+  const link = args.includes("--link") || PACKAGED;
   const auditLog = auditLogOption(args);
   const auditPrefix = auditLog ? `KEEP_GOING_AUDIT_LOG=${shellQuote(auditLog)} ` : "";
   const copiedHook = path.join(dataHome, "keep-going", "keep-going.mjs");
@@ -408,23 +466,13 @@ async function main() {
       process.stdout.write(`${uninstall ? "Removed" : "Installed"} opencode plugin at ${file}\n`);
       continue;
     }
-    const settingsFile = TARGETS[runner]({ userHome, configHome });
-    const config = await readJson(settingsFile, uninstall ? null : {});
-    if (config === null) {
-      process.stdout.write(`Removed ${runner} hook in ${settingsFile}\n`);
-      continue;
-    }
-    // `node` is resolved from PATH, the same way the plugin manifest invokes it.
-    // An absolute process.execPath records a version-manager install directory,
-    // and that directory is removed on the next upgrade.
-    const command = `${auditPrefix}node ${shellQuote(hookFile)} ${runner}`;
-    const update = FLAT_HOSTS[runner] ? updateFlatConfig : updateHookConfig;
-    await writeJsonAtomic(settingsFile, update(config, runner, command, uninstall));
-    process.stdout.write(`${uninstall ? "Removed" : "Installed"} ${runner} hook in ${settingsFile}\n`);
+    await writeHost(runner, { userHome, configHome }, `${auditPrefix}${nodeCommand(hookFile, runner)}`, uninstall);
   }
 
   if (!uninstall) {
-    process.stdout.write(`Reviewer ${link ? "linked from" : "installed at"} ${hookFile}\n`);
+    process.stdout.write(PACKAGED
+      ? `Reviewer registered from ${hookFile}; it updates with the system.\n`
+      : `Reviewer ${link ? "linked from" : "installed at"} ${hookFile}\n`);
     if (auditLog) process.stdout.write(`Audit log at ${auditLog}\n`);
   }
 }

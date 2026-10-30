@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
+import { access, mkdtemp, readFile, readlink, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -469,6 +469,102 @@ test("uninstalling an absent hook does not create a settings file", async () => 
     const result = await runInstaller(["--uninstall", "--claude"], env);
     assert.equal(result.code, 0, result.stderr);
     await assert.rejects(access(settings), { code: "ENOENT" });
+  } finally {
+    await cleanup();
+  }
+});
+
+// The Arch package's layout: this tree under a root with the marker beside it.
+async function packagedTree(root) {
+  const lib = path.join(root, "usr", "lib", "keep-going");
+  for (const relative of ["scripts/install.mjs", "scripts/hosts.mjs", "plugins/keep-going/scripts/keep-going.mjs", "extensions/opencode.js"]) {
+    await mkdir(path.dirname(path.join(lib, relative)), { recursive: true });
+    await writeFile(path.join(lib, relative), await readFile(path.join(ROOT, relative)));
+  }
+  await writeFile(path.join(lib, "system-package"), "pacman\n");
+  return { installer: path.join(lib, "scripts", "install.mjs"), hook: path.join(lib, "plugins", "keep-going", "scripts", "keep-going.mjs"), lib };
+}
+
+function runPackaged(installer, args, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [installer, ...args], { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => stdout += chunk);
+    child.stderr.on("data", (chunk) => stderr += chunk);
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+test("the system package registers its own hook in place, idempotently", async () => {
+  const { settings, dataHome, configHome, env, cleanup } = await installHome("packaged");
+  try {
+    const { installer, hook } = await packagedTree(path.join(dataHome, "..", "pkg"));
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const result = await runPackaged(installer, ["--ghost", "--claude"], env);
+      assert.equal(result.code, 0, result.stderr);
+      assert.match(result.stdout, /updates with the system/);
+    }
+    const ghost = JSON.parse(await readFile(path.join(configHome, "ghost", "hooks.json"), "utf8"));
+    const claude = JSON.parse(await readFile(settings, "utf8"));
+    assert.deepEqual(ghost.hooks.session_stop.flatMap((group) => group.hooks.map((h) => h.command)),
+      [`node '${hook}' ghost`]);
+    for (const event of ["Stop", "SubagentStop"]) {
+      assert.deepEqual(claude.hooks[event].flatMap((group) => group.hooks.map((h) => h.command)), [`node '${hook}' claude`]);
+    }
+    await assert.rejects(access(path.join(dataHome, "keep-going")), { code: "ENOENT" });
+  } finally {
+    await cleanup();
+  }
+});
+
+test("--migrate re-points npx copies to the package and leaves everything else", async () => {
+  const { settings, home, dataHome, configHome, env, cleanup } = await installHome("migrate");
+  try {
+    const { installer, hook, lib } = await packagedTree(path.join(dataHome, "..", "pkg"));
+    // An npx install: Ghost with an audit log, Cursor flat, OpenCode copied.
+    assert.equal((await runInstaller(["--ghost", "--cursor", "--opencode", "--audit-log", "/tmp/a log.jsonl"], env)).code, 0);
+    // Claude linked to a checkout, which a migration must not touch.
+    assert.equal((await runInstaller(["--claude", "--link"], env)).code, 0);
+    const ghostFile = path.join(configHome, "ghost", "hooks.json");
+    const ghost = JSON.parse(await readFile(ghostFile, "utf8"));
+    ghost.hooks.session_stop.push({ hooks: [{ type: "command", command: "keep-me" }] });
+    await writeFile(ghostFile, JSON.stringify(ghost));
+    const claudeBefore = await readFile(settings, "utf8");
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const result = await runPackaged(installer, ["--migrate"], env);
+      assert.equal(result.code, 0, result.stderr);
+    }
+    const migrated = JSON.parse(await readFile(ghostFile, "utf8")).hooks.session_stop.flatMap((group) => group.hooks.map((h) => h.command));
+    assert.deepEqual(migrated, ["keep-me", `KEEP_GOING_AUDIT_LOG='/tmp/a log.jsonl' node '${hook}' ghost`]);
+    const cursor = JSON.parse(await readFile(path.join(home, ".cursor", "hooks.json"), "utf8"));
+    for (const event of ["beforeSubmitPrompt", "afterAgentResponse", "stop"]) {
+      assert.deepEqual(cursor.hooks[event].map((h) => h.command), [`KEEP_GOING_AUDIT_LOG='/tmp/a log.jsonl' node '${hook}' cursor`]);
+    }
+    assert.equal(await readlink(path.join(configHome, "opencode", "plugins", "keep-going.js")), path.join(lib, "extensions", "opencode.js"));
+    assert.equal(await readFile(settings, "utf8"), claudeBefore);
+    // Hosts never registered stay unregistered.
+    await assert.rejects(access(path.join(configHome, "muse", "settings.json")), { code: "ENOENT" });
+    const status = (await runPackaged(installer, ["--status"], env)).stdout;
+    assert.doesNotMatch(status, / ! .*reviews it/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("--migrate with nothing to move says how to register, and is refused outside the package", async () => {
+  const { dataHome, configHome, env, cleanup } = await installHome("migrate-none");
+  try {
+    const { installer } = await packagedTree(path.join(dataHome, "..", "pkg"));
+    const result = await runPackaged(installer, ["--migrate"], env);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /No hooks registered at the npx copy/);
+    await assert.rejects(access(path.join(configHome, "ghost")), { code: "ENOENT" });
+    const refused = await runInstaller(["--migrate"], env);
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /system package/);
   } finally {
     await cleanup();
   }
