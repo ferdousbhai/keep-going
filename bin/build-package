@@ -32,12 +32,16 @@ info=$(bsdtar -xOf "$package" .PKGINFO)
 for field in 'pkgname = keep-going' "pkgver = $version-1" 'arch = any'; do
   grep -qxF "$field" <<< "$info" || { echo "Invalid package metadata: $field" >&2; exit 1; }
 done
-# The packaged command must run and register a hook at the packaged path.
+# The packaged command must run, register a hook that names the command and no
+# path, and be that hook when asked.
 mkdir "$work/root" "$work/home"
 bsdtar -xf "$package" -C "$work/root" usr
 # A clean environment: the builder's XDG_*_HOME and *_HOME variables would
 # otherwise point the installer at their real configuration.
 env -i PATH="$PATH" HOME="$work/home" node "$work/root/usr/lib/keep-going/scripts/install.mjs" --ghost >/dev/null
-grep -qF "node '$work/root/usr/lib/keep-going/plugins/keep-going/scripts/keep-going.mjs' ghost" "$work/home/.config/ghost/hooks.json"
+grep -qF "; keep-going hook ghost" "$work/home/.config/ghost/hooks.json"
+! grep -qF "$work/root" "$work/home/.config/ghost/hooks.json"
+env -i PATH="$PATH" HOME="$work/home" node "$work/root/usr/lib/keep-going/scripts/install.mjs" hook ghost </dev/null \
+  | grep -qF "keep-going failed open"
 [[ ! -e $work/home/.local/share/keep-going ]]
 printf '%s\n' "$commit" > "$output/source-commit.txt"
