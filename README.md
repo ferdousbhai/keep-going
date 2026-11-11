@@ -95,10 +95,14 @@ curl -fsSL https://ferdousbhai.com/keep-going/install.sh | sudo bash
 keep-going --ghost --claude   # as yourself; any host flags above
 ```
 
-Hooks then run `/usr/lib/keep-going`, so updates arrive with `omarchy update`
-(or `pacman -Syu`) instead of another `npx` run. The installer re-points hooks
-an earlier `npx` install registered for you (`keep-going --migrate`, keeping
-`--audit-log`); hooks linked to a checkout are left alone.
+Hooks then run the `keep-going` command (`keep-going hook <host>`), so updates
+arrive with `omarchy update` (or `pacman -Syu`) instead of another `npx` run.
+The registered command names no path, so a settings file you carry between
+computers (a dotfiles repository, Omacloud) holds a hook that works on each
+one with the package installed, and lets every stop through where it isn't.
+The installer re-points hooks an earlier `npx` install or an earlier package
+registered for you (`keep-going --migrate`, keeping `--audit-log`); hooks
+linked to a checkout are left alone.
 
 One route per host: a plugin and an `npx` hook together review every stop
 twice. `--all` covers Claude Code, Muse, Ghost, and Grok. Grok also runs
@@ -117,6 +121,8 @@ Installer flags:
   replaces the registration.
 - `--audit-log PATH` writes `KEEP_GOING_AUDIT_LOG` into each hook command, for
   Muse, which passes a hook no environment; reinstalling without it drops it.
+  With no path it is `audit.jsonl` in keep-going's state directory, and the
+  command still names no path.
 - `--status` shows each host's registration, missing events, other hooks on
   the same stop, and double reviews.
 - `--uninstall` with host flags removes them; the Claude plugin goes with
@@ -186,7 +192,7 @@ unreviewed.
 | Variable | Default |
 | --- | --- |
 | `KEEP_GOING_QUIET_MS` | `15000`; the wait before a fresh stop is reviewed; `0` reviews at once |
-| `KEEP_GOING_AUDIT_LOG` | unset; a path appends one JSON line per decision, with the reviewer's reason, its raw text, and how the stop was decided |
+| `KEEP_GOING_AUDIT_LOG` | unset; a path, or `1` for `audit.jsonl` in `$XDG_STATE_HOME/keep-going`, appends one JSON line per decision, with the reviewer's reason, its raw text, and how the stop was decided |
 
 ## Privacy
 

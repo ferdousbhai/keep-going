@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { HOOK_TIMEOUT, STOP_EVENTS, hookEntry } from "./hosts.mjs";
 
@@ -34,21 +35,26 @@ const PACKAGED = await access(path.join(PACKAGE_ROOT, "system-package")).then(()
 // OpenCode loads every module in its plugins directory; keep-going is one file there.
 const opencodePluginFile = ({ configHome }) => path.join(configHome, "opencode", "plugins", "keep-going.js");
 
-const USAGE = `Usage: keep-going HOSTS [--link] [--audit-log PATH]
+const USAGE = `Usage: keep-going HOSTS [--link] [--audit-log [PATH]]
        keep-going --uninstall HOSTS
        keep-going --status
        keep-going --migrate
+       keep-going hook HOST
 
 HOSTS: --claude --muse --ghost --grok --cursor --copilot --agy --opencode,
 or --all for Claude Code, Muse, Ghost, and Grok. Codex installs through its
 marketplace; see README.md.
 
 --link          register this checkout's hook instead of a copy
---audit-log P   write KEEP_GOING_AUDIT_LOG=P into each hook command
+--audit-log [P] write KEEP_GOING_AUDIT_LOG into each hook command: P, or with no
+                path the log in keep-going's state directory
 --status        show where keep-going is registered
 --migrate       from the system package: re-point every hook registered at the
-                npx copy (~/.local/share/keep-going) to the package, keeping
-                its options; other registrations are left alone`;
+                npx copy (~/.local/share/keep-going), or at the package by its
+                path, to the keep-going command, keeping its options; other
+                registrations are left alone
+hook HOST       review a stop for HOST, as its hook: what the system package's
+                registrations run`;
 
 const claudeConfigDir = (userHome) => process.env.CLAUDE_CONFIG_DIR || path.join(userHome, ".claude");
 
@@ -115,7 +121,8 @@ function updateFlatConfig(config, runner, command, uninstall) {
 // read off the command rather than being part of the identity, because inside
 // a file this installer owns, any keep-going registration is one of ours.
 function ourRunner(command) {
-  if (typeof command !== "string" || !command.includes("keep-going.mjs")) return null;
+  if (typeof command !== "string") return null;
+  if (!command.includes("keep-going.mjs") && !/(?:^|[\s;])keep-going hook \S+\s*$/.test(command)) return null;
   return command.trimEnd().split(/\s+/).at(-1);
 }
 
@@ -312,11 +319,15 @@ async function writeJsonAtomic(file, value) {
   }
 }
 
+// What KEEP_GOING_AUDIT_LOG says for the log in keep-going's own state
+// directory: the hook works out where that is, so the command names no path.
+const DEFAULT_AUDIT_LOG = "1";
+
 function auditLogOption(args) {
   const index = args.indexOf("--audit-log");
   if (index === -1) return "";
   const value = args[index + 1];
-  if (!value || value.startsWith("--")) throw new Error(`--audit-log needs a path.\n\n${USAGE}`);
+  if (!value || value.startsWith("--")) return DEFAULT_AUDIT_LOG;
   // Absolute in the command: a relative path would resolve against whatever
   // directory each host runs its hooks from.
   return path.resolve(value);
@@ -362,6 +373,14 @@ function updateHookConfig(config, runner, command, uninstall) {
 // and that directory is removed on the next upgrade.
 const nodeCommand = (hookFile, runner) => `node ${shellQuote(hookFile)} ${runner}`;
 
+// The system package's registration names no path at all: `keep-going` is on
+// PATH wherever the package is installed. So a settings file carried to
+// another computer (a dotfiles repository, Omacloud) holds a hook that works
+// there too, and where keep-going isn't installed the stop simply goes through.
+// `prefix` is what the command sets first (an audit log).
+const packagedCommand = (runner, prefix = "") =>
+  `command -v keep-going >/dev/null || exit 0; ${prefix}keep-going hook ${runner}`;
+
 async function writeHost(runner, paths, command, uninstall) {
   const settingsFile = TARGETS[runner](paths);
   const config = await readJson(settingsFile, uninstall ? null : {});
@@ -377,13 +396,15 @@ async function writeHost(runner, paths, command, uninstall) {
 // the path (an audit log); a hook linked to a checkout, a plugin, and a host
 // never registered all stay as they are.
 async function migrateCopies(paths, copiedHook) {
-  const copy = `node ${shellQuote(copiedHook)} `;
+  // The npx copy, and the package by its path, as earlier versions wrote it.
+  const olds = [copiedHook, BUNDLED_HOOK].map((file) => `node ${shellQuote(file)} `);
   let moved = 0;
   for (const runner of Object.keys(TARGETS)) {
-    const old = (await fileSource(runner)(paths)).find((hook) => hook.ours && hook.command.includes(copy));
+    const ours = (await fileSource(runner)(paths)).filter((hook) => hook.ours);
+    const old = olds.flatMap((at) => ours.filter((hook) => hook.command.includes(at)).map((hook) => ({ hook, at })))[0];
     if (!old) continue;
-    const prefix = old.command.slice(0, old.command.indexOf(copy));
-    await writeHost(runner, paths, `${prefix}${nodeCommand(BUNDLED_HOOK, runner)}`, false);
+    const prefix = old.hook.command.slice(0, old.hook.command.indexOf(old.at));
+    await writeHost(runner, paths, packagedCommand(runner, prefix), false);
     moved += 1;
   }
   // A copied OpenCode plugin is a regular file; the packaged one is a link.
@@ -395,12 +416,19 @@ async function migrateCopies(paths, copiedHook) {
     moved += 1;
   }
   process.stdout.write(moved
-    ? `Reviewer registered from ${BUNDLED_HOOK}; it updates with the system.\n`
+    ? "Reviewer registered as the keep-going command; it updates with the system.\n"
     : "No hooks registered at the npx copy; register hosts with: keep-going --claude (or --ghost, --muse, ...)\n");
 }
 
 async function main() {
   const args = process.argv.slice(2);
+  // The hook itself, run in this process as if it had been started by name:
+  // it reads the host from argv and runs when it is the entry point.
+  if (args[0] === "hook") {
+    process.argv = [process.argv[0], BUNDLED_HOOK, ...args.slice(1)];
+    await import(pathToFileURL(BUNDLED_HOOK).href);
+    return;
+  }
   if (args.includes("--help") || args.includes("-h")) {
     process.stdout.write(`${USAGE}\n`);
     return;
@@ -466,14 +494,16 @@ async function main() {
       process.stdout.write(`${uninstall ? "Removed" : "Installed"} opencode plugin at ${file}\n`);
       continue;
     }
-    await writeHost(runner, { userHome, configHome }, `${auditPrefix}${nodeCommand(hookFile, runner)}`, uninstall);
+    const command = PACKAGED ? packagedCommand(runner, auditPrefix) : `${auditPrefix}${nodeCommand(hookFile, runner)}`;
+    await writeHost(runner, { userHome, configHome }, command, uninstall);
   }
 
   if (!uninstall) {
     process.stdout.write(PACKAGED
-      ? `Reviewer registered from ${hookFile}; it updates with the system.\n`
+      ? "Reviewer registered as the keep-going command; it updates with the system.\n"
       : `Reviewer ${link ? "linked from" : "installed at"} ${hookFile}\n`);
-    if (auditLog) process.stdout.write(`Audit log at ${auditLog}\n`);
+    if (auditLog === DEFAULT_AUDIT_LOG) process.stdout.write("Audit log in keep-going's state directory (audit.jsonl)\n");
+    else if (auditLog) process.stdout.write(`Audit log at ${auditLog}\n`);
   }
 }
 

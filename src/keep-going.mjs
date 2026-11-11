@@ -1163,7 +1163,10 @@ function hookOutputForVerdict(verdict, continuations = 0) {
 }
 
 async function recordReviewAudit(input, runner, { verdict, reason, error, countedBy, reviewerOutput }) {
-  const auditPath = process.env.KEEP_GOING_AUDIT_LOG;
+  // "1" is the log in this hook's own state directory, so a hook command can
+  // ask for one without naming a path of one computer.
+  const asked = process.env.KEEP_GOING_AUDIT_LOG;
+  const auditPath = asked === "1" ? path.join(xdgStateHome(), "keep-going", "audit.jsonl") : asked;
   if (!auditPath) return;
   const entry = {
     timestamp: new Date().toISOString(),

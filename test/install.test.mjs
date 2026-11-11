@@ -123,9 +123,12 @@ test("--audit-log writes the log path into each command and a plain reinstall dr
     assert.equal(reinstalled.hooks.Stop.length, 1);
     assert.doesNotMatch(reinstalled.hooks.Stop[0].hooks[0].command, /KEEP_GOING_AUDIT_LOG/);
 
-    const missing = await runInstaller(["--muse", "--audit-log"], env);
-    assert.equal(missing.code, 1);
-    assert.match(missing.stderr, /--audit-log needs a path/);
+    // With no path it is the log in the state directory, which the hook finds itself.
+    const bare = await runInstaller(["--muse", "--audit-log"], env);
+    assert.equal(bare.code, 0, bare.stderr);
+    assert.match(bare.stdout, /Audit log in keep-going's state directory/);
+    const defaulted = JSON.parse(await readFile(museSettings, "utf8"));
+    assert.match(defaulted.hooks.Stop[0].hooks[0].command, /^KEEP_GOING_AUDIT_LOG='1' node /);
   } finally {
     await cleanup();
   }
@@ -474,6 +477,9 @@ test("uninstalling an absent hook does not create a settings file", async () => 
   }
 });
 
+// What the system package's registrations begin with.
+const GUARD = "command -v keep-going >/dev/null || exit 0; ";
+
 // The Arch package's layout: this tree under a root with the marker beside it.
 async function packagedTree(root) {
   const lib = path.join(root, "usr", "lib", "keep-going");
@@ -508,11 +514,27 @@ test("the system package registers its own hook in place, idempotently", async (
     }
     const ghost = JSON.parse(await readFile(path.join(configHome, "ghost", "hooks.json"), "utf8"));
     const claude = JSON.parse(await readFile(settings, "utf8"));
+    // No path in the command: it runs wherever the package is installed, and
+    // lets the stop through where it isn't.
     assert.deepEqual(ghost.hooks.session_stop.flatMap((group) => group.hooks.map((h) => h.command)),
-      [`node '${hook}' ghost`]);
+      [`${GUARD}keep-going hook ghost`]);
     for (const event of ["Stop", "SubagentStop"]) {
-      assert.deepEqual(claude.hooks[event].flatMap((group) => group.hooks.map((h) => h.command)), [`node '${hook}' claude`]);
+      assert.deepEqual(claude.hooks[event].flatMap((group) => group.hooks.map((h) => h.command)), [`${GUARD}keep-going hook claude`]);
     }
+    assert.doesNotMatch(JSON.stringify([ghost, claude]), new RegExp(hook.replaceAll("/", "\\/")));
+    // A bare --audit-log asks for the log in the state directory, again without a path.
+    assert.equal((await runPackaged(installer, ["--claude", "--audit-log"], env)).code, 0);
+    const audited = JSON.parse(await readFile(settings, "utf8"));
+    assert.deepEqual(audited.hooks.Stop.flatMap((group) => group.hooks.map((h) => h.command)),
+      [`${GUARD}KEEP_GOING_AUDIT_LOG='1' keep-going hook claude`]);
+    const status = (await runPackaged(installer, ["--status"], env)).stdout;
+    assert.match(status, /claude\s+registered/);
+    assert.doesNotMatch(status, / ! .*reviews it/);
+    // What those commands run: the hook, by the host's name. With nothing to
+    // read it fails open, as the hook does started any other way.
+    const reviewed = await runPackaged(installer, ["hook", "claude"], env);
+    assert.equal(reviewed.code, 0, reviewed.stderr);
+    assert.match(reviewed.stdout, /keep-going failed open/);
     await assert.rejects(access(path.join(dataHome, "keep-going")), { code: "ENOENT" });
   } finally {
     await cleanup();
@@ -538,15 +560,22 @@ test("--migrate re-points npx copies to the package and leaves everything else",
       assert.equal(result.code, 0, result.stderr);
     }
     const migrated = JSON.parse(await readFile(ghostFile, "utf8")).hooks.session_stop.flatMap((group) => group.hooks.map((h) => h.command));
-    assert.deepEqual(migrated, ["keep-me", `KEEP_GOING_AUDIT_LOG='/tmp/a log.jsonl' node '${hook}' ghost`]);
+    assert.deepEqual(migrated, ["keep-me", `${GUARD}KEEP_GOING_AUDIT_LOG='/tmp/a log.jsonl' keep-going hook ghost`]);
     const cursor = JSON.parse(await readFile(path.join(home, ".cursor", "hooks.json"), "utf8"));
     for (const event of ["beforeSubmitPrompt", "afterAgentResponse", "stop"]) {
-      assert.deepEqual(cursor.hooks[event].map((h) => h.command), [`KEEP_GOING_AUDIT_LOG='/tmp/a log.jsonl' node '${hook}' cursor`]);
+      assert.deepEqual(cursor.hooks[event].map((h) => h.command), [`${GUARD}KEEP_GOING_AUDIT_LOG='/tmp/a log.jsonl' keep-going hook cursor`]);
     }
+    // A hook an earlier package registered by its path moves too.
+    const museFile = path.join(configHome, "muse", "settings.json");
+    await mkdir(path.dirname(museFile), { recursive: true });
+    await writeFile(museFile, JSON.stringify({ schema_version: 1, hooks: { Stop: [{ hooks: [{ type: "command", command: `node '${hook}' muse` }] }] } }));
+    assert.equal((await runPackaged(installer, ["--migrate"], env)).code, 0);
+    const muse = JSON.parse(await readFile(museFile, "utf8"));
+    assert.deepEqual(muse.hooks.Stop.flatMap((group) => group.hooks.map((h) => h.command)), [`${GUARD}keep-going hook muse`]);
     assert.equal(await readlink(path.join(configHome, "opencode", "plugins", "keep-going.js")), path.join(lib, "extensions", "opencode.js"));
     assert.equal(await readFile(settings, "utf8"), claudeBefore);
     // Hosts never registered stay unregistered.
-    await assert.rejects(access(path.join(configHome, "muse", "settings.json")), { code: "ENOENT" });
+    await assert.rejects(access(path.join(home, ".grok", "hooks", "keep-going.json")), { code: "ENOENT" });
     const status = (await runPackaged(installer, ["--status"], env)).stdout;
     assert.doesNotMatch(status, / ! .*reviews it/);
   } finally {

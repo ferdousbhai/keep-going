@@ -16,8 +16,10 @@ work left, and answers `CONTINUE` with "Keep going." Node 22+, ESM, no runtime d
   `hookEntry` (both the build and the installer must emit identical hook entries).
 - `scripts/install.mjs` — the `npx github:ferdousbhai/keep-going --<host>` installer
   (`--link`, `--audit-log`, `--status`, `--uninstall`, `--help`); writes each host's settings file.
-  Under the Arch package (a `system-package` marker beside `scripts/`) it registers the packaged
-  hook in place, as `--link` does, and adds `--migrate` (re-point npx-copy hooks).
+  Under the Arch package (a `system-package` marker beside `scripts/`) it registers the
+  `keep-going` command itself (`keep-going hook <host>`, which runs the packaged hook; no path in
+  the command, so settings carried to another computer still work there), and adds `--migrate`
+  (re-point hooks registered at the npx copy or at the package's path).
 - Arch package: `packaging/aur/keep-going/PKGBUILD` (arch=any, installs the committed bundles to
   `/usr/lib/keep-going` and `/usr/bin/keep-going`; `pkgver` stamped by the build).
   `packaging/repo/` — the signed-repo `install.sh` (its `add_signed_repo` is shared byte-for-byte
