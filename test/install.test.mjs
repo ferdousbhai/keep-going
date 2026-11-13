@@ -388,6 +388,35 @@ test("Codex status scopes feature flags to their table, including a final table"
   }
 });
 
+test("--codex writes Codex's hooks.json beside others' hooks, and with the plugin is still one review", async () => {
+  const { codexHome, env, cleanup } = await installHome("codex-native");
+  try {
+    await mkdir(codexHome, { recursive: true });
+    const file = path.join(codexHome, "hooks.json");
+    const theirs = { hooks: [{ type: "command", command: "bash ~/.codex/state.sh session" }] };
+    await writeFile(file, JSON.stringify({ hooks: { SessionStart: [theirs] } }));
+
+    assert.equal((await runInstaller(["--codex"], env)).code, 0);
+    assert.equal((await runInstaller(["--codex"], env)).code, 0);
+    const written = JSON.parse(await readFile(file, "utf8"));
+    assert.deepEqual(written.hooks.SessionStart, [theirs]);
+    assert.equal(written.hooks.Stop.length, 1);
+    assert.match(written.hooks.Stop[0].hooks[0].command, /keep-going\.mjs' codex$/);
+
+    await writeFile(path.join(codexHome, "config.toml"), '[plugins."keep-going@keep-going"]\nenabled = true\n');
+    const status = await runInstaller(["--status"], env);
+    assert.match(status.stdout, /codex\s+registered/);
+    assert.doesNotMatch(status.stdout, /! codex has \d+ hooks/);
+
+    assert.equal((await runInstaller(["--uninstall", "--codex"], env)).code, 0);
+    const removed = JSON.parse(await readFile(file, "utf8"));
+    assert.deepEqual(removed.hooks.Stop, []);
+    assert.deepEqual(removed.hooks.SessionStart, [theirs]);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("installer requires an explicit target", async () => {
   const result = await runInstaller([], {});
   assert.equal(result.code, 1);

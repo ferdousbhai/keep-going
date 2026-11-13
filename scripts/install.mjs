@@ -41,9 +41,9 @@ const USAGE = `Usage: keep-going HOSTS [--link] [--audit-log [PATH]]
        keep-going --migrate
        keep-going hook HOST
 
-HOSTS: --claude --muse --ghost --grok --cursor --copilot --agy --opencode,
-or --all for Claude Code, Muse, Ghost, and Grok. Codex installs through its
-marketplace; see README.md.
+HOSTS: --claude --muse --ghost --grok --codex --cursor --copilot --agy
+--opencode, or --all for Claude Code, Muse, Ghost, and Grok. Codex also
+installs through its marketplace; see README.md.
 
 --link          register this checkout's hook instead of a copy
 --audit-log [P] write KEEP_GOING_AUDIT_LOG into each hook command: P, or with no
@@ -59,7 +59,9 @@ hook HOST       review a stop for HOST, as its hook: what the system package's
 const claudeConfigDir = (userHome) => process.env.CLAUDE_CONFIG_DIR || path.join(userHome, ".claude");
 
 // The hosts this installer writes to, and where each keeps its hook config.
-// Codex installs through the repository marketplace instead.
+// Codex has two ways in: the repository marketplace, a plugin its own config
+// names, and its hooks.json here, which a settings sync can carry to another
+// computer where the marketplace was never fetched.
 const TARGETS = {
   claude: ({ userHome }) => path.join(claudeConfigDir(userHome), "settings.json"),
   // Muse reads its hooks from the same settings file: a `hooks` block beside
@@ -73,6 +75,7 @@ const TARGETS = {
   // yields on Grok when this file is present, so the reviewer runs once.
   grok: ({ userHome }) =>
     path.join(process.env.GROK_HOME || path.join(userHome, ".grok"), "hooks", "keep-going.json"),
+  codex: ({ userHome }) => path.join(process.env.CODEX_HOME || path.join(userHome, ".codex"), "hooks.json"),
   cursor: ({ userHome }) => path.join(userHome, ".cursor", "hooks.json"),
   copilot: ({ userHome }) =>
     path.join(process.env.COPILOT_HOME || path.join(userHome, ".copilot"), "hooks", "keep-going.json"),
@@ -176,8 +179,10 @@ async function claudePluginSource(paths) {
   return found;
 }
 
-// Codex installs through a marketplace, so its registration is a config entry
-// rather than a hook command; it reports as one registration all the same.
+// Codex's marketplace install is a config entry rather than a hook command;
+// it reports as one registration all the same. Beside a hook in hooks.json
+// the plugin's copy yields (see yieldsToCodexNative), so the two are one
+// review.
 const codexConfig = (paths) =>
   path.join(process.env.CODEX_HOME || path.join(paths.userHome, ".codex"), "config.toml");
 
@@ -188,7 +193,7 @@ async function codexSource(paths) {
   // Only the [features] table decides this, and only when it says so: the key
   // is absent by default and the literal appears elsewhere in the file.
   const features = config.split(/^\[features\]\s*$/m)[1]?.split(/^\[/m)[0] ?? "";
-  const row = { event: "Stop", where: `plugin in ${file}`, ours: true, runner: "codex" };
+  const row = { event: "Stop", where: `plugin in ${file}`, ours: true, runner: "codex", plugin: true };
   if (/^\s*plugins\s*=\s*false/m.test(features)) {
     row.note = "has [features] plugins disabled, so its plugin never loads";
   }
@@ -208,7 +213,7 @@ const SOURCES = {
   muse: [fileSource("muse")],
   ghost: [fileSource("ghost")],
   grok: [fileSource("grok"), fileSource("claude")],
-  codex: [codexSource],
+  codex: [fileSource("codex"), codexSource],
   cursor: [fileSource("cursor")],
   copilot: [fileSource("copilot")],
   agy: [fileSource("agy")],
@@ -253,8 +258,10 @@ async function reportStatus(paths) {
       const on = ours.filter((hook) => hook.event === event);
       // Grok scanning Claude's file is expected when both are installed: that
       // copy yields, so it is coverage, not a second review.
+      // Likewise Codex's plugin beside its hooks.json: the plugin's copy yields.
       const reviewing = on.filter((hook) =>
-        !(host === "grok" && hook.runner === "claude" && on.some((other) => other.runner === "grok")));
+        !(host === "grok" && hook.runner === "claude" && on.some((other) => other.runner === "grok"))
+        && !(hook.plugin && on.some((other) => !other.plugin)));
       if (reviewing.length > 1) {
         warnings.push(`${host} has ${reviewing.length} hooks on ${event} and reviews it ${reviewing.length} times`);
       }

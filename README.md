@@ -84,7 +84,7 @@ omp plugin install github:ferdousbhai/keep-going
 
 # Muse Code, Ghost, Grok Build, Cursor CLI, Copilot CLI, Antigravity, OpenCode,
 # or Claude Code without the plugin — macOS and other Linux
-npx --yes github:ferdousbhai/keep-going --muse   # --ghost, --grok, --cursor, --copilot, --agy, --opencode, --claude, --all
+npx --yes github:ferdousbhai/keep-going --muse   # --ghost, --grok, --codex, --cursor, --copilot, --agy, --opencode, --claude, --all
 ```
 
 On Omarchy and other Arch Linux systems, install the signed package instead
@@ -104,15 +104,20 @@ The installer re-points hooks an earlier `npx` install or an earlier package
 registered for you (`keep-going --migrate`, keeping `--audit-log`); hooks
 linked to a checkout are left alone.
 
-One route per host: a plugin and an `npx` hook together review every stop
+Codex has a second route beside its marketplace: `--codex` writes the hook
+into `~/.codex/hooks.json`. That file travels with your settings, where a
+marketplace plugin has to be fetched again on each computer (`codex plugin
+marketplace upgrade keep-going`). With both, the plugin's copy stands down.
+
+One route per host otherwise: a plugin and an `npx` hook together review every stop
 twice. `--all` covers Claude Code, Muse, Ghost, and Grok. Grok also runs
 `~/.claude/settings.json` hooks, so `--claude` alone covers it; with both
 installed, the Claude copy stands down on Grok. Inside a Ghost turn — `GHOST`
 in the environment, or for Muse a Ghost conversation directory — every other
 copy stands down and Ghost reviews through its own `session_stop` hook.
 
-Installs track `main`. To pin, use a tag: `--ref v0.23.0` for Codex,
-`#v0.23.0` for `npx`, `@v0.23.0` for Pi. The Claude plugin moves only on
+Installs track `main`. To pin, use a tag: `--ref v0.24.0` for Codex,
+`#v0.24.0` for `npx`, `@v0.24.0` for Pi. The Claude plugin moves only on
 `claude plugin update`. There is no npm package.
 
 Installer flags:

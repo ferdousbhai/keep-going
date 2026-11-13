@@ -127,7 +127,7 @@ fi
 cat <<EOT
 
 Done. Register keep-going with each agent you use (as yourself, not root):
-  keep-going --claude --ghost     # or --muse, --grok, --cursor, --copilot, --agy, --opencode, --all
+  keep-going --claude --ghost     # or --muse, --grok, --codex, --cursor, --copilot, --agy, --opencode, --all
 Hooks run /usr/lib/keep-going, so updates arrive with the rest of the system:
 omarchy update (or pacman -Syu elsewhere). Check registrations: keep-going --status
 EOT

@@ -1217,6 +1217,28 @@ async function inGhostTurn(input) {
   return stat(path.join(input.cwd, ".conversation.jsonl")).then(() => true, () => false);
 }
 
+// With a hook in Codex's hooks.json, the copy its marketplace plugin runs
+// yields, so the stop is reviewed once. The plugin's copy is the one that
+// runs from inside Codex's own folder.
+async function yieldsToCodexNative(runner, scriptDirectory = import.meta.dirname) {
+  if (runner !== "codex") return false;
+  const codexHome = process.env.CODEX_HOME || path.join(homedir(), ".codex");
+  if (!`${scriptDirectory}${path.sep}`.startsWith(`${codexHome}${path.sep}`)) return false;
+  try {
+    const config = JSON.parse(await readFile(path.join(codexHome, "hooks.json"), "utf8"));
+    const groups = config?.hooks?.Stop;
+    if (!Array.isArray(groups)) return false;
+    return groups.some((group) =>
+      (Array.isArray(group?.hooks) ? group.hooks : []).some((hook) =>
+        typeof hook?.command === "string"
+        && /keep-going\.mjs\b|(?:^|[\s;])keep-going hook /.test(hook.command)
+        && hook.command.trimEnd().split(/\s+/).at(-1) === "codex"),
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function handleStop(input, runner, { runModel, delay } = {}) {
   // A reviewer's own stop (see reviewerEnv) is not a turn to review.
   if (process.env.KEEP_GOING_REVIEWING) return {};
@@ -1225,6 +1247,7 @@ async function handleStop(input, runner, { runModel, delay } = {}) {
   // none of the events its review needs; only a native Cursor hook reviews it.
   if (runner === "claude" && input.cursor_version) return {};
   if (await yieldsToGrokNative(runner)) return {};
+  if (await yieldsToCodexNative(runner)) return {};
   // GROK_HOOK_EVENT is set only by Grok's hook runner, never by Claude Code.
   if (process.env.GROK_HOOK_EVENT) runner = "grok";
   const runtime = RUNTIMES[runner];
@@ -1366,6 +1389,7 @@ export {
   parseReview,
   reviewPrompt,
   yieldsToGrokNative,
+  yieldsToCodexNative,
   resolveOwnerPrompt,
   claudeRecordKind,
   claudeOwnerText,

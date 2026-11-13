@@ -21,6 +21,7 @@ import {
   parseReview,
   reviewPrompt,
   yieldsToGrokNative,
+  yieldsToCodexNative,
   resolveOwnerPrompt,
 } from "../src/keep-going.mjs";
 import { HOOK_FILES, VERSIONED, hookConfig, hookFile, stampVersion } from "../scripts/build.mjs";
@@ -948,6 +949,33 @@ test("Grok-dispatched Claude settings are reviewed by grok, not claude", async (
     assert.equal(call.grokHookEvent, null);
   } finally {
     await context.cleanup();
+  }
+});
+
+test("Codex's plugin copy yields to a hook in its hooks.json, and nothing else does", async () => {
+  const snapshot = environmentSnapshot();
+  const home = await mkdtemp(path.join(tmpdir(), "keep-going-codex-native-"));
+  try {
+    process.env.CODEX_HOME = home;
+    const plugin = path.join(home, ".tmp", "marketplaces", "keep-going", "plugins", "keep-going", "scripts");
+    const hooks = (command) => writeFile(path.join(home, "hooks.json"), JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: "command", command }] }] },
+    }));
+    // no hooks.json: the plugin is the only review
+    assert.equal(await yieldsToCodexNative("codex", plugin), false);
+    await hooks("command -v keep-going >/dev/null || exit 0; keep-going hook codex");
+    assert.equal(await yieldsToCodexNative("codex", plugin), true);
+    // the hook in hooks.json itself runs from the package, and reviews
+    assert.equal(await yieldsToCodexNative("codex", "/usr/lib/keep-going/plugins/keep-going/scripts"), false);
+    assert.equal(await yieldsToCodexNative("claude", plugin), false);
+    // someone else's stop hook, or ours for another host, is no reason to yield
+    await hooks("bash ~/.codex/other.sh stop");
+    assert.equal(await yieldsToCodexNative("codex", plugin), false);
+    await hooks("keep-going hook claude");
+    assert.equal(await yieldsToCodexNative("codex", plugin), false);
+  } finally {
+    restoreEnvironment(snapshot);
+    await rm(home, { recursive: true, force: true });
   }
 });
 
