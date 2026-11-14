@@ -307,7 +307,7 @@ test("a covered host is still checked against its own runner", async () => {
   }
 });
 
-test("--all writes a native Grok hook beside Claude's and notes which one reviews", async () => {
+test("--all writes a native Grok hook beside Claude's", async () => {
   // Dual users need Grok's own file even though Grok also scans Claude's
   // settings; the borrowed copy yields.
   const { settings, grokHome, env, cleanup } = await installHome("all");
@@ -317,7 +317,6 @@ test("--all writes a native Grok hook beside Claude's and notes which one review
     assert.equal(installed.code, 0, installed.stderr);
     await access(settings);
     await access(grokHook);
-    assert.match(installed.stdout, /note: grok also dispatches claude's hooks; grok's own hook reviews/);
   } finally {
     await cleanup();
   }

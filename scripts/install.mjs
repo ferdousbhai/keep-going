@@ -206,8 +206,7 @@ codexSource.where = codexConfig;
 
 // Who dispatches a host's stops. Mostly its own file; Grok also dispatches
 // Claude's, and Claude also dispatches its plugins'. A host whose list names
-// another host is covered by it, which is what the install note and the
-// wrong-runtime warning need.
+// another host is covered by it, which is what the wrong-runtime warning needs.
 const SOURCES = {
   claude: [fileSource("claude"), claudePluginSource],
   muse: [fileSource("muse")],
@@ -478,15 +477,6 @@ async function main() {
     await mkdir(path.dirname(hookFile), { recursive: true });
     await copyFile(BUNDLED_HOOK, hookFile);
     await chmod(hookFile, 0o755);
-  }
-
-  for (const host of uninstall ? [] : runtimes) {
-    const coverer = coveredBy(host);
-    if (runtimes.includes(coverer)) {
-      process.stdout.write(
-        `note: ${host} also dispatches ${coverer}'s hooks; ${host}'s own hook reviews, and the ${coverer} copy is ignored there\n`,
-      );
-    }
   }
 
   for (const runner of runtimes) {
