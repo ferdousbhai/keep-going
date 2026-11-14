@@ -74,6 +74,8 @@ pi install git:github.com/ferdousbhai/keep-going
 # Codex — then start a new session
 codex plugin marketplace add ferdousbhai/keep-going
 codex plugin add keep-going@keep-going
+# or, without the marketplace, a hook in ~/.codex/hooks.json:
+npx --yes github:ferdousbhai/keep-going --codex
 
 # Claude Code — Stop and SubagentStop
 claude plugin marketplace add ferdousbhai/keep-going
@@ -84,7 +86,7 @@ omp plugin install github:ferdousbhai/keep-going
 
 # Muse Code, Ghost, Grok Build, Cursor CLI, Copilot CLI, Antigravity, OpenCode,
 # or Claude Code without the plugin — macOS and other Linux
-npx --yes github:ferdousbhai/keep-going --muse   # --ghost, --grok, --codex, --cursor, --copilot, --agy, --opencode, --claude, --all
+npx --yes github:ferdousbhai/keep-going --muse   # --ghost, --grok, --cursor, --copilot, --agy, --opencode, --claude, --all
 ```
 
 On Omarchy and other Arch Linux systems, install the signed package instead
@@ -92,7 +94,7 @@ and register hosts with its `keep-going` command:
 
 ```bash
 curl -fsSL https://ferdousbhai.com/keep-going/install.sh | sudo bash
-keep-going --ghost --claude   # as yourself; any host flags above
+keep-going --ghost --claude --codex   # as yourself; any host flags above
 ```
 
 Hooks then run the `keep-going` command (`keep-going hook <host>`), so updates
@@ -104,10 +106,28 @@ The installer re-points hooks an earlier `npx` install or an earlier package
 registered for you (`keep-going --migrate`, keeping `--audit-log`); hooks
 linked to a checkout are left alone.
 
-Codex has a second route beside its marketplace: `--codex` writes the hook
-into `~/.codex/hooks.json`. That file travels with your settings, where a
-marketplace plugin has to be fetched again on each computer (`codex plugin
-marketplace upgrade keep-going`). With both, the plugin's copy stands down.
+Codex has two routes. The marketplace plugin is the one to use on a single
+computer. `--codex` writes the hook into `~/.codex/hooks.json` instead, which
+is the one to use if you carry your settings between computers: see below.
+With both registered, the plugin's copy stands down and a stop is reviewed
+once (update the plugin to 0.24.0 or later for that: `codex plugin marketplace
+upgrade keep-going`).
+
+### On a second computer
+
+What it takes for keep-going to work on another computer that received your
+settings (a dotfiles repository, Omacloud):
+
+| Host | What to do there |
+|---|---|
+| Pi | Nothing. Pi fetches the package named in its settings the first time it starts. |
+| Claude Code, Muse, Ghost, Grok, Cursor, Copilot, Antigravity (registered with the `keep-going` command) | Install the package. The hook in the settings names no path, so it works as soon as `keep-going` is there, and lets every stop through until then. |
+| Codex, with `--codex` | The same: install the package. `hooks.json` arrived with the settings. |
+| Codex, with the marketplace plugin only | Run `codex plugin marketplace upgrade keep-going`. Codex's config names the plugin, but Codex doesn't fetch it by itself, and reviews nothing until you do. |
+| OpenCode | Run `keep-going --opencode`: its plugin is a file in OpenCode's own folder. |
+
+A hook registered by `npx` or `--link` names a path on the computer it was
+registered on, so register again on each one.
 
 One route per host otherwise: a plugin and an `npx` hook together review every stop
 twice. `--all` covers Claude Code, Muse, Ghost, and Grok. Grok also runs

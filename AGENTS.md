@@ -16,6 +16,9 @@ work left, and answers `CONTINUE` with "Keep going." Node 22+, ESM, no runtime d
   `hookEntry` (both the build and the installer must emit identical hook entries).
 - `scripts/install.mjs` — the `npx github:ferdousbhai/keep-going --<host>` installer
   (`--link`, `--audit-log`, `--status`, `--uninstall`, `--help`); writes each host's settings file.
+  Codex has two registrations: its marketplace plugin (a config entry, read by `codexSource`) and
+  `--codex`, a hook in `~/.codex/hooks.json`, which settings sync carries where a plugin isn't
+  fetched; the plugin's copy yields to it (`yieldsToCodexNative` in `src/keep-going.mjs`).
   Under the Arch package (a `system-package` marker beside `scripts/`) it registers the
   `keep-going` command itself (`keep-going hook <host>`, which runs the packaged hook; no path in
   the command, so settings carried to another computer still work there), and adds `--migrate`
