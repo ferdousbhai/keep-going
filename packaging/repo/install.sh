@@ -27,13 +27,13 @@ PACKAGES=(keep-going)
 # fingerprint), add its signed pacman repository, and keep the repository
 # across `omarchy refresh pacman`, which rewrites /etc/pacman.conf from
 # Omarchy's defaults and then runs the user's pre-refresh-pacman hooks.
-# Works as root (`sudo bash`) or as a desktop user (sudo inside). This text
-# is identical in every installer that uses it, and each repository's test
-# pins its hash: change it here and in its twins together.
+# Works as root (`sudo bash`) or as a desktop user (sudo inside). Other
+# installers carry copies, each pinned by its repository's test; a copy
+# is only as safe as its last port, so carry a change to every one.
 add_signed_repo() {
   local name="$1" release="$2" fingerprint="$3"
   local conf="/etc/pacman.d/$name.conf" include="Include = /etc/pacman.d/$name.conf"
-  local sudo='' key user home hook_dir
+  local sudo='' key user home hook_dir as_user
   (( EUID == 0 )) || sudo=sudo
   key="$(mktemp)"
   if ! curl -fsSL "$release/$name-signing-key.asc" -o "$key"; then
@@ -41,7 +41,14 @@ add_signed_repo() {
     echo "Could not download the package-signing key from $release." >&2
     return 1
   fi
-  if ! gpg --batch --with-colons --show-keys "$key" 2>/dev/null | grep -q "^fpr:*:$fingerprint:"; then
+  # Exactly one primary key, and it is the pinned one: a subkey with the
+  # pinned fingerprint, or a second primary bundled alongside, is refused.
+  if ! gpg --batch --with-colons --show-keys "$key" 2>/dev/null | awk -F: -v pin="$fingerprint" '
+    $1 == "fpr" && after_pub { primary = $10 }
+    { after_pub = 0 }
+    $1 == "pub" { pubs++; after_pub = 1 }
+    END { exit !(pubs == 1 && primary == pin) }
+  '; then
     rm -f "$key"
     echo "The downloaded key does not match the pinned fingerprint $fingerprint; nothing was changed." >&2
     return 1
@@ -75,16 +82,23 @@ add_signed_repo() {
   user="${SUDO_USER:-${USER:-$(id -un)}}"
   home="$(getent passwd "$user" | cut -d: -f6)"
   if [[ -n $home && -d $home/.config/omarchy ]]; then
+    # The home is the user's: write there as them, so a symlink in it cannot
+    # turn root's write onto a system file.
+    as_user=()
+    if (( EUID == 0 )) && [[ $(id -u "$user") != 0 ]]; then
+      as_user=(runuser -u "$user" --)
+    fi
     hook_dir="$home/.config/omarchy/hooks/pre-refresh-pacman.d"
-    install -d -o "$user" -g "$(id -gn "$user")" "$hook_dir"
+    "${as_user[@]}" mkdir -p "$hook_dir"
+    # The user's shell reads the pipe it inherits (root's pipe cannot be
+    # reopened by path once runuser drops privileges), and mv replaces the
+    # hook file, never writing through a link there.
     {
       printf '%s\n' '#!/bin/bash' 'set -euo pipefail' \
         "# Restore the [$name] repository before Omarchy's ARM source rewrite."
       declare -f restore_repo_include
       printf 'restore_repo_include %q\n' "$include"
-    } > "$hook_dir/$name"
-    chown "$user" "$hook_dir/$name"
-    chmod 755 "$hook_dir/$name"
+    } | "${as_user[@]}" bash -c 'umask 022; t=$(mktemp "$1.XXXXXX") && cat >"$t" && chmod 755 "$t" && mv -fT "$t" "$1"' _ "$hook_dir/$name"
   fi
   $sudo pacman -Sy
 }
